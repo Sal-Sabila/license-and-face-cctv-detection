@@ -1,64 +1,110 @@
+import os
+import re
+import sys
+import shutil
 import subprocess
 import numpy as np
+
+
+def find_ffmpeg_executable(custom_path="ffmpeg"):
+    """Mencari lokasi executable ffmpeg di PATH atau direktori Python."""
+    if custom_path and custom_path != "ffmpeg" and os.path.exists(custom_path):
+        return custom_path
+
+    which_path = shutil.which("ffmpeg")
+    if which_path:
+        return which_path
+
+    candidates = [
+        os.path.join(sys.prefix, "Scripts", "ffmpeg.exe"),
+        os.path.join(os.path.dirname(sys.executable), "Scripts", "ffmpeg.exe"),
+        r"C:\Users\LENOVO\AppData\Local\Programs\Python\Python312\Scripts\ffmpeg.exe",
+        r"D:\Bimaa\Magang\CCTV\venv\Scripts\ffmpeg.exe",
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+
+    return "ffmpeg"
+
+
+def normalize_stream_url(url):
+    """
+    Normalisasi URL stream CCTV:
+    1. Memperbaiki typo seperti 'GSMasukViewLuarstream' -> 'GSMasukViewLuar.stream'
+    2. Jika URL adalah RTMP dari Wowza server (103.255.15.138:1935),
+       karena Wowza mengirimkan stream HEVC (H.265) lewat RTMP FLV tag 0x0c
+       yang tidak didukung demuxer FLV bawaan FFmpeg (error: Video codec (c) is not implemented),
+       secara otomatis alihkan ke stream HLS (m3u8) resmi dari Wowza di port yang sama (1935).
+       Stream HLS ini 100% didukung FFmpeg untuk decoding H.265 secara native tanpa drop frame.
+    """
+    if not isinstance(url, str):
+        return url
+
+    url = url.strip()
+
+    if "103.255.15.138:1935" in url:
+        m = re.search(r'/live/([^/?#]+)', url)
+        if m:
+            stream_name = m.group(1).replace('/playlist.m3u8', '')
+            if stream_name.endswith('stream') and not stream_name.endswith('.stream'):
+                stream_name = stream_name[:-6] + '.stream'
+            elif not stream_name.endswith('.stream'):
+                stream_name = stream_name + '.stream'
+            return f"http://103.255.15.138:1935/live/{stream_name}/playlist.m3u8"
+
+    if url.startswith("rtmp://") and url.endswith("stream") and not url.endswith(".stream"):
+        url = url[:-6] + ".stream"
+
+    return url
 
 
 class FFmpegStreamReader:
     """
     Pengganti cv2.VideoCapture() khusus untuk stream yang codec-nya
     TIDAK didukung oleh FFmpeg bawaan opencv-python (misal H.265/HEVC).
-
-    Cara kerja:
-        1. Menjalankan FFmpeg (yang ter-install di sistem/PATH kalian,
-           yang sudah terbukti bisa decode H.265 lewat ffprobe/ffplay)
-           sebagai proses terpisah (subprocess).
-        2. FFmpeg diminta output berupa RAW VIDEO (piksel mentah,
-           format BGR24) ke stdout, BUKAN file/re-encode.
-        3. Python baca stdout itu sebagai bytes, lalu diubah jadi
-           array numpy yang bentuknya sama persis kayak frame
-           yang biasa didapat dari cv2.VideoCapture().read()
-
-    Supaya frame yang dihasilkan tetap bisa dipakai apa adanya
-    oleh detector.detect(frame), ocr_reader.read(crop), cv2.imshow(),
-    dll -- tanpa perlu ubah kode yang lain.
     """
 
     def __init__(self, rtmp_url, width, height, ffmpeg_path="ffmpeg"):
         """
-        rtmp_url    : URL stream RTMP
-        width       : lebar frame asli (dari ffprobe, misal 2688)
-        height      : tinggi frame asli (dari ffprobe, misal 1520)
-        ffmpeg_path : path ke ffmpeg.exe, default asumsi sudah di PATH
+        rtmp_url    : URL stream RTMP / RTSP / HLS
+        width       : lebar frame target
+        height      : tinggi frame target
+        ffmpeg_path : path ke ffmpeg.exe, default auto-detect
         """
 
         self.width = width
         self.height = height
+<<<<<<< Updated upstream
         self.rtmp_url = rtmp_url
         self.ffmpeg_path = ffmpeg_path
+=======
+        self.raw_url = rtmp_url
+        self.rtmp_url = normalize_stream_url(rtmp_url)
+        self.ffmpeg_path = find_ffmpeg_executable(ffmpeg_path)
+>>>>>>> Stashed changes
 
         # Ukuran 1 frame mentah dalam bytes:
         # width * height * 3 channel warna (BGR), 1 byte per channel
         self.frame_size_bytes = width * height * 3
 
         perintah = [
-            ffmpeg_path,
+            self.ffmpeg_path,
 
-            "-loglevel", "error",   # supaya stdout FFmpeg bersih,
-                                     # cuma isi data video (bukan log)
+            "-loglevel", "error",   # supaya stdout FFmpeg bersih
 
-            # Jangan menunggu selamanya jika kamera berhenti mengirim data.
+            # Timeout koneksi & reconnect untuk HTTP / HLS
+            "-reconnect", "1",
+            "-reconnect_at_eof", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "2",
             "-rw_timeout", "15000000",
 
-            "-i", rtmp_url,
+            "-i", self.rtmp_url,
 
             "-an",                  # tidak perlu audio, buang saja
 
-            # PENTING: paksa ukuran output PERSIS width x height yang kita
-            # minta. Ini menghindari mismatch ukuran akibat quirk internal
-            # H.265 (conformance window / crop yang tidak selalu sama
-            # persis dengan metadata width x height dari RTMP). Kalau
-            # ukuran tidak dipaksa di sini, hasil reshape() bisa geser
-            # sedikit demi sedikit tiap baris -> gambar jadi noise
-            # diagonal seperti yang terjadi.
+            # PENTING: paksa ukuran output PERSIS width x height yang kita minta
             "-vf", f"scale={width}:{height}",
 
             "-f", "rawvideo",       # output format: piksel mentah
