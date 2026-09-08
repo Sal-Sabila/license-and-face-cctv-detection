@@ -16,7 +16,7 @@ from tracker import PlateTracker
 # KONFIGURASI CCTV
 # ============================================================
 
-RTMP_URL = "rtmp://103.255.15.138:1935/live/GSMasukViewLuar.stream"
+RTMP_URL = "rtmp://103.255.15.138:1935/live/GSKeluarViewLuar.stream"
 
 STREAM_WIDTH = 2688
 STREAM_HEIGHT = 1520
@@ -27,10 +27,10 @@ STREAM_HEIGHT = 1520
 # ============================================================
 
 YOLO_IMGSZ = 960
-MODEL_PATH = "models/plate/license-plate-finetune-v1n.pt"
+MODEL_PATH = "models/plate/license-plate-finetune-v2n.pt"
 
 # Confidence minimal deteksi
-YOLO_CONFIDENCE = 0.22
+YOLO_CONFIDENCE = 0.50
 
 # Jalankan YOLO setiap 0.20 detik
 AI_INTERVAL = 0.20

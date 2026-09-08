@@ -21,7 +21,7 @@ RTMP_URL = (
 
 MODEL_PATH = (
     "models/plate/"
-    "license-plate-finetune-v1n.pt"
+    "license-plate-finetune-v2n.pt"
 )
 
 CONFIDENCE = 0.40
