@@ -7,6 +7,7 @@
     <title>{{ title or 'PlateVision' }}</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 
@@ -213,103 +214,447 @@
             </section>
             {% elif page == 'detections' %}
             <section class="panel shadow-sm">
-                <div class="panel-header">
+                <div class="panel-header flex-wrap gap-3">
                     <div>
-                        <h3>Hasil Deteksi</h3>
-                        <p>Data gabungan dari seluruh kamera CCTV.</p>
+                        <h3>Hasil Deteksi Terpadu</h3>
+                        <p>Data gabungan plat kendaraan dan wajah/pejalan kaki dari seluruh kamera CCTV.</p>
+                    </div>
+                    <div class="d-flex gap-2 align-items-center flex-wrap">
+                        <button type="button" class="btn-action-outline" onclick="exportDetections()">
+                            <i class="bi bi-file-earmark-spreadsheet"></i>
+                            <span>Ekspor CSV</span>
+                        </button>
                     </div>
                 </div>
+
+                <!-- Filter Bar -->
+                <div class="filter-toolbar p-3 border-bottom bg-light d-flex gap-2 flex-wrap align-items-center">
+                    <div class="btn-group btn-group-sm" role="group" id="detTypeButtonGroup">
+                        <button type="button" class="btn btn-outline-primary active" data-type="all">Semua Tipe</button>
+                        <button type="button" class="btn btn-outline-primary" data-type="plate"><i class="bi bi-card-heading"></i> Plat Nomor</button>
+                        <button type="button" class="btn btn-outline-primary" data-type="face"><i class="bi bi-person"></i> Wajah / Orang</button>
+                    </div>
+
+                    <select id="detCameraFilter" class="form-select form-select-sm" style="max-width: 180px;">
+                        <option value="">Semua Kamera</option>
+                    </select>
+
+                    <select id="detStatusFilter" class="form-select form-select-sm" style="max-width: 160px;">
+                        <option value="all">Semua Status</option>
+                        <option value="1">Terbaca / Valid</option>
+                        <option value="2">Perlu Pemeriksaan</option>
+                        <option value="0">Gagal / Buram</option>
+                    </select>
+
+                    <div class="input-group input-group-sm ms-auto" style="max-width: 240px;">
+                        <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
+                        <input id="detectionSearch" class="form-control" placeholder="Cari plat atau lokasi...">
+                    </div>
+                </div>
+
                 <div class="table-responsive">
-                    <table class="table align-middle mb-0">
+                    <table class="table align-middle mb-0 playlist-table">
                         <thead>
                             <tr>
-                                <th>Wajah / Plat</th>
+                                <th style="width: 70px;">Foto</th>
+                                <th>Target / Nilai</th>
+                                <th>Tipe</th>
                                 <th>CCTV</th>
                                 <th>Confidence</th>
-                                <th>Waktu</th>
+                                <th>Waktu Deteksi</th>
                                 <th>Status</th>
+                                <th class="text-center" style="width: 80px;">Aksi</th>
                             </tr>
                         </thead>
                         <tbody id="detectionTable">
                             <tr>
-                                <td colspan="5" class="text-center text-muted py-5">Memuat data...</td>
+                                <td colspan="8" class="text-center text-muted py-5">Memuat data...</td>
                             </tr>
                         </tbody>
                     </table>
+                </div>
+
+                <!-- Pagination Footer -->
+                <div class="panel-footer p-3 d-flex justify-content-between align-items-center flex-wrap gap-2 border-top">
+                    <div class="small text-muted" id="detPaginationInfo">Menampilkan 0 data</div>
+                    <div class="d-flex gap-2 align-items-center">
+                        <button id="detPrevBtn" class="btn btn-outline-secondary btn-sm" disabled>
+                            <i class="bi bi-chevron-left"></i> Sebelumnya
+                        </button>
+                        <span id="detPageNumber" class="small fw-bold px-2">Hal 1</span>
+                        <button id="detNextBtn" class="btn btn-outline-secondary btn-sm" disabled>
+                            Selanjutnya <i class="bi bi-chevron-right"></i>
+                        </button>
+                    </div>
                 </div>
             </section>
             {% elif page == 'history' %}
             <section class="panel shadow-sm">
-                <div class="panel-header flex-wrap">
+                <div class="panel-header flex-wrap gap-3">
                     <div>
                         <h3>Riwayat Plat Nomor</h3>
-                        <p>Data tersimpan dari proses OCR.</p>
+                        <p>Database pembacaan plat nomor kendaraan otomatis dari proses OCR.</p>
                     </div>
-                    <input id="plateSearch" class="form-control form-control-sm" style="max-width:240px"
-                        placeholder="Cari plat...">
+                    <div class="d-flex gap-2 align-items-center flex-wrap">
+                        <button type="button" class="btn-action-outline" onclick="exportPlates()">
+                            <i class="bi bi-file-earmark-spreadsheet"></i>
+                            <span>Ekspor CSV</span>
+                        </button>
+                    </div>
                 </div>
+
+                <!-- Filter Bar -->
+                <div class="filter-toolbar p-3 border-bottom bg-light d-flex gap-2 flex-wrap align-items-center">
+                    <div class="input-group input-group-sm" style="max-width: 260px;">
+                        <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
+                        <input id="plateSearch" class="form-control" placeholder="Cari plat (contoh: B 1234)...">
+                    </div>
+
+                    <select id="plateCameraFilter" class="form-select form-select-sm" style="max-width: 180px;">
+                        <option value="">Semua Kamera</option>
+                    </select>
+
+                    <select id="plateStatusFilter" class="form-select form-select-sm" style="max-width: 160px;">
+                        <option value="all">Semua Status</option>
+                        <option value="1">Terbaca / Jelas</option>
+                        <option value="2">Perlu Cek</option>
+                        <option value="0">Gagal</option>
+                    </select>
+                </div>
+
                 <div class="table-responsive">
                     <table class="table align-middle mb-0">
                         <thead>
                             <tr>
-                                <th>Plat</th>
-                                <th>CCTV</th>
+                                <th style="width: 70px;">Crop</th>
+                                <th>Nomor Plat</th>
+                                <th>Lokasi CCTV</th>
                                 <th>Confidence</th>
-                                <th>Waktu</th>
+                                <th>Waktu Terdeteksi</th>
                                 <th>Status</th>
+                                <th class="text-center" style="width: 80px;">Foto</th>
                             </tr>
                         </thead>
                         <tbody id="plateHistoryTable">
                             <tr>
-                                <td colspan="5" class="text-center text-muted py-5">Memuat data...</td>
+                                <td colspan="7" class="text-center text-muted py-5">Memuat data riwayat...</td>
                             </tr>
                         </tbody>
                     </table>
                 </div>
+
+                <!-- Pagination Footer -->
+                <div class="panel-footer p-3 d-flex justify-content-between align-items-center flex-wrap gap-2 border-top">
+                    <div class="small text-muted" id="platePaginationInfo">Menampilkan 0 data</div>
+                    <div class="d-flex gap-2 align-items-center">
+                        <button id="platePrevBtn" class="btn btn-outline-secondary btn-sm" disabled>
+                            <i class="bi bi-chevron-left"></i> Sebelumnya
+                        </button>
+                        <span id="platePageNumber" class="small fw-bold px-2">Hal 1</span>
+                        <button id="plateNextBtn" class="btn btn-outline-secondary btn-sm" disabled>
+                            Selanjutnya <i class="bi bi-chevron-right"></i>
+                        </button>
+                    </div>
+                </div>
             </section>
             {% elif page == 'statistics' %}
-            <section class="row g-4">
-                <div class="col-lg-8">
-                    <div class="panel p-4">
-                        <h3>Statistik Deteksi</h3>
-                        <p class="text-muted small">Ringkasan data dari seluruh kamera.</p>
-                        <div class="stats-bars mt-4">
-                            <div><span>Plat terbaca</span>
-                                <div class="bar"><i id="plateBar"></i></div>
+            <div class="statistics-enterprise-container">
+                <!-- Enterprise Toolbar & Period Switcher -->
+                <div class="panel shadow-sm p-3 mb-4 d-flex justify-content-between align-items-center flex-wrap gap-3">
+                    <div class="d-flex align-items-center gap-3">
+                        <div class="period-btn-group btn-group" role="group" id="statsPeriodGroup">
+                            <button type="button" class="btn btn-sm btn-outline-primary active" data-period="today">Hari Ini</button>
+                            <button type="button" class="btn btn-sm btn-outline-primary" data-period="7d">7 Hari Terakhir</button>
+                            <button type="button" class="btn btn-sm btn-outline-primary" data-period="30d">30 Hari</button>
+                            <button type="button" class="btn btn-sm btn-outline-primary" data-period="all">Semua Waktu</button>
+                        </div>
+                        <span id="statsPeriodBadge" class="badge bg-primary-subtle text-primary border border-primary-subtle px-3 py-2">Hari Ini</span>
+                    </div>
+
+                    <div class="d-flex align-items-center gap-2">
+                        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="loadEnterpriseStatistics()" title="Muat Ulang Data">
+                            <i class="bi bi-arrow-clockwise"></i> Refresh
+                        </button>
+                        <button type="button" class="btn btn-sm btn-outline-success" onclick="exportStatsReport()" title="Ekspor Rekap CSV">
+                            <i class="bi bi-file-earmark-spreadsheet"></i> Ekspor CSV
+                        </button>
+                        <button type="button" class="btn btn-sm btn-primary" onclick="window.print()" title="Cetak Laporan PDF">
+                            <i class="bi bi-printer"></i> Cetak / PDF
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 6 Executive KPI Metric Cards -->
+                <div class="row g-3 mb-4">
+                    <div class="col-xl-2 col-md-4 col-sm-6 col-12">
+                        <div class="stat-card p-3 h-100 shadow-sm">
+                            <div class="stat-icon blue"><i class="bi bi-activity"></i></div>
+                            <div class="w-100">
+                                <span class="text-muted small">Total Deteksi</span>
+                                <strong id="kpiTotalDets" class="fs-4 d-block my-1">0</strong>
+                                <small class="text-success"><i class="bi bi-arrow-up-right"></i> Volume aktivitas</small>
                             </div>
-                            <div><span>Wajah terdeteksi</span>
-                                <div class="bar"><i id="faceBar"></i></div>
+                        </div>
+                    </div>
+                    <div class="col-xl-2 col-md-4 col-sm-6 col-12">
+                        <div class="stat-card p-3 h-100 shadow-sm">
+                            <div class="stat-icon green"><i class="bi bi-card-heading"></i></div>
+                            <div class="w-100">
+                                <span class="text-muted small">Deteksi Plat</span>
+                                <strong id="kpiTotalPlates" class="fs-4 d-block my-1">0</strong>
+                                <small class="text-muted">Read Rate: <b id="kpiPlateRate" class="text-success">0%</b></small>
                             </div>
-                            <div><span>Perlu pemeriksaan</span>
-                                <div class="bar"><i id="checkBar"></i></div>
+                        </div>
+                    </div>
+                    <div class="col-xl-2 col-md-4 col-sm-6 col-12">
+                        <div class="stat-card p-3 h-100 shadow-sm">
+                            <div class="stat-icon purple"><i class="bi bi-people-fill"></i></div>
+                            <div class="w-100">
+                                <span class="text-muted small">Wajah / Pengendara</span>
+                                <strong id="kpiTotalFaces" class="fs-4 d-block my-1">0</strong>
+                                <small class="text-muted">Total orang terpantau</small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-xl-2 col-md-4 col-sm-6 col-12">
+                        <div class="stat-card p-3 h-100 shadow-sm">
+                            <div class="stat-icon blue"><i class="bi bi-shield-check"></i></div>
+                            <div class="w-100">
+                                <span class="text-muted small">Akurasi Rata-rata AI</span>
+                                <strong id="kpiAvgConf" class="fs-4 d-block my-1">0%</strong>
+                                <small class="text-info">Model SLA Score</small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-xl-2 col-md-4 col-sm-6 col-12">
+                        <div class="stat-card p-3 h-100 shadow-sm">
+                            <div class="stat-icon orange"><i class="bi bi-exclamation-triangle-fill"></i></div>
+                            <div class="w-100">
+                                <span class="text-muted small">Perlu Verifikasi</span>
+                                <strong id="kpiNeedCheck" class="fs-4 d-block my-1 text-warning">0</strong>
+                                <small class="text-warning">Confidence &lt; 70%</small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-xl-2 col-md-4 col-sm-6 col-12">
+                        <div class="stat-card p-3 h-100 shadow-sm">
+                            <div class="stat-icon green"><i class="bi bi-camera-video-fill"></i></div>
+                            <div class="w-100">
+                                <span class="text-muted small">Ketersediaan CCTV</span>
+                                <strong id="kpiCamStatus" class="fs-4 d-block my-1">0 / 0</strong>
+                                <small class="text-muted">Uptime: <b id="kpiCamUptime">0%</b></small>
                             </div>
                         </div>
                     </div>
                 </div>
-                <div class="col-lg-4">
-                    <div class="panel p-4">
-                        <h3>Ringkasan</h3>
-                        <div class="system-metric"><span>Total data</span><strong id="storedCount">0</strong></div>
-                        <div class="system-metric"><span>Kamera aktif</span><strong id="activeCameras">0</strong></div>
+
+                <!-- Row 1: Tren Waktu Nyata & Donut SLA -->
+                <div class="row g-4 mb-4">
+                    <div class="col-xl-8 col-lg-7">
+                        <div class="panel p-4 shadow-sm h-100">
+                            <div class="d-flex justify-content-between align-items-center mb-3">
+                                <div>
+                                    <h4 class="fw-bold mb-1">Tren Volume Deteksi Waktu Nyata</h4>
+                                    <p class="text-muted small mb-0">Analisis perbandingan deteksi plat kendaraan vs wajah/orang sepanjang waktu.</p>
+                                </div>
+                                <span class="badge bg-light text-dark border">Chart.js Analytics</span>
+                            </div>
+                            <div style="position: relative; height: 320px; width: 100%;">
+                                <canvas id="trendChartCanvas"></canvas>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-xl-4 col-lg-5">
+                        <div class="panel p-4 shadow-sm h-100">
+                            <div class="d-flex justify-content-between align-items-center mb-3">
+                                <div>
+                                    <h4 class="fw-bold mb-1">Kualitas Deteksi AI (SLA)</h4>
+                                    <p class="text-muted small mb-0">Distribusi tingkat kepercayaan klasifikasi.</p>
+                                </div>
+                            </div>
+                            <div style="position: relative; height: 230px; width: 100%;">
+                                <canvas id="qualityDonutCanvas"></canvas>
+                            </div>
+                            <div class="d-flex justify-content-around text-center mt-3 pt-2 border-top">
+                                <div>
+                                    <span class="badge rounded-pill bg-success-subtle text-success border border-success-subtle px-2 py-1">Valid (Jelas)</span>
+                                    <h6 id="donutValValid" class="fw-bold mt-1 mb-0">0</h6>
+                                </div>
+                                <div>
+                                    <span class="badge rounded-pill bg-warning-subtle text-warning border border-warning-subtle px-2 py-1">Perlu Cek</span>
+                                    <h6 id="donutValWarning" class="fw-bold mt-1 mb-0">0</h6>
+                                </div>
+                                <div>
+                                    <span class="badge rounded-pill bg-danger-subtle text-danger border border-danger-subtle px-2 py-1">Gagal</span>
+                                    <h6 id="donutValFailed" class="fw-bold mt-1 mb-0">0</h6>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
-            </section>
+
+                <!-- Row 2: Distribusi CCTV & Analisis Jam Sibuk -->
+                <div class="row g-4 mb-4">
+                    <div class="col-xl-7 col-lg-6">
+                        <div class="panel p-4 shadow-sm h-100">
+                            <div class="d-flex justify-content-between align-items-center mb-3">
+                                <div>
+                                    <h4 class="fw-bold mb-1">Beban Lalu Lintas per Titik CCTV</h4>
+                                    <p class="text-muted small mb-0">Intensitas aktivitas kendaraan dan pejalan kaki per kamera.</p>
+                                </div>
+                            </div>
+                            <div style="position: relative; height: 260px; width: 100%;">
+                                <canvas id="cameraBarCanvas"></canvas>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-xl-5 col-lg-6">
+                        <div class="panel p-4 shadow-sm h-100">
+                            <div class="d-flex justify-content-between align-items-center mb-3">
+                                <div>
+                                    <h4 class="fw-bold mb-1">Analisis Jam Sibuk (Peak Hours)</h4>
+                                    <p class="text-muted small mb-0">Waktu dengan kepadatan lalu lintas tertinggi.</p>
+                                </div>
+                                <span class="badge bg-danger-subtle text-danger border border-danger-subtle"><i class="bi bi-clock-history"></i> Peak Time</span>
+                            </div>
+                            <div id="peakHoursList" class="d-flex flex-column gap-3 mt-3">
+                                <div class="text-muted text-center py-4">Memuat data jam sibuk...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Row 3: Top 10 Plat Paling Sering Terdeteksi -->
+                <div class="panel shadow-sm p-4">
+                    <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                        <div>
+                            <h4 class="fw-bold mb-1">Top 10 Kendaraan / Plat Paling Sering Terdeteksi</h4>
+                            <p class="text-muted small mb-0">Frekuensi kemunculan kendaraan keluar-masuk area pemantauan.</p>
+                        </div>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table align-middle mb-0">
+                            <thead>
+                                <tr>
+                                    <th style="width: 60px;">#</th>
+                                    <th>Nomor Plat</th>
+                                    <th>Frekuensi Melintas</th>
+                                    <th>Kamera Terakhir</th>
+                                    <th>Waktu Terakhir Terlihat</th>
+                                    <th>Akurasi Rata-rata</th>
+                                    <th>Status Terakhir</th>
+                                </tr>
+                            </thead>
+                            <tbody id="topPlatesTable">
+                                <tr>
+                                    <td colspan="7" class="text-center text-muted py-4">Memuat data kendaraan...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
             {% elif page == 'settings' %}
-            <section class="panel shadow-sm p-4">
-                <h3>Pengaturan Sistem</h3>
-                <p class="text-muted small">Pengaturan ini tersimpan pada browser operator.</p>
-                <form id="settingsForm" class="row g-3 mt-1">
-                    <div class="col-md-6"><label class="form-label small fw-semibold">Nama operator</label><input
-                            id="operatorName" class="form-control" value="Administrator"></div>
-                    <div class="col-md-6"><label class="form-label small fw-semibold">Interval refresh
-                            (detik)</label><input id="refreshInterval" class="form-control" type="number" min="1"
-                            value="2"></div>
-                    <div class="col-12"><label class="form-label small fw-semibold">URL RTMP CCTV
-                            aktif</label><input id="streamUrl" class="form-control" placeholder="rtmp://..."></div>
-                    <div class="col-12"><button class="btn btn-primary">Simpan Pengaturan</button><span
-                            id="settingsMessage" class="small text-success ms-3"></span></div>
-                </form>
-            </section>
+            <div class="row g-4">
+                <!-- System Diagnostics Card -->
+                <div class="col-xl-4 col-lg-5">
+                    <div class="panel shadow-sm p-4 h-100">
+                        <div class="d-flex align-items-center gap-2 mb-3">
+                            <div class="stat-icon blue"><i class="bi bi-cpu-fill"></i></div>
+                            <div>
+                                <h4 class="fw-bold mb-0">Status Sistem</h4>
+                                <small class="text-muted">Kesehatan & Diagnostik</small>
+                            </div>
+                        </div>
+
+                        <ul class="list-group list-group-flush small mb-4">
+                            <li class="list-group-item d-flex justify-content-between align-items-center px-0">
+                                <span>Koneksi MySQL (Laragon)</span>
+                                <span id="diagDbStatus" class="badge bg-success-subtle text-success border border-success-subtle">Terhubung</span>
+                            </li>
+                            <li class="list-group-item d-flex justify-content-between align-items-center px-0">
+                                <span>Database Aktif</span>
+                                <strong id="diagDbName" class="text-dark">real_cctv</strong>
+                            </li>
+                            <li class="list-group-item d-flex justify-content-between align-items-center px-0">
+                                <span>Total Deteksi Tersimpan</span>
+                                <strong id="diagTotalDets" class="text-dark">0</strong>
+                            </li>
+                            <li class="list-group-item d-flex justify-content-between align-items-center px-0">
+                                <span>Total Plat di Database</span>
+                                <strong id="diagTotalPlates" class="text-dark">0</strong>
+                            </li>
+                            <li class="list-group-item d-flex justify-content-between align-items-center px-0">
+                                <span>Penyimpanan Foto Capture</span>
+                                <strong id="diagStorage" class="text-dark">0 MB (0 files)</strong>
+                            </li>
+                            <li class="list-group-item d-flex justify-content-between align-items-center px-0">
+                                <span>Waktu Server</span>
+                                <strong id="diagServerTime" class="text-muted">-</strong>
+                            </li>
+                        </ul>
+
+                        <div class="p-3 bg-light rounded border">
+                            <strong class="d-block mb-1 text-dark"><i class="bi bi-magic"></i> Simulasi Data Korporat</strong>
+                            <p class="text-muted small mb-2">Isi database dengan data simulasi realistis untuk keperluan pengujian atau presentasi analitik.</p>
+                            <button type="button" class="btn btn-outline-primary btn-sm w-100" id="btnSeedDemoData" onclick="seedDemoData()">
+                                <i class="bi bi-database-fill-add"></i> Generate Data Simulasi (+35 data)
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Settings Form -->
+                <div class="col-xl-8 col-lg-7">
+                    <div class="panel shadow-sm p-4 h-100">
+                        <h4 class="fw-bold mb-1">Pengaturan Operasional Sistem</h4>
+                        <p class="text-muted small mb-4">Pengaturan ini tersimpan permanen di database MySQL (tabel <code>system_settings</code>).</p>
+
+                        <form id="settingsForm" class="row g-3">
+                            <div class="col-md-6">
+                                <label class="form-label small fw-semibold">Nama Operator / Petugas</label>
+                                <input id="operatorName" class="form-control" placeholder="Administrator">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small fw-semibold">Nama Perusahaan / Institusi</label>
+                                <input id="companyName" class="form-control" placeholder="PT CCTV Security Solusindo">
+                            </div>
+
+                            <div class="col-md-6">
+                                <label class="form-label small fw-semibold">Interval Refresh Dashboard (detik)</label>
+                                <input id="refreshInterval" class="form-control" type="number" min="1" max="60" value="2">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small fw-semibold">Judul Sistem</label>
+                                <input id="systemTitle" class="form-control" placeholder="PlateVision Enterprise Monitoring">
+                            </div>
+
+                            <div class="col-md-6">
+                                <label class="form-label small fw-semibold">Batas Minimum Akurasi Plat (%)</label>
+                                <input id="minConfPlate" class="form-control" type="number" min="10" max="99" value="70">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label small fw-semibold">Batas Minimum Akurasi Wajah (%)</label>
+                                <input id="minConfFace" class="form-control" type="number" min="10" max="99" value="65">
+                            </div>
+
+                            <div class="col-12">
+                                <label class="form-label small fw-semibold">URL Default CCTV Stream</label>
+                                <input id="streamUrl" class="form-control" placeholder="http://.../playlist.m3u8 atau rtmp://...">
+                            </div>
+
+                            <div class="col-12 mt-4 d-flex align-items-center gap-3">
+                                <button type="submit" class="btn btn-primary">
+                                    <i class="bi bi-check2-circle"></i> Simpan Pengaturan ke Database
+                                </button>
+                                <span id="settingsMessage" class="small fw-semibold text-success"></span>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
             {% endif %}
         </main>
     </div>
@@ -343,6 +688,30 @@
                         <button type="submit" class="btn btn-primary">Simpan Kamera</button>
                     </div>
                 </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal Preview Foto Deteksi -->
+    <div class="modal fade" id="imagePreviewModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered modal-lg">
+            <div class="modal-content border-0 shadow-lg">
+                <div class="modal-header border-0 pb-0">
+                    <div>
+                        <h5 class="modal-title fw-bold" id="imagePreviewTitle">Detail Foto Tangkapan CCTV</h5>
+                        <p class="text-muted small mb-0" id="imagePreviewMeta"></p>
+                    </div>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body text-center p-3">
+                    <div class="preview-img-container rounded p-2 bg-dark d-flex align-items-center justify-content-center" style="min-height: 280px; max-height: 520px; overflow: hidden;">
+                        <img id="imagePreviewSrc" src="" alt="Capture" class="img-fluid rounded" style="max-height: 480px; object-fit: contain;">
+                    </div>
+                </div>
+                <div class="modal-footer border-0 pt-0 justify-content-between">
+                    <div id="imagePreviewDetails" class="small text-muted"></div>
+                    <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Tutup</button>
+                </div>
             </div>
         </div>
     </div>

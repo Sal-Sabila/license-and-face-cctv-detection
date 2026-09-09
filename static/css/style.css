@@ -1073,3 +1073,70 @@ select {
     gap: 6px;
 }
 
+/* ============================================================
+   ENTERPRISE STATISTICS & ANALYTICS STYLING
+   ============================================================ */
+
+.statistics-enterprise-container {
+    width: 100%;
+}
+
+.period-btn-group .btn {
+    font-weight: 500;
+    font-size: 0.82rem;
+    padding: 0.35rem 0.75rem;
+}
+
+.period-btn-group .btn.active {
+    background-color: var(--primary);
+    color: #ffffff;
+    border-color: var(--primary);
+}
+
+.filter-toolbar {
+    background: #f8fafc;
+    border-radius: 8px 8px 0 0;
+}
+
+.preview-img-container {
+    background: #0f172a;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* Print Styling for Executive PDF / Print Reports */
+@media print {
+    .sidebar,
+    .sidebar-backdrop,
+    .topbar-actions,
+    .sidebar-toggle-btn,
+    .period-btn-group,
+    .btn-action-outline,
+    .btn,
+    .panel-footer {
+        display: none !important;
+    }
+
+    .app-layout {
+        display: block !important;
+        background: #ffffff !important;
+    }
+
+    .main-panel {
+        padding: 0 !important;
+        margin: 0 !important;
+        max-width: 100% !important;
+    }
+
+    .panel {
+        box-shadow: none !important;
+        border: 1px solid #e2e8f0 !important;
+        break-inside: avoid;
+    }
+
+    body {
+        background: #ffffff !important;
+        color: #000000 !important;
+    }
+}
+
+
