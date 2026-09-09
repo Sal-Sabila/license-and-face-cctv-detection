@@ -77,6 +77,7 @@ class FFmpegStreamReader:
         self.height = height
         self.rtmp_url = rtmp_url
         self.ffmpeg_path = ffmpeg_path
+        self.error_message = None
 
         # Ukuran 1 frame mentah dalam bytes:
         # width * height * 3 channel warna (BGR), 1 byte per channel
@@ -109,7 +110,7 @@ class FFmpegStreamReader:
         self.process = subprocess.Popen(
             perintah,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
         )
 
     def reconnect(self):
@@ -158,11 +159,23 @@ class FFmpegStreamReader:
             if not chunk:
 
                 # FFmpeg berhenti mengirim data -> stream putus
+                self._capture_error()
                 return None
 
             potongan_data.extend(chunk)
 
         return bytes(potongan_data)
+
+    def _capture_error(self):
+        """Menyimpan pesan FFmpeg terakhir untuk diagnosis operator."""
+        if self.process is None or self.process.stderr is None:
+            return
+        try:
+            error = self.process.stderr.read().decode("utf-8", errors="replace").strip()
+            if error:
+                self.error_message = error[-500:]
+        except (OSError, ValueError):
+            pass
 
     def read(self):
         """

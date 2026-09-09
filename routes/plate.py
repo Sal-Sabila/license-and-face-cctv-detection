@@ -1,5 +1,8 @@
 import time
 import cv2
+import csv
+import io
+import numpy as np
 from flask import Blueprint, jsonify, request, Response
 from datetime import datetime
 import db
@@ -95,18 +98,88 @@ def delete_camera(camera_id):
 
 
 # ============================================================
-# ENDPOINT RIWAYAT DETEKSI (TERHUBUNG KE MYSQL REAL_CCTV)
+# ENDPOINT HASIL DETEKSI GABUNGAN (TERHUBUNG KE MYSQL REAL_CCTV)
+# ============================================================
+
+@plate_bp.route("/detections", methods=["GET"])
+def list_detections():
+    """Mengambil daftar deteksi gabungan (Plat & Wajah) dengan paginasi dan filter."""
+    page = request.args.get("page", 1, type=int)
+    limit = request.args.get("limit", 20, type=int)
+    type_filter = request.args.get("type", "all")
+    status_filter = request.args.get("status", "all")
+    camera_id = request.args.get("camera_id", type=int)
+    search = request.args.get("search", type=str)
+    start_date = request.args.get("start_date", type=str)
+    end_date = request.args.get("end_date", type=str)
+
+    try:
+        res = db.get_all_detections_paginated(
+            page=page,
+            limit=limit,
+            type_filter=type_filter,
+            status_filter=status_filter,
+            camera_id=camera_id,
+            search=search,
+            start_date=start_date,
+            end_date=end_date
+        )
+        return jsonify({
+            "success": True,
+            "data": res["items"],
+            "total": res["total"],
+            "page": res["page"],
+            "limit": res["limit"],
+            "total_pages": res["total_pages"]
+        })
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e), "data": []}), 500
+
+
+# ============================================================
+# ENDPOINT RIWAYAT DETEKSI PLAT & WAJAH
 # ============================================================
 
 @plate_bp.route("/plate/history", methods=["GET"])
 def plate_history():
-    """Mengambil riwayat deteksi plat nomor dari database MySQL."""
+    """Mengambil riwayat deteksi plat nomor dari database MySQL dengan filter & paginasi."""
+    # Dukung paginasi jika parameter page atau search dikirimkan
+    if "page" in request.args or "search" in request.args or "limit" in request.args:
+        page = request.args.get("page", 1, type=int)
+        limit = request.args.get("limit", 20, type=int)
+        search = request.args.get("search", type=str)
+        camera_id = request.args.get("camera_id", type=int)
+        status_filter = request.args.get("status", "all")
+        start_date = request.args.get("start_date", type=str)
+        end_date = request.args.get("end_date", type=str)
+
+        try:
+            res = db.get_plate_history_paginated(
+                page=page,
+                limit=limit,
+                search=search,
+                camera_id=camera_id,
+                status_filter=status_filter,
+                start_date=start_date,
+                end_date=end_date
+            )
+            return jsonify({
+                "success": True,
+                "data": res["items"],
+                "total": res["total"],
+                "page": res["page"],
+                "limit": res["limit"],
+                "total_pages": res["total_pages"]
+            })
+        except Exception as e:
+            return jsonify({"success": False, "message": str(e), "data": []}), 500
+
+    # Default legacy endpoint (mengambil list 100 terbaru)
     try:
         records = db.get_recent_detections(limit=100)
         plate_list = []
         for r in records:
             if r.get("plate_number"):
-                # Status: 1=Terbaca (success), 2=Perlu cek (warning), 0=Gagal
                 status_text = "Terbaca" if r.get("plate_status") == 1 else ("Perlu cek" if r.get("plate_status") == 2 else "Gagal")
                 conf = float(r.get("plate_confidence") or 0.0)
                 dt_str = r["detected_at"].strftime("%Y-%m-%d %H:%M:%S") if isinstance(r.get("detected_at"), datetime) else str(r.get("detected_at") or "")
@@ -170,15 +243,200 @@ def latest_face():
 
 
 # ============================================================
-# ENDPOINT STATISTIK DASHBOARD
+# ENDPOINT STATISTIK DASHBOARD & ENTERPRISE
 # ============================================================
 
 @plate_bp.route("/statistics/summary", methods=["GET"])
 def stats_summary():
-    """Statistik agregat langsung dari MySQL."""
+    """Statistik ringkasan agregat langsung dari MySQL."""
     try:
         stats = db.get_dashboard_stats()
         return jsonify({"success": True, "data": stats})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@plate_bp.route("/statistics/enterprise", methods=["GET"])
+def stats_enterprise():
+    """
+    Statistik analitik komprehensif standar perusahaan:
+    - 6 KPI Korporat
+    - Time-series trend (per jam atau per hari)
+    - Distribusi beban CCTV
+    - Status breakdown SLA (Donut)
+    - Analisis Jam Sibuk
+    - Top 10 Plat Kendaraan
+    """
+    period = request.args.get("period", "today")
+    try:
+        data = db.get_enterprise_statistics(period=period)
+        return jsonify({"success": True, "data": data})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+# ============================================================
+# ENDPOINT PENGATURAN SISTEM (TERHUBUNG KE MYSQL REAL_CCTV)
+# ============================================================
+
+@plate_bp.route("/settings", methods=["GET"])
+def get_settings():
+    """Mengambil konfigurasi sistem & status diagnostik dari MySQL."""
+    try:
+        settings = db.get_system_settings()
+        diagnostics = db.get_system_diagnostics()
+        return jsonify({
+            "success": True,
+            "settings": settings,
+            "diagnostics": diagnostics
+        })
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@plate_bp.route("/settings", methods=["POST"])
+def save_settings():
+    """Menyimpan konfigurasi sistem ke tabel system_settings di database MySQL."""
+    data = request.get_json(silent=True) or {}
+    try:
+        db.update_system_settings(data)
+        return jsonify({
+            "success": True,
+            "message": "Pengaturan sistem berhasil disimpan ke database MySQL."
+        })
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@plate_bp.route("/settings/seed-demo", methods=["POST"])
+def seed_demo():
+    """Mengisi database dengan data simulasi realistis untuk keperluan pengujian/presentasi."""
+    data = request.get_json(silent=True) or {}
+    count = int(data.get("count", 35))
+    try:
+        inserted = db.seed_demo_data(count=count)
+        return jsonify({
+            "success": True,
+            "message": f"{inserted} data deteksi simulasi berhasil ditambahkan ke database.",
+            "inserted": inserted
+        })
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+# ============================================================
+# ENDPOINT EKSPOR DATA KE CSV (STANDAR LAPORAN AUDIT PERUSAHAAN)
+# ============================================================
+
+@plate_bp.route("/export/detections", methods=["GET"])
+def export_detections_csv():
+    """Mengekspor seluruh data deteksi ke format CSV."""
+    try:
+        res = db.get_all_detections_paginated(page=1, limit=5000)
+        items = res.get("items", [])
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["ID", "Tipe", "Nomor Plat", "Kamera CCTV", "Confidence (%)", "Waktu Deteksi", "Status"])
+
+        for it in items:
+            writer.writerow([
+                it["id"],
+                it["type"],
+                it["plate"],
+                it["camera"],
+                it["confidence_percent"],
+                it["timestamp"],
+                it["status"]
+            ])
+
+        output.seek(0)
+        return Response(
+            output.getvalue(),
+            mimetype="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=laporan_deteksi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"}
+        )
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@plate_bp.route("/export/plates", methods=["GET"])
+def export_plates_csv():
+    """Mengekspor riwayat plat nomor ke format CSV."""
+    try:
+        res = db.get_plate_history_paginated(page=1, limit=5000)
+        items = res.get("items", [])
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["ID Plat", "Nomor Plat", "Kamera CCTV", "Confidence (%)", "Waktu Deteksi", "Status"])
+
+        for it in items:
+            writer.writerow([
+                it["id"],
+                it["plate"],
+                it["camera"],
+                it["confidence_percent"],
+                it["timestamp"],
+                it["status"]
+            ])
+
+        output.seek(0)
+        return Response(
+            output.getvalue(),
+            mimetype="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=riwayat_plat_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"}
+        )
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@plate_bp.route("/export/statistics", methods=["GET"])
+def export_statistics_csv():
+    """Mengekspor laporan statistik analitik eksekutif ke CSV."""
+    period = request.args.get("period", "today")
+    try:
+        data = db.get_enterprise_statistics(period=period)
+        kpi = data.get("kpi", {})
+        top_plates = data.get("top_plates", [])
+        cam_dist = data.get("camera_distribution", [])
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        writer.writerow(["LAPORAN EKSEKUTIF ANALITIK CCTV - PLATEVISION"])
+        writer.writerow(["Periode", data.get("period_label", period)])
+        writer.writerow(["Tanggal Cetak", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+        writer.writerow([])
+
+        writer.writerow(["RINGKASAN KPI UTAMA"])
+        writer.writerow(["Metrik", "Nilai"])
+        writer.writerow(["Total Deteksi", kpi.get("total_detections", 0)])
+        writer.writerow(["Total Plat Nomor", kpi.get("total_plates", 0)])
+        writer.writerow(["Total Wajah / Orang", kpi.get("total_faces", 0)])
+        writer.writerow(["Plate Recognition Rate (%)", f"{kpi.get('plate_read_rate', 0)}%"])
+        writer.writerow(["Rata-rata Akurasi AI (%)", f"{kpi.get('avg_confidence', 0)}%"])
+        writer.writerow(["Perlu Review Manual", kpi.get("need_check_count", 0)])
+        writer.writerow(["Kamera Aktif", f"{kpi.get('active_cameras', 0)} / {kpi.get('total_cameras', 0)}"])
+        writer.writerow([])
+
+        writer.writerow(["DISTRIBUSI LALU LINTAS PER KAMERA CCTV"])
+        writer.writerow(["Nama CCTV", "Total Deteksi", "Plat", "Wajah", "Pangsa (%)"])
+        for c in cam_dist:
+            writer.writerow([c["camera_name"], c["total_count"], c["plate_count"], c["face_count"], f"{c['percentage']}%"])
+        writer.writerow([])
+
+        writer.writerow(["TOP 10 PLAT PALING SERING TERDETEKSI"])
+        writer.writerow(["Nomor Plat", "Frekuensi", "Lokasi Terakhir", "Waktu Terakhir", "Status"])
+        for tp in top_plates:
+            writer.writerow([tp["plate_number"], tp["total_seen"], tp["last_camera"], tp["last_seen"], tp["status"]])
+
+        output.seek(0)
+        return Response(
+            output.getvalue(),
+            mimetype="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=laporan_statistik_{period}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"}
+        )
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
@@ -201,11 +459,24 @@ def generate_mjpeg_stream(stream_url, width=960, height=540, draw_bbox=True, cam
             print(f"[AI STREAM WARNING] AI Service load error: {e}")
 
     try:
+        failed_reads = 0
         while True:
             ret, frame = reader.read()
             if not ret or frame is None:
-                time.sleep(0.04)
-                continue
+                failed_reads += 1
+                if failed_reads < 3 and reader.isOpened():
+                    time.sleep(0.2)
+                    continue
+
+                error_frame = np.zeros((height, width, 3), dtype=np.uint8)
+                cv2.putText(error_frame, "STREAM CCTV TIDAK TERSEDIA", (30, 70), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (80, 180, 255), 2)
+                error_message = reader.error_message or "FFmpeg tidak menerima frame dari sumber CCTV"
+                cv2.putText(error_frame, error_message[:110], (30, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1)
+                ret, buffer = cv2.imencode('.jpg', error_frame)
+                if ret:
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+                break
 
             # Jalankan deteksi & gambar bounding box jika aktif
             if ai_service is not None and draw_bbox:
