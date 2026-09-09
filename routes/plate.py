@@ -136,6 +136,17 @@ def list_detections():
         return jsonify({"success": False, "message": str(e), "data": []}), 500
 
 
+@plate_bp.route("/detections/<int:detection_id>", methods=["DELETE"])
+def delete_detection(detection_id):
+    """Menghapus satu histori deteksi beserta data turunannya."""
+    try:
+        if not db.delete_detection(detection_id):
+            return jsonify({"success": False, "message": "Deteksi tidak ditemukan"}), 404
+        return jsonify({"success": True, "message": "Deteksi berhasil dihapus"})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
 # ============================================================
 # ENDPOINT RIWAYAT DETEKSI PLAT & WAJAH
 # ============================================================
@@ -197,6 +208,17 @@ def plate_history():
         return jsonify({"success": True, "data": plate_list})
     except Exception as e:
         return jsonify({"success": False, "message": str(e), "data": []}), 500
+
+
+@plate_bp.route("/plate/history/<int:plate_id>", methods=["DELETE"])
+def delete_plate_history(plate_id):
+    """Menghapus satu histori plat beserta event dan capture terkait."""
+    try:
+        if not db.delete_plate(plate_id):
+            return jsonify({"success": False, "message": "Riwayat plat tidak ditemukan"}), 404
+        return jsonify({"success": True, "message": "Riwayat plat berhasil dihapus"})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
 
 
 @plate_bp.route("/plate/latest", methods=["GET"])
@@ -451,12 +473,12 @@ def generate_mjpeg_stream(stream_url, width=960, height=540, draw_bbox=True, cam
     reader = FFmpegStreamReader(norm_url, width=width, height=height)
 
     ai_service = None
-    if draw_bbox:
-        try:
-            from services.stream_ai_service import StreamAIService
-            ai_service = StreamAIService.get_instance()
-        except Exception as e:
-            print(f"[AI STREAM WARNING] AI Service load error: {e}")
+    try:
+        from services.stream_ai_service import StreamAIService
+        # AI tetap dijalankan walaupun visual bounding box dimatikan.
+        ai_service = StreamAIService.get_instance()
+    except Exception as e:
+        print(f"[AI STREAM WARNING] AI Service load error: {e}")
 
     try:
         failed_reads = 0
@@ -479,11 +501,11 @@ def generate_mjpeg_stream(stream_url, width=960, height=540, draw_bbox=True, cam
                 break
 
             # Jalankan deteksi & gambar bounding box jika aktif
-            if ai_service is not None and draw_bbox:
+            if ai_service is not None:
                 try:
-                    frame = ai_service.process_frame(frame, draw_bbox=True, camera_id=camera_id)
+                    frame = ai_service.process_frame(frame, draw_bbox=draw_bbox, camera_id=camera_id)
                 except Exception as e:
-                    pass
+                    print(f"[AI STREAM ERROR] Frame processing failed: {e}")
 
             ret, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
             if not ret:

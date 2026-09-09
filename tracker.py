@@ -387,13 +387,13 @@ class PlateTracker:
 
         max_frame_gap=30,
 
-        ocr_every_n_matches=3,
+        ocr_every_n_matches=5,
 
         # OCR minimum
         min_ocr_confidence=0.60,
 
         # Final OCR minimum
-        min_final_confidence=0.60,
+        min_final_confidence=0.55,
 
         # Minimal jumlah bacaan yang sama
         min_consistent_reads=2,
