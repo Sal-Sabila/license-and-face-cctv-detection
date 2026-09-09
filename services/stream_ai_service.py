@@ -19,114 +19,135 @@ PERSON_MODEL_PATH = os.path.join(BASE_DIR, "yolov8n.pt")
 PLATE_MODEL_PATH = os.path.join(BASE_DIR, "models", "plate", "license-plate-finetune-v2n.pt")
 
 
+import threading
+
 class StreamAIService:
     _instance = None
+    _init_lock = threading.Lock()
 
     @classmethod
     def get_instance(cls):
         if cls._instance is None:
-            cls._instance = cls()
+            with cls._init_lock:
+                if cls._instance is None:
+                    cls._instance = cls()
         return cls._instance
 
     def __init__(self):
         print("[AI STREAM] Inisialisasi model YOLO dan OCR...")
+        self.lock = threading.Lock()
         self.yolo_person = YOLO(PERSON_MODEL_PATH)
         self.plate_detector = PlateDetector(PLATE_MODEL_PATH)
         self.plate_ocr = PlateOCR()
 
-        # ByteTrack untuk tracking orang / kendaraan
-        self.person_tracker = sv.ByteTrack(
-            track_activation_threshold=0.35,
-            lost_track_buffer=60,
-            minimum_matching_threshold=0.7,
-            frame_rate=25
-        )
+        # ByteTrack per kamera: camera_id -> sv.ByteTrack instance
+        self.trackers = {}
 
         # Cache untuk melacak track yang sudah di-capture (mencegah duplicate insert)
-        # track_id -> timestamp capture terakhir
+        # (camera_id, key) -> timestamp capture terakhir
         self.captured_tracks = {}
-        self.last_ai_time = 0.0
-        self.last_results = {"persons": [], "plates": []}
+        self.last_ai_times = {}
+        self.last_results = {}
         print("[AI STREAM] Pipeline AI siap digunakan!")
 
+    def _get_tracker(self, camera_id):
+        """Membuat atau mengambil instance ByteTrack terisolasi per kamera."""
+        cam_key = int(camera_id) if camera_id else 1
+        if cam_key not in self.trackers:
+            self.trackers[cam_key] = sv.ByteTrack(
+                track_activation_threshold=0.35,
+                lost_track_buffer=60,
+                minimum_matching_threshold=0.7,
+                frame_rate=25
+            )
+        return self.trackers[cam_key]
+
     def _cleanup_old_tracks(self, current_time):
-        """Menghapus cache track_id yang sudah lewat dari 30 detik."""
-        expired = [tid for tid, ts in self.captured_tracks.items() if current_time - ts > 30.0]
-        for tid in expired:
-            del self.captured_tracks[tid]
+        """Menghapus cache track yang sudah lewat dari 30 detik."""
+        expired = [k for k, ts in list(self.captured_tracks.items()) if current_time - ts > 30.0]
+        for k in expired:
+            self.captured_tracks.pop(k, None)
 
     def process_frame(self, frame, draw_bbox=True, camera_id=1):
         """
         Memproses 1 frame video:
-        1. Menjalankan deteksi AI (YOLO + ByteTrack + OCR) pada interval ~0.15s
+        1. Menjalankan deteksi AI (YOLO + ByteTrack + OCR) pada interval ~0.2s
         2. Menyimpan hasil deteksi baru secara lokal dan mencatat ke database
         3. Menggambar bounding box bersih (hanya box & label, tanpa FPS) jika draw_bbox=True
         """
+        if frame is None or frame.size == 0:
+            return frame
+
+        cam_key = int(camera_id) if camera_id else 1
         now = time.time()
         self._cleanup_old_tracks(now)
 
         h, w = frame.shape[:2]
+        last_time = self.last_ai_times.get(cam_key, 0.0)
 
-        # Jalankan AI inference setiap interval ~0.15s agar streaming tetap ringan & lancar
-        if now - self.last_ai_time >= 0.15:
-            self.last_ai_time = now
+        # Jalankan AI inference setiap interval ~0.2s per kamera agar performa optimal
+        if now - last_time >= 0.2:
+            self.last_ai_times[cam_key] = now
 
-            # 1. Deteksi Orang (Person class 0, Car 2, Motorcycle 3)
             person_dets = []
-            try:
-                p_results = self.yolo_person(frame, classes=[0, 2, 3], imgsz=416, verbose=False)[0]
-                if len(p_results.boxes) > 0:
-                    sv_dets = sv.Detections.from_ultralytics(p_results)
-                    tracked = self.person_tracker.update_with_detections(sv_dets)
-                    for i in range(len(tracked)):
-                        box = tracked.xyxy[i].astype(int)
-                        tid = int(tracked.tracker_id[i]) if tracked.tracker_id is not None else -1
-                        conf = float(tracked.confidence[i]) if tracked.confidence is not None else 0.5
-                        cls_id = int(tracked.class_id[i]) if tracked.class_id is not None else 0
-                        person_dets.append({"box": box, "track_id": tid, "conf": conf, "cls": cls_id})
-            except Exception as e:
-                pass
-
-            # 2. Deteksi Plat Nomor
             plate_dets = []
-            try:
-                plate_boxes = self.plate_detector.detect(frame)
-                for pb in plate_boxes:
-                    # pb: [x1, y1, x2, y2, conf, cls]
-                    bx = [int(pb[0]), int(pb[1]), int(pb[2]), int(pb[3])]
-                    p_conf = float(pb[4]) if len(pb) > 4 else 0.5
 
-                    # Crop plat untuk OCR
-                    px1, py1, px2, py2 = max(0, bx[0]), max(0, bx[1]), min(w, bx[2]), min(h, bx[3])
-                    plate_crop = frame[py1:py2, px1:px2]
-                    plate_text = ""
-                    ocr_conf = 0.0
+            # Ambil model lock agar thread-safe saat banyak kamera berjalan paralel
+            with self.lock:
+                # 1. Deteksi Orang / Kendaraan (Person 0, Car 2, Motorcycle 3)
+                try:
+                    p_results = self.yolo_person(frame, classes=[0, 2, 3], imgsz=416, verbose=False)[0]
+                    if len(p_results.boxes) > 0:
+                        sv_dets = sv.Detections.from_ultralytics(p_results)
+                        tracker = self._get_tracker(cam_key)
+                        tracked = tracker.update_with_detections(sv_dets)
+                        for i in range(len(tracked)):
+                            box = tracked.xyxy[i].astype(int)
+                            tid = int(tracked.tracker_id[i]) if tracked.tracker_id is not None else -1
+                            conf = float(tracked.confidence[i]) if tracked.confidence is not None else 0.5
+                            cls_id = int(tracked.class_id[i]) if tracked.class_id is not None else 0
+                            person_dets.append({"box": box, "track_id": tid, "conf": conf, "cls": cls_id})
+                except Exception as e:
+                    pass
 
-                    if plate_crop.size > 0 and (px2 - px1) > 25 and (py2 - py1) > 12:
-                        try:
-                            plate_text, ocr_conf, _ = self.plate_ocr.read_plate(plate_crop)
-                        except Exception:
-                            pass
+                # 2. Deteksi Plat Nomor
+                try:
+                    plate_boxes = self.plate_detector.detect(frame)
+                    for pb in plate_boxes:
+                        bx = [int(pb[0]), int(pb[1]), int(pb[2]), int(pb[3])]
+                        p_conf = float(pb[4]) if len(pb) > 4 else 0.5
 
-                    plate_dets.append({
-                        "box": bx,
-                        "conf": p_conf,
-                        "text": plate_text,
-                        "ocr_conf": ocr_conf,
-                        "crop": plate_crop
-                    })
-            except Exception as e:
-                pass
+                        px1, py1, px2, py2 = max(0, bx[0]), max(0, bx[1]), min(w, bx[2]), min(h, bx[3])
+                        plate_crop = frame[py1:py2, px1:px2]
+                        plate_text = ""
+                        ocr_conf = 0.0
 
-            self.last_results = {"persons": person_dets, "plates": plate_dets}
+                        if plate_crop.size > 0 and (px2 - px1) > 25 and (py2 - py1) > 12:
+                            try:
+                                plate_text, ocr_conf, _ = self.plate_ocr.read_plate(plate_crop)
+                            except Exception:
+                                pass
+
+                        plate_dets.append({
+                            "box": bx,
+                            "conf": p_conf,
+                            "text": plate_text,
+                            "ocr_conf": ocr_conf,
+                            "crop": plate_crop
+                        })
+                except Exception as e:
+                    pass
+
+            self.last_results[cam_key] = {"persons": person_dets, "plates": plate_dets}
 
             # 3. Simpan Deteksi Baru ke Database & Lokal
-            self._save_new_events(frame, person_dets, plate_dets, camera_id, now)
+            self._save_new_events(frame, person_dets, plate_dets, cam_key, now)
 
         # 4. Gambar Bounding Box jika draw_bbox diaktifkan
+        cam_results = self.last_results.get(cam_key, {"persons": [], "plates": []})
         if draw_bbox:
             output_frame = frame.copy()
-            self._draw_clean_bboxes(output_frame, self.last_results)
+            self._draw_clean_bboxes(output_frame, cam_results)
             return output_frame
 
         return frame
@@ -144,7 +165,7 @@ class StreamAIService:
 
             # Jika plat terbaca atau confidence bagus
             if p_text or (p_crop is not None and p_conf >= 0.45):
-                cache_key = f"plate_{p_text or id(p_crop)}"
+                cache_key = f"cam{camera_id}_plate_{p_text or id(p_crop)}"
                 if cache_key not in self.captured_tracks or (current_time - self.captured_tracks[cache_key] > 5.0):
                     self.captured_tracks[cache_key] = current_time
 
@@ -183,7 +204,7 @@ class StreamAIService:
 
             # Hanya simpan pejalan kaki (class 0 = person) yang belum dicapture
             if cls_id == 0 and tid != -1:
-                cache_key = f"person_{tid}"
+                cache_key = f"cam{camera_id}_person_{tid}"
                 if cache_key not in self.captured_tracks or (current_time - self.captured_tracks[cache_key] > 8.0):
                     self.captured_tracks[cache_key] = current_time
 

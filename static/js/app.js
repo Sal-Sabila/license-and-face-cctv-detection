@@ -290,13 +290,15 @@ async function initDashboard() {
 
     async function refreshRecentList() {
         try {
-            const detRes = await json('/api/detections?limit=6');
-            const items = detRes.data || [];
+            // Hanya ambil deteksi valid (Terbaca & Perlu cek), kecualikan status Gagal
+            const detRes = await json('/api/detections?limit=12&valid_only=1');
+            const rawItems = detRes.data || [];
+            const items = rawItems.filter(item => item.status !== 'Gagal' && item.status_code !== 0).slice(0, 6);
             const recent = document.getElementById('recentList');
 
             if (recent) {
                 if (items.length === 0) {
-                    recent.innerHTML = '<div class="empty-state py-4 text-muted text-center">Belum ada deteksi</div>';
+                    recent.innerHTML = '<div class="empty-state py-4 text-muted text-center"><i class="bi bi-shield-check d-block fs-3 mb-1 text-secondary"></i>Belum ada deteksi valid</div>';
                     return;
                 }
 
@@ -304,17 +306,34 @@ async function initDashboard() {
                     const isPlate = item.type === 'plate' || Boolean(item.plate && item.plate !== '-');
                     const label = isPlate ? esc(item.plate) : 'Wajah / Pengendara';
                     const icon = isPlate ? 'P' : '<i class="bi bi-person-fill"></i>';
-                    const photoPath = item.plate_image_path || item.face_image_path || '';
+                    const photoPath = item.face_image_path || item.plate_image_path || '';
+                    const cleanPhoto = photoPath ? ('/' + photoPath.replace(/^\/+/, '')) : '';
+
+                    let avatarHtml = '';
+                    if (cleanPhoto) {
+                        avatarHtml = `
+                            <div class="detection-avatar-wrapper" title="Klik untuk lihat foto asli">
+                                <img src="${cleanPhoto}" class="detection-avatar" alt="${label}" onerror="this.style.display='none'; if(this.nextElementSibling) this.nextElementSibling.style.display='flex';" />
+                                <div class="plate-icon ${isPlate ? '' : 'bg-primary text-white'}" style="display: none; width: 100%; height: 100%; border-radius: 0;">${icon}</div>
+                            </div>
+                        `;
+                    } else {
+                        avatarHtml = `
+                            <div class="detection-avatar-wrapper">
+                                <div class="plate-icon ${isPlate ? '' : 'bg-primary text-white'}" style="width: 100%; height: 100%; border-radius: 0;">${icon}</div>
+                            </div>
+                        `;
+                    }
 
                     return `
-                        <div class="recent d-flex align-items-center justify-content-between p-2 rounded mb-2" 
-                             style="cursor: pointer; transition: background 0.2s;" 
+                        <div class="recent recent-detection-item d-flex align-items-center justify-content-between p-2 rounded mb-2 bg-white shadow-xs" 
+                             style="cursor: pointer;" 
                              onclick="openImageModal('${photoPath}', '${label}', '${esc(item.camera)} · ${esc(item.timestamp)}', 'Akurasi AI: <b>${item.confidence_percent}%</b> · Status: <b>${esc(item.status)}</b>')">
                             <div class="d-flex align-items-center gap-3">
-                                <div class="plate-icon ${isPlate ? '' : 'bg-primary text-white'}">${icon}</div>
+                                ${avatarHtml}
                                 <div class="recent-info">
-                                    <strong class="d-block">${label}</strong>
-                                    <span class="text-muted small">${esc(item.camera)} · ${esc(item.timestamp)}</span>
+                                    <strong class="d-block text-dark ${isPlate ? 'recent-plate-badge' : ''}">${label}</strong>
+                                    <span class="text-muted small"><i class="bi bi-camera-video me-1"></i>${esc(item.camera)} · ${esc(item.timestamp)}</span>
                                 </div>
                             </div>
                             <div class="text-end">

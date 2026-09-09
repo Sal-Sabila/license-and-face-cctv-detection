@@ -45,10 +45,27 @@ def health():
 
 
 # ==============================
+# START BACKGROUND CCTV DETECTOR
+# ==============================
+
+import os
+from services.background_detector import BackgroundDetectionManager
+
+if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not app.debug:
+    try:
+        BackgroundDetectionManager.get_instance().start()
+    except Exception as e:
+        print(f"[APP WARNING] Gagal memulai BackgroundDetectionManager: {e}")
+
+
+# ==============================
 # RUN SERVER
 # ==============================
 
 if __name__ == "__main__":
+    # Jika dijalankan langsung tanpa reloader, pastikan service aktif
+    if not app.debug:
+        BackgroundDetectionManager.get_instance().start()
 
     app.run(
         host="0.0.0.0",

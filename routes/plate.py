@@ -55,6 +55,12 @@ def create_camera():
 
     try:
         new_id = db.add_camera(location=name, stream_url=url, stream_type=1, status=1 if active else 0)
+        try:
+            from services.background_detector import BackgroundDetectionManager
+            BackgroundDetectionManager.get_instance().sync_active_cameras()
+        except Exception:
+            pass
+
         return jsonify({
             "success": True,
             "data": {
@@ -80,6 +86,13 @@ def update_camera(camera_id):
         ok = db.update_camera(camera_id, location=location, stream_url=stream_url, status=status)
         if not ok:
             return jsonify({"success": False, "message": "Kamera tidak ditemukan atau tidak ada perubahan"}), 404
+
+        try:
+            from services.background_detector import BackgroundDetectionManager
+            BackgroundDetectionManager.get_instance().sync_active_cameras()
+        except Exception:
+            pass
+
         return jsonify({"success": True, "message": "Kamera berhasil diperbarui"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
@@ -92,6 +105,13 @@ def delete_camera(camera_id):
         ok = db.delete_camera(camera_id)
         if not ok:
             return jsonify({"success": False, "message": "Kamera tidak ditemukan"}), 404
+
+        try:
+            from services.background_detector import BackgroundDetectionManager
+            BackgroundDetectionManager.get_instance().sync_active_cameras()
+        except Exception:
+            pass
+
         return jsonify({"success": True, "message": "Kamera berhasil dihapus"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
@@ -113,6 +133,10 @@ def list_detections():
     start_date = request.args.get("start_date", type=str)
     end_date = request.args.get("end_date", type=str)
 
+    valid_only = request.args.get("valid_only", "0").lower() in ("1", "true", "yes") or request.args.get("exclude_failed", "0").lower() in ("1", "true", "yes")
+    if valid_only:
+        status_filter = "valid"
+
     try:
         res = db.get_all_detections_paginated(
             page=page,
@@ -122,7 +146,8 @@ def list_detections():
             camera_id=camera_id,
             search=search,
             start_date=start_date,
-            end_date=end_date
+            end_date=end_date,
+            exclude_failed=valid_only
         )
         return jsonify({
             "success": True,
@@ -446,9 +471,9 @@ def export_statistics_csv():
 # ============================================================
 
 def generate_mjpeg_stream(stream_url, width=960, height=540, draw_bbox=True, camera_id=1):
-    """Membaca frame dari CCTV via FFmpegStreamReader dan stream MJPEG ke browser dengan AI bounding box."""
-    norm_url = normalize_stream_url(stream_url)
-    reader = FFmpegStreamReader(norm_url, width=width, height=height)
+    """Membaca frame dari CCTV via BackgroundDetectionManager atau FFmpegStreamReader dan stream MJPEG ke browser dengan AI bounding box."""
+    from services.background_detector import BackgroundDetectionManager
+    bg_mgr = BackgroundDetectionManager.get_instance()
 
     ai_service = None
     if draw_bbox:
@@ -457,6 +482,37 @@ def generate_mjpeg_stream(stream_url, width=960, height=540, draw_bbox=True, cam
             ai_service = StreamAIService.get_instance()
         except Exception as e:
             print(f"[AI STREAM WARNING] AI Service load error: {e}")
+
+    # Prioritas 1: Jika worker background sudah berjalan untuk kamera ini, pakai frame dari worker
+    # Ini sangat hemat CPU & bandwidth karena tidak membuka 2 proses FFmpeg ganda!
+    if bg_mgr.is_camera_running(camera_id):
+        try:
+            while bg_mgr.is_camera_running(camera_id):
+                frame = bg_mgr.get_frame(camera_id)
+                if frame is None:
+                    time.sleep(0.04)
+                    continue
+
+                if ai_service is not None and draw_bbox:
+                    try:
+                        frame = ai_service.process_frame(frame, draw_bbox=True, camera_id=camera_id)
+                    except Exception:
+                        pass
+
+                ret, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+                if ret:
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+                time.sleep(0.035)
+            return
+        except GeneratorExit:
+            return
+        except Exception:
+            pass
+
+    # Prioritas 2 (Fallback): Gunakan FFmpegStreamReader mandiri jika background worker belum aktif
+    norm_url = normalize_stream_url(stream_url)
+    reader = FFmpegStreamReader(norm_url, width=width, height=height)
 
     try:
         failed_reads = 0

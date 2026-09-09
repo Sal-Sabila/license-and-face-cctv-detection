@@ -454,7 +454,8 @@ def get_all_detections_paginated(
     camera_id: int = None,
     search: str = None,
     start_date: str = None,
-    end_date: str = None
+    end_date: str = None,
+    exclude_failed: bool = False
 ) -> dict:
     """
     Mengambil data deteksi gabungan (Wajah & Plat) dengan filter lengkap dan paginasi.
@@ -471,7 +472,9 @@ def get_all_detections_paginated(
     elif type_filter == "face":
         where_clauses.append("(fd.face_image_path IS NOT NULL OR fd.plate_id IS NULL)")
 
-    if status_filter in ("0", "1", "2"):
+    if exclude_failed or status_filter == "valid":
+        where_clauses.append("fd.detection_status IN (1, 2)")
+    elif status_filter in ("0", "1", "2"):
         where_clauses.append("fd.detection_status = %s")
         params.append(int(status_filter))
 
