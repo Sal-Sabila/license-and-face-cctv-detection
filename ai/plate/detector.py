@@ -6,13 +6,15 @@ class PlateDetector:
     def __init__(
         self,
         model_path="models/plate/license-plate-finetune-v2n.pt",
-        confidence=0.25,
+        confidence=0.50,
         imgsz=640,
         device="cpu",
         max_det=10,
-        iou=0.7,
-        min_width=20,
-        min_height=8
+        iou=0.45,
+        min_width=30,
+        min_height=10,
+        min_aspect_ratio=1.5,
+        max_aspect_ratio=6.5
     ):
 
         self.model = YOLO(model_path)
@@ -26,11 +28,17 @@ class PlateDetector:
         self.min_width = min_width
         self.min_height = min_height
 
-        print("[PLATE] Model berhasil dimuat")
+        self.min_aspect_ratio = min_aspect_ratio
+        self.max_aspect_ratio = max_aspect_ratio
+
+        print("=" * 60)
+        print("[PLATE] Detector siap")
+        print("[PLATE] Model:", model_path)
         print("[PLATE] Classes:", self.model.names)
         print("[PLATE] Confidence:", self.confidence)
         print("[PLATE] Image size:", self.imgsz)
         print("[PLATE] Device:", self.device)
+        print("=" * 60)
 
     def detect(self, frame):
 
@@ -55,8 +63,7 @@ class PlateDetector:
 
         except Exception as e:
 
-            print(f"[PLATE ERROR] {e}")
-
+            print(f"[PLATE ERROR] YOLO inference failed: {e}")
             return []
 
         detections = []
@@ -70,11 +77,18 @@ class PlateDetector:
 
             for box in result.boxes:
 
-                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                try:
+                    class_id = int(box.cls[0])
+                    confidence = float(box.conf[0])
 
-                confidence = float(box.conf[0])
+                    # Model kamu hanya memiliki class 0 = license_plate
+                    if class_id != 0:
+                        continue
 
-                class_id = int(box.cls[0])
+                    x1, y1, x2, y2 = box.xyxy[0].tolist()
+
+                except Exception:
+                    continue
 
                 # Clamp koordinat
                 x1 = max(0, min(int(x1), frame_width - 1))
@@ -92,56 +106,44 @@ class PlateDetector:
                 if height < self.min_height:
                     continue
 
-                # Validasi koordinat
                 if x2 <= x1 or y2 <= y1:
                     continue
 
-                # Crop plat
+                # Validasi rasio bentuk plat
+                aspect_ratio = width / max(height, 1)
+
+                if aspect_ratio < self.min_aspect_ratio:
+                    continue
+
+                if aspect_ratio > self.max_aspect_ratio:
+                    continue
+
+                # Crop
                 crop = frame[y1:y2, x1:x2]
 
                 if crop is None or crop.size == 0:
                     continue
 
-                # Center point
                 center_x = int((x1 + x2) / 2)
                 center_y = int((y1 + y2) / 2)
 
-                # Nama class
                 if isinstance(self.model.names, dict):
-
                     class_name = self.model.names.get(
                         class_id,
                         str(class_id)
                     )
-
                 else:
-
                     class_name = self.model.names[class_id]
 
                 detections.append({
-
-                    "bbox": [
-                        x1,
-                        y1,
-                        x2,
-                        y2
-                    ],
-
+                    "bbox": [x1, y1, x2, y2],
                     "confidence": confidence,
-
                     "class_id": class_id,
-
                     "class_name": class_name,
-
                     "width": width,
-
                     "height": height,
-
-                    "center": [
-                        center_x,
-                        center_y
-                    ],
-
+                    "aspect_ratio": aspect_ratio,
+                    "center": [center_x, center_y],
                     "crop": crop
                 })
 

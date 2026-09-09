@@ -230,7 +230,7 @@ async function initDashboard() {
 
     function getStreamUrl(camId) {
         const showBbox = bboxToggle ? (bboxToggle.checked ? 1 : 0) : 1;
-        return `/api/video_feed/${camId}?bbox=${showBbox}&t=${Date.now()}`;
+        return `/api/video_feed/${camId}?bbox=${showBbox}`;
     }
 
     function startCameraStream(camId) {

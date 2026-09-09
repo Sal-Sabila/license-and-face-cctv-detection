@@ -77,7 +77,7 @@ class FFmpegStreamReader:
         self.height = height
         self.rtmp_url = rtmp_url
         self.ffmpeg_path = ffmpeg_path
-
+        self.error_message = None
 
 
         # Ukuran 1 frame mentah dalam bytes:
@@ -126,7 +126,7 @@ class FFmpegStreamReader:
             self.process = subprocess.Popen(
                 perintah,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
             )
         except Exception as e:
             print(f"[FFMPEG ERROR] Gagal menjalankan proses FFmpeg: {e}")
@@ -170,6 +170,10 @@ class FFmpegStreamReader:
         potongan_data = bytearray()
 
         while len(potongan_data) < jumlah_bytes:
+
+            if self.process is None or self.process.poll() is not None:
+                self._capture_error()
+                return None
 
             sisa_bytes = jumlah_bytes - len(potongan_data)
 

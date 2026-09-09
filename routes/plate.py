@@ -473,12 +473,12 @@ def generate_mjpeg_stream(stream_url, width=960, height=540, draw_bbox=True, cam
     reader = FFmpegStreamReader(norm_url, width=width, height=height)
 
     ai_service = None
-    if draw_bbox:
-        try:
-            from services.stream_ai_service import StreamAIService
-            ai_service = StreamAIService.get_instance()
-        except Exception as e:
-            print(f"[AI STREAM WARNING] AI Service load error: {e}")
+    try:
+        from services.stream_ai_service import StreamAIService
+        # AI tetap dijalankan walaupun visual bounding box dimatikan.
+        ai_service = StreamAIService.get_instance()
+    except Exception as e:
+        print(f"[AI STREAM WARNING] AI Service load error: {e}")
 
     try:
         failed_reads = 0
@@ -501,11 +501,11 @@ def generate_mjpeg_stream(stream_url, width=960, height=540, draw_bbox=True, cam
                 break
 
             # Jalankan deteksi & gambar bounding box jika aktif
-            if ai_service is not None and draw_bbox:
+            if ai_service is not None:
                 try:
-                    frame = ai_service.process_frame(frame, draw_bbox=True, camera_id=camera_id)
+                    frame = ai_service.process_frame(frame, draw_bbox=draw_bbox, camera_id=camera_id)
                 except Exception as e:
-                    pass
+                    print(f"[AI STREAM ERROR] Frame processing failed: {e}")
 
             ret, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
             if not ret:
