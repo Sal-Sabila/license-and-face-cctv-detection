@@ -25,8 +25,8 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 CAMERA_STREAMS = [
     {
         "id": 1,
-        "name": "GSKeluarViewLuar",
-        "url": "rtmp://103.255.15.138:1935/live/GSKeluarViewLuar.stream",
+        "name": "GSMasukViewLuar",
+        "url": "rtmp://103.255.15.138:1935/live/GSMasukViewLuar.stream",
     },
 ]
 
@@ -900,6 +900,50 @@ def _plate_crop_from_capture(capture):
     return None
 
 
+def _person_capture_image(capture):
+    if not isinstance(capture, dict):
+        return None
+
+    path = capture.get("image_path")
+    if isinstance(path, str) and os.path.exists(path):
+        image = cv2.imread(path)
+        if image is not None and image.size > 0:
+            return image
+
+    return None
+
+
+def _draw_preview_image(panel, image, x1, y1, x2, y2):
+    if image is None:
+        return False
+
+    try:
+        h, w = image.shape[:2]
+        if h <= 0 or w <= 0:
+            return False
+
+        box_w = x2 - x1
+        box_h = y2 - y1
+        scale = min(box_w / w, box_h / h)
+
+        new_w = max(1, int(w * scale))
+        new_h = max(1, int(h * scale))
+
+        resized = cv2.resize(
+            image,
+            (new_w, new_h),
+            interpolation=cv2.INTER_AREA,
+        )
+
+        px = x1 + (box_w - new_w) // 2
+        py = y1 + (box_h - new_h) // 2
+
+        panel[py:py + new_h, px:px + new_w] = resized
+        return True
+    except Exception:
+        return False
+
+
 def _draw_panel_title(panel, text, y, font_scale=0.58):
     cv2.putText(
         panel,
@@ -914,23 +958,13 @@ def _draw_panel_title(panel, text, y, font_scale=0.58):
 
 
 def draw_side_panel(camera):
-    """
-    Panel kanan:
-    - Capture plat terbaru
-    - Nomor plat
-    - OCR confidence
-    - YOLO confidence jika tersedia
-    - Track ID
-    - Waktu
-    - History 5 plat terakhir
-    """
+    """Panel kanan: capture orang terbaru, capture plat, dan history."""
     panel = np.zeros(
         (PANEL_HEIGHT, PANEL_WIDTH, 3),
         dtype=np.uint8,
     )
     panel[:] = (18, 18, 22)
 
-    # Border panel
     cv2.rectangle(
         panel,
         (1, 1),
@@ -939,13 +973,82 @@ def draw_side_panel(camera):
         1,
     )
 
-    # ========================================================
-    # CAPTURE PLAT TERBARU
-    # ========================================================
+    # ================= CAPTURE ORANG =================
+    person_y1, person_y2 = 12, 175
+
     cv2.rectangle(
         panel,
-        (12, 12),
-        (PANEL_WIDTH - 12, 285),
+        (12, person_y1),
+        (PANEL_WIDTH - 12, person_y2),
+        (35, 35, 42),
+        1,
+    )
+
+    _draw_panel_title(
+        panel,
+        "CAPTURE ORANG TERBARU",
+        38,
+        0.50,
+    )
+
+    person_capture = camera.get("person_latest_capture")
+    person_image = None
+
+    if person_capture is not None:
+        if time.time() <= person_capture.get("expires_at", 0):
+            person_image = _person_capture_image(person_capture)
+        else:
+            camera["person_latest_capture"] = None
+            person_capture = None
+
+    px1, py1 = 28, 52
+    px2, py2 = PANEL_WIDTH - 28, 168
+
+    cv2.rectangle(
+        panel,
+        (px1, py1),
+        (px2, py2),
+        (65, 65, 75),
+        1,
+    )
+
+    if not _draw_preview_image(
+        panel, person_image, px1, py1, px2, py2
+    ):
+        cv2.putText(
+            panel,
+            "Menunggu capture orang...",
+            (72, 115),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.40,
+            (140, 140, 150),
+            1,
+            cv2.LINE_AA,
+        )
+
+    if person_capture is not None:
+        track_id = person_capture.get("track_id", "-")
+        conf = float(person_capture.get("confidence", 0.0) or 0.0)
+
+        cv2.putText(
+            panel,
+            f"Person ID: #{track_id}  Conf: {conf:.0%}",
+            (22, 193),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.38,
+            (0, 230, 255),
+            1,
+            cv2.LINE_AA,
+        )
+
+    # ================= CAPTURE PLAT =================
+    plate_top = 210
+    plate_bottom = 355
+
+    cv2.rectangle(
+        panel,
+        (12, plate_top),
+        (PANEL_WIDTH - 12, plate_bottom),
         (35, 35, 42),
         1,
     )
@@ -953,64 +1056,34 @@ def draw_side_panel(camera):
     _draw_panel_title(
         panel,
         "CAPTURE PLAT TERBARU",
-        40,
-        0.52,
+        plate_top + 27,
+        0.50,
     )
 
     latest = camera.get("plate_latest_capture")
 
-    # Area gambar plat
-    image_x1, image_y1 = 28, 58
-    image_x2, image_y2 = PANEL_WIDTH - 28, 172
+    ix1, iy1 = 28, plate_top + 40
+    ix2, iy2 = PANEL_WIDTH - 28, plate_top + 108
 
     cv2.rectangle(
         panel,
-        (image_x1, image_y1),
-        (image_x2, image_y2),
+        (ix1, iy1),
+        (ix2, iy2),
         (65, 65, 75),
         1,
     )
 
     crop = _plate_crop_from_capture(latest)
 
-    if crop is not None:
-        try:
-            crop_h, crop_w = crop.shape[:2]
-            box_w = image_x2 - image_x1
-            box_h = image_y2 - image_y1
-
-            scale = min(box_w / crop_w, box_h / crop_h)
-            new_w = max(1, int(crop_w * scale))
-            new_h = max(1, int(crop_h * scale))
-
-            resized = cv2.resize(
-                crop,
-                (new_w, new_h),
-                interpolation=cv2.INTER_AREA,
-            )
-
-            px = image_x1 + (box_w - new_w) // 2
-            py = image_y1 + (box_h - new_h) // 2
-
-            panel[py:py + new_h, px:px + new_w] = resized
-        except Exception:
-            cv2.putText(
-                panel,
-                "Preview tidak tersedia",
-                (85, 120),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.45,
-                (150, 150, 150),
-                1,
-                cv2.LINE_AA,
-            )
-    else:
+    if not _draw_preview_image(
+        panel, crop, ix1, iy1, ix2, iy2
+    ):
         cv2.putText(
             panel,
             "Menunggu hasil plat...",
-            (92, 120),
+            (92, plate_top + 80),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
+            0.40,
             (140, 140, 150),
             1,
             cv2.LINE_AA,
@@ -1045,29 +1118,23 @@ def draw_side_panel(camera):
             "-",
         )
 
-        timestamp = _first_value(
-            latest,
-            ["timestamp", "detected_at", "time", "datetime"],
-            None,
-        )
-
         cv2.putText(
             panel,
-            f"Plat       : {plate or '-'}",
-            (22, 202),
+            f"Plat: {plate or '-'}",
+            (22, plate_top + 128),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.48,
+            0.44,
             (0, 255, 0),
-            2,
+            1,
             cv2.LINE_AA,
         )
 
         cv2.putText(
             panel,
-            f"OCR Conf   : {ocr_conf:.1%}",
-            (22, 226),
+            f"OCR: {ocr_conf:.1%}",
+            (22, plate_top + 149),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.42,
+            0.37,
             (0, 230, 80),
             1,
             cv2.LINE_AA,
@@ -1076,46 +1143,17 @@ def draw_side_panel(camera):
         if yolo_conf is not None:
             cv2.putText(
                 panel,
-                f"YOLO Conf  : {yolo_conf:.1%}",
-                (205, 226),
+                f"YOLO: {yolo_conf:.1%}",
+                (155, plate_top + 149),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.42,
+                0.37,
                 (0, 220, 220),
                 1,
                 cv2.LINE_AA,
             )
 
-        cv2.putText(
-            panel,
-            f"Track      : #{track_id}",
-            (22, 250),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.42,
-            (210, 210, 210),
-            1,
-            cv2.LINE_AA,
-        )
-
-        if timestamp is not None:
-            timestamp = str(timestamp)
-            if len(timestamp) > 25:
-                timestamp = timestamp[:25]
-
-            cv2.putText(
-                panel,
-                timestamp,
-                (22, 274),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.36,
-                (160, 160, 170),
-                1,
-                cv2.LINE_AA,
-            )
-
-    # ========================================================
-    # HISTORY 5 PLAT TERAKHIR
-    # ========================================================
-    history_top = 302
+    # ================= HISTORY =================
+    history_top = 370
 
     cv2.rectangle(
         panel,
@@ -1127,48 +1165,42 @@ def draw_side_panel(camera):
 
     _draw_panel_title(
         panel,
-        "HISTORY 5 PLAT TERAKHIR",
-        history_top + 30,
-        0.52,
+        "HISTORY 3 PLAT TERAKHIR",
+        history_top + 28,
+        0.48,
     )
 
-    history = camera.get("plate_history") or []
-
-    # Tampilkan 5 terakhir, terbaru di atas.
-    history = list(history)[-5:][::-1]
+    history = list(camera.get("plate_history") or [])[-3:][::-1]
 
     if not history:
         cv2.putText(
             panel,
             "Belum ada hasil OCR",
-            (90, history_top + 75),
+            (90, history_top + 70),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
+            0.40,
             (130, 130, 140),
             1,
             cv2.LINE_AA,
         )
     else:
-        y = history_top + 72
+        y = history_top + 58
 
         for idx, item in enumerate(history, start=1):
             plate = _plate_text(item) or "-"
             conf = _plate_confidence(item)
-
             track_id = _first_value(
                 item,
                 ["track_id", "id", "tracker_id"],
                 "-",
             )
 
-            label = f"{idx}. #{track_id}  {plate}"
-
             cv2.putText(
                 panel,
-                label[:35],
+                f"{idx}. #{track_id}  {plate}",
                 (22, y),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.42,
+                0.39,
                 (0, 255, 0),
                 1,
                 cv2.LINE_AA,
@@ -1177,20 +1209,18 @@ def draw_side_panel(camera):
             cv2.putText(
                 panel,
                 f"OCR {conf:.1%}",
-                (42, y + 22),
+                (42, y + 19),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.35,
+                0.32,
                 (0, 220, 80),
                 1,
                 cv2.LINE_AA,
             )
 
-            y += 48
-
-            if y > PANEL_HEIGHT - 20:
-                break
+            y += 42
 
     return panel
+
 
 
 def draw_combined_display(frame, camera):
@@ -1475,6 +1505,7 @@ def main():
             "person_tracked": sv.Detections.empty(),
             "person_capture_state": {},
             "person_total_captured": 0,
+            "person_latest_capture": None,
 
             "plate_tracker": plate_tracker,
             "plate_active_tracks": [],
@@ -1737,6 +1768,16 @@ def main():
                                         now_ts,
                                     "capture_count":
                                         count,
+                                }
+
+                                target_cam[
+                                    "person_latest_capture"
+                                ] = {
+                                    "image_path": saved_path,
+                                    "track_id": track_id,
+                                    "confidence": conf,
+                                    "timestamp": now,
+                                    "expires_at": time.time() + 5.0,
                                 }
 
                                 print(
