@@ -16,10 +16,10 @@ from tracker import PlateTracker
 # KONFIGURASI CCTV
 # ============================================================
 
-RTMP_URL = "rtmp://103.255.15.138:1935/live/GSKeluarViewLuar.stream"
+RTMP_URL = "rtmp://103.255.15.138:1935/live/GSMasukViewLuar.stream"
 
-STREAM_WIDTH = 2688
-STREAM_HEIGHT = 1520
+STREAM_WIDTH = 1920
+STREAM_HEIGHT = 1080
 
 
 # ============================================================

@@ -1,15 +1,25 @@
-# Python virtual environment
+# Virtual environment
 venv/
-venv-ai/
 .venv/
-env/
 
 # Python cache
 __pycache__/
-*.py[cod]
+*.pyc
+
+# Database
+*.db
+
+# Model / binary files
+*.pt
+*.onnx
 
 # IDE
 .vscode/
+.idea/
 
 # Environment variables
 .env
+
+# OS
+.DS_Store
+Thumbs.db

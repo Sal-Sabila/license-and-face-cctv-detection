@@ -3,7 +3,7 @@
 -- https://www.phpmyadmin.net/
 --
 -- Host: localhost:3306
--- Generation Time: Sep 08, 2026 at 08:48 AM
+-- Generation Time: Sep 08, 2026 at 11:38 AM
 -- Server version: 8.4.3
 -- PHP Version: 8.3.30
 
@@ -43,7 +43,8 @@ CREATE TABLE `cameras` (
 
 CREATE TABLE `full_detection` (
   `detection_id` bigint UNSIGNED NOT NULL,
-  `plate_id` bigint UNSIGNED NOT NULL,
+  `plate_id` bigint UNSIGNED DEFAULT NULL,
+  `camera_id` bigint UNSIGNED DEFAULT NULL,
   `detection_status` tinyint NOT NULL,
   `detection_confidence` decimal(6,5) DEFAULT NULL,
   `face_image_path` varchar(500) DEFAULT NULL,
@@ -75,9 +76,21 @@ CREATE TABLE `plate` (
 CREATE TABLE `plate_logs` (
   `plate_id` bigint UNSIGNED DEFAULT NULL,
   `camera_id` bigint UNSIGNED DEFAULT NULL,
-  `status` enum('success','failed','warning','info') NOT NULL,
+  `status` tinyint NOT NULL,
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Dumping data for table `cameras`
+--
+
+INSERT INTO `cameras` (`camera_id`, `location`, `stream_url`, `stream_type`, `status`) VALUES
+(1, 'GSMasukViewLuar', 'http://103.255.15.138:1935/live/GSMasukViewLuar.stream/playlist.m3u8', 1, 1),
+(2, 'GSMasukViewDalam', 'http://103.255.15.138:1935/live/GSMasukViewDalam.stream/playlist.m3u8', 1, 0),
+(3, 'GSKeluarViewLuar', 'http://103.255.15.138:1935/live/GSKeluarViewLuar.stream/playlist.m3u8', 1, 0),
+(4, 'GSKeluarViewDalam', 'http://103.255.15.138:1935/live/GSKeluarViewDalam.stream/playlist.m3u8', 1, 0);
 
 -- --------------------------------------------------------
 

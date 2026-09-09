@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="id">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title or 'PlateVision' }}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+
+<body>
+    <div class="app-layout">
+        <!-- Sidebar Backdrop (Mobile Overlay) -->
+        <div id="sidebarBackdrop" class="sidebar-backdrop"></div>
+
+        <!-- Sidebar (Sticky / Non-scrolling & Collapsible) -->
+        <aside id="sidebar" class="sidebar">
+            <div class="sidebar-header">
+                <div class="brand-wrap">
+                    <div class="brand-mark">P</div>
+                    <div class="brand-text">
+                        <h2>PlateVision</h2>
+                        <small>AI CCTV MONITORING</small>
+                    </div>
+                </div>
+                <button id="sidebarCloseBtn" class="sidebar-close-btn" aria-label="Tutup Menu">
+                    <i class="bi bi-x-lg"></i>
+                </button>
+            </div>
+
+            <div class="sidebar-scrollable">
+                <div class="nav-section">Menu utama</div>
+                <nav class="nav flex-column gap-1">
+                    <a class="nav-link {% if page == 'dashboard' %}active{% endif %}"
+                        href="{{ url_for('dashboard_page.dashboard') }}" title="Dashboard">
+                        <i class="bi bi-grid-1x2-fill"></i>
+                        <span>Dashboard</span>
+                    </a>
+                    <a class="nav-link {% if page == 'monitoring' %}active{% endif %}"
+                        href="{{ url_for('monitoring_page.monitoring') }}" title="Monitoring CCTV">
+                        <i class="bi bi-camera-video-fill"></i>
+                        <span>Monitoring CCTV</span>
+                    </a>
+                    <a class="nav-link {% if page == 'detections' %}active{% endif %}"
+                        href="{{ url_for('detections_page.detections') }}" title="Hasil Deteksi">
+                        <i class="bi bi-record-circle-fill"></i>
+                        <span>Hasil Deteksi</span>
+                    </a>
+                    <a class="nav-link {% if page == 'history' %}active{% endif %}"
+                        href="{{ url_for('history_page.history') }}" title="Riwayat Plat">
+                        <i class="bi bi-clock-history"></i>
+                        <span>Riwayat Plat</span>
+                    </a>
+                    <a class="nav-link {% if page == 'statistics' %}active{% endif %}"
+                        href="{{ url_for('statistics_page.statistics') }}" title="Statistik">
+                        <i class="bi bi-bar-chart-line-fill"></i>
+                        <span>Statistik</span>
+                    </a>
+                </nav>
+                <div class="nav-section mt-4">Sistem</div>
+                <nav class="nav flex-column gap-1">
+                    <a class="nav-link {% if page == 'settings' %}active{% endif %}"
+                        href="{{ url_for('settings_page.settings') }}" title="Pengaturan">
+                        <i class="bi bi-gear-fill"></i>
+                        <span>Pengaturan</span>
+                    </a>
+                </nav>
+            </div>
+        </aside>
+
+        <!-- Main Panel -->
+        <main class="main-panel">
+            <div class="topbar">
+                <div class="topbar-left">
+                    <button id="sidebarToggle" class="sidebar-toggle-btn" aria-label="Buka/Tutup Sidebar" title="Buka/Tutup Menu">
+                        <i class="bi bi-list"></i>
+                    </button>
+                    <div>
+                        <h1>{{ heading }}</h1>
+                        <p>{{ subtitle }}</p>
+                    </div>
+                </div>
+                <div class="topbar-actions">
+                    <div class="search-box">
+                        <i class="bi bi-search"></i>
+                        <input placeholder="Cari plat atau CCTV...">
+                    </div>
+                    <button class="icon-btn" aria-label="Notifikasi"><i class="bi bi-bell"></i></button>
+                    <div class="user-pill">
+                        <div class="avatar">A</div>
+                        <div><strong>Administrator</strong><span>Operator</span></div>
+                    </div>
+                </div>
+            </div>
+
+            {% if page == 'dashboard' %}
+            <section class="row g-3 stats-row">
+                <div class="col-xl-3 col-md-6 col-sm-6 col-12">
+                    <div class="stat-card">
+                        <div class="stat-icon blue"><i class="bi bi-person-fill"></i></div>
+                        <div><span>Orang Terdeteksi</span><strong id="totalVehicle">0</strong><small>Data realtime</small></div>
+                    </div>
+                </div>
+                <div class="col-xl-3 col-md-6 col-sm-6 col-12">
+                    <div class="stat-card">
+                        <div class="stat-icon green"><i class="bi bi-check-circle-fill"></i></div>
+                        <div><span>Plat Berhasil Dibaca</span><strong id="plateRead">0</strong><small>Confidence &gt;= 80%</small></div>
+                    </div>
+                </div>
+                <div class="col-xl-3 col-md-6 col-sm-6 col-12">
+                    <div class="stat-card">
+                        <div class="stat-icon orange"><i class="bi bi-exclamation-circle-fill"></i></div>
+                        <div><span>Perlu Pemeriksaan</span><strong id="needCheck">0</strong><small>Confidence &lt; 80%</small></div>
+                    </div>
+                </div>
+                <div class="col-xl-3 col-md-6 col-sm-6 col-12">
+                    <div class="stat-card">
+                        <div class="stat-icon purple"><i class="bi bi-camera-video-fill"></i></div>
+                        <div><span>CCTV Aktif</span><strong id="cameraStatus">0 / 0</strong><small>Status sistem</small></div>
+                    </div>
+                </div>
+            </section>
+            <section class="row g-4 mt-1">
+                <div class="col-xl-8 col-lg-7">
+                    <div class="panel shadow-sm">
+                        <div class="panel-header">
+                            <div>
+                                <h3>Live Monitoring CCTV</h3>
+                                <p>Satu frame untuk deteksi wajah dan plat nomor.</p>
+                            </div>
+                            <div class="d-flex gap-2 align-items-center flex-wrap">
+                                <div class="form-check form-switch mb-0 d-flex align-items-center gap-2 me-1 bbox-switch-container" title="Aktifkan / Nonaktifkan Bounding Box AI">
+                                    <input class="form-check-input" type="checkbox" id="bboxToggle" checked>
+                                    <label class="form-check-label small fw-semibold text-nowrap" for="bboxToggle">
+                                        <i class="bi bi-bounding-box"></i> Bounding Box
+                                    </label>
+                                </div>
+                                <select id="cameraSelect" class="form-select form-select-sm"></select>
+                                <button id="startStreamBtn" class="btn btn-primary btn-sm" title="Mulai Stream"><i class="bi bi-play-fill"></i></button>
+                                <button id="stopStreamBtn" class="btn btn-outline-danger btn-sm" title="Hentikan Stream"><i class="bi bi-stop-fill"></i></button>
+                            </div>
+                        </div>
+                        <div class="video-stage">
+                            <img id="liveStreamImg" class="live-stream-feed" alt="Live CCTV Feed" style="display: none;" />
+                            <div class="video-placeholder" id="videoPlaceholder">
+                                <div class="camera-icon"><i class="bi bi-camera-video"></i></div>
+                                <strong id="cameraName">Tidak Ada Kamera</strong>
+                                <a href="{{ url_for('monitoring_page.monitoring') }}" class="btn-empty-add">
+                                    <i class="bi bi-plus-lg"></i>
+                                    <span>Tambah Kamera Sekarang</span>
+                                </a>
+                            </div>
+                            <div class="live-tag">● LIVE</div>
+                            <div class="video-time" id="clock">00:00:00 WIB</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-xl-4 col-lg-5">
+                    <div class="panel shadow-sm">
+                        <div class="panel-header">
+                            <div>
+                                <h3>Deteksi Terbaru</h3>
+                                <p>Hasil deteksi gabungan terakhir.</p>
+                            </div>
+                        </div>
+                        <div id="recentList" class="recent-list">
+                            <div class="empty-state">Belum ada deteksi</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+            {% elif page == 'monitoring' %}
+            <section class="panel shadow-sm">
+                <div class="panel-header flex-wrap">
+                    <div>
+                        <h3>Daftar Kamera CCTV (<span id="cameraCountTitle">0</span>)</h3>
+                        <p>Kelola kamera CCTV untuk monitoring dan deteksi.</p>
+                    </div>
+                    <div class="playlist-actions">
+                        <button type="button" class="btn-action-outline" onclick="exportCameras('xspf')">
+                            <i class="bi bi-filetype-xml"></i>
+                            <span>Ekspor XSPF</span>
+                        </button>
+                        <button type="button" class="btn-action-outline" onclick="exportCameras('excel')">
+                            <i class="bi bi-file-earmark-spreadsheet"></i>
+                            <span>Ekspor Excel</span>
+                        </button>
+                        <button type="button" class="btn-action-primary" onclick="openCameraModal()">
+                            <i class="bi bi-plus-lg"></i>
+                            <span>Tambah Kamera</span>
+                        </button>
+                    </div>
+                </div>
+                <div class="table-responsive">
+                    <table class="table align-middle mb-0 playlist-table">
+                        <thead>
+                            <tr>
+                                <th>Nama</th>
+                                <th>URL</th>
+                                <th>Status</th>
+                                <th>Aksi</th>
+                            </tr>
+                        </thead>
+                        <tbody id="cameraTable">
+                            <tr>
+                                <td colspan="4" class="text-center text-muted py-5">Belum ada kamera.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+            {% elif page == 'detections' %}
+            <section class="panel shadow-sm">
+                <div class="panel-header">
+                    <div>
+                        <h3>Hasil Deteksi</h3>
+                        <p>Data gabungan dari seluruh kamera CCTV.</p>
+                    </div>
+                </div>
+                <div class="table-responsive">
+                    <table class="table align-middle mb-0">
+                        <thead>
+                            <tr>
+                                <th>Wajah / Plat</th>
+                                <th>CCTV</th>
+                                <th>Confidence</th>
+                                <th>Waktu</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="detectionTable">
+                            <tr>
+                                <td colspan="5" class="text-center text-muted py-5">Memuat data...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+            {% elif page == 'history' %}
+            <section class="panel shadow-sm">
+                <div class="panel-header flex-wrap">
+                    <div>
+                        <h3>Riwayat Plat Nomor</h3>
+                        <p>Data tersimpan dari proses OCR.</p>
+                    </div>
+                    <input id="plateSearch" class="form-control form-control-sm" style="max-width:240px"
+                        placeholder="Cari plat...">
+                </div>
+                <div class="table-responsive">
+                    <table class="table align-middle mb-0">
+                        <thead>
+                            <tr>
+                                <th>Plat</th>
+                                <th>CCTV</th>
+                                <th>Confidence</th>
+                                <th>Waktu</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="plateHistoryTable">
+                            <tr>
+                                <td colspan="5" class="text-center text-muted py-5">Memuat data...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+            {% elif page == 'statistics' %}
+            <section class="row g-4">
+                <div class="col-lg-8">
+                    <div class="panel p-4">
+                        <h3>Statistik Deteksi</h3>
+                        <p class="text-muted small">Ringkasan data dari seluruh kamera.</p>
+                        <div class="stats-bars mt-4">
+                            <div><span>Plat terbaca</span>
+                                <div class="bar"><i id="plateBar"></i></div>
+                            </div>
+                            <div><span>Wajah terdeteksi</span>
+                                <div class="bar"><i id="faceBar"></i></div>
+                            </div>
+                            <div><span>Perlu pemeriksaan</span>
+                                <div class="bar"><i id="checkBar"></i></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-lg-4">
+                    <div class="panel p-4">
+                        <h3>Ringkasan</h3>
+                        <div class="system-metric"><span>Total data</span><strong id="storedCount">0</strong></div>
+                        <div class="system-metric"><span>Kamera aktif</span><strong id="activeCameras">0</strong></div>
+                    </div>
+                </div>
+            </section>
+            {% elif page == 'settings' %}
+            <section class="panel shadow-sm p-4">
+                <h3>Pengaturan Sistem</h3>
+                <p class="text-muted small">Pengaturan ini tersimpan pada browser operator.</p>
+                <form id="settingsForm" class="row g-3 mt-1">
+                    <div class="col-md-6"><label class="form-label small fw-semibold">Nama operator</label><input
+                            id="operatorName" class="form-control" value="Administrator"></div>
+                    <div class="col-md-6"><label class="form-label small fw-semibold">Interval refresh
+                            (detik)</label><input id="refreshInterval" class="form-control" type="number" min="1"
+                            value="2"></div>
+                    <div class="col-12"><label class="form-label small fw-semibold">URL RTMP CCTV
+                            aktif</label><input id="streamUrl" class="form-control" placeholder="rtmp://..."></div>
+                    <div class="col-12"><button class="btn btn-primary">Simpan Pengaturan</button><span
+                            id="settingsMessage" class="small text-success ms-3"></span></div>
+                </form>
+            </section>
+            {% endif %}
+        </main>
+    </div>
+
+    <!-- Modal Tambah / Edit Kamera -->
+    <div class="modal fade" id="cameraModal" tabindex="-1">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content border-0 shadow-lg">
+                <div class="modal-header">
+                    <h5 class="modal-title">Tambah Kamera</h5>
+                    <button class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <form id="cameraForm">
+                    <div class="modal-body">
+                        <input type="hidden" id="cameraId">
+                        <div class="mb-3">
+                            <label class="form-label">Nama CCTV *</label>
+                            <input id="cameraNameInput" class="form-control" required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">URL RTMP *</label>
+                            <input id="cameraUrl" class="form-control" required placeholder="rtmp://...">
+                        </div>
+                        <div class="form-check form-switch">
+                            <input id="cameraActive" class="form-check-input" type="checkbox" checked>
+                            <label class="form-check-label">Kamera aktif</label>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-light" data-bs-dismiss="modal">Batal</button>
+                        <button type="submit" class="btn btn-primary">Simpan Kamera</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+
+</html>
