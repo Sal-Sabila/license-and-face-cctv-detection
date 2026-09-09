@@ -92,9 +92,11 @@ class StreamAIService:
             try:
                 plate_boxes = self.plate_detector.detect(frame)
                 for pb in plate_boxes:
-                    # pb: [x1, y1, x2, y2, conf, cls]
-                    bx = [int(pb[0]), int(pb[1]), int(pb[2]), int(pb[3])]
-                    p_conf = float(pb[4]) if len(pb) > 4 else 0.5
+                    # PlateDetector mengembalikan dictionary, bukan array mentah.
+                    bx = [int(value) for value in pb.get("bbox", [])]
+                    if len(bx) != 4:
+                        continue
+                    p_conf = float(pb.get("confidence", 0.0))
 
                     # Crop plat untuk OCR
                     px1, py1, px2, py2 = max(0, bx[0]), max(0, bx[1]), min(w, bx[2]), min(h, bx[3])
@@ -116,7 +118,7 @@ class StreamAIService:
                         "crop": plate_crop
                     })
             except Exception as e:
-                pass
+                print(f"[AI STREAM ERROR] Plate detection failed: {e}")
 
             self.last_results = {"persons": person_dets, "plates": plate_dets}
 
