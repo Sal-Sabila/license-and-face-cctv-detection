@@ -442,6 +442,9 @@ async function loadDetections() {
                         <button class="btn btn-outline-primary btn-sm px-2 py-1" title="Lihat Foto" onclick="openImageModal('${esc(photo)}', '${esc(item.plate || 'Detail Deteksi')}', '${esc(item.camera)} · ${esc(item.timestamp)}', 'Akurasi: <b>${item.confidence_percent}%</b> · Status: <b>${esc(item.status)}</b>')">
                             <i class="bi bi-eye"></i>
                         </button>
+                        <button class="btn btn-outline-danger btn-sm px-2 py-1" title="Hapus Deteksi" onclick="deleteDetection(${item.id})">
+                            <i class="bi bi-trash"></i>
+                        </button>
                     </td>
                 </tr>
             `;
@@ -451,6 +454,19 @@ async function loadDetections() {
         tableBody.innerHTML = `<tr><td colspan="8" class="text-center text-danger py-4">Gagal memuat data deteksi.</td></tr>`;
     }
 }
+
+async function deleteDetection(detectionId) {
+    if (!confirm('Hapus histori deteksi ini beserta capture terkait?')) return;
+    try {
+        const result = await json(`/api/detections/${encodeURIComponent(detectionId)}`, { method: 'DELETE' });
+        if (!result.success) throw new Error(result.message || 'Penghapusan gagal');
+        await loadDetections();
+    } catch (error) {
+        console.error('Error deleteDetection:', error);
+        alert(error.message || 'Gagal menghapus deteksi.');
+    }
+}
+window.deleteDetection = deleteDetection;
 
 async function initDetectionsPage() {
     try {
@@ -604,6 +620,9 @@ async function loadPlateHistory() {
                         <button class="btn btn-outline-primary btn-sm px-2 py-1" title="Lihat Foto Crop" onclick="openImageModal('${esc(photo)}', 'Plat Nomor: ${esc(item.plate)}', '${esc(item.camera)} · ${esc(item.timestamp)}', 'Confidence OCR: <b>${item.confidence_percent}%</b> · Status: <b>${esc(item.status)}</b>')">
                             <i class="bi bi-eye"></i>
                         </button>
+                        <button class="btn btn-outline-danger btn-sm px-2 py-1" title="Hapus Riwayat Plat" onclick="deletePlateHistory(${item.id})">
+                            <i class="bi bi-trash"></i>
+                        </button>
                     </td>
                 </tr>
             `;
@@ -613,6 +632,19 @@ async function loadPlateHistory() {
         tableBody.innerHTML = `<tr><td colspan="7" class="text-center text-danger py-4">Gagal memuat riwayat plat.</td></tr>`;
     }
 }
+
+async function deletePlateHistory(plateId) {
+    if (!confirm('Hapus riwayat plat ini beserta event dan capture terkait?')) return;
+    try {
+        const result = await json(`/api/plate/history/${encodeURIComponent(plateId)}`, { method: 'DELETE' });
+        if (!result.success) throw new Error(result.message || 'Penghapusan gagal');
+        await loadPlateHistory();
+    } catch (error) {
+        console.error('Error deletePlateHistory:', error);
+        alert(error.message || 'Gagal menghapus riwayat plat.');
+    }
+}
+window.deletePlateHistory = deletePlateHistory;
 
 async function initHistoryPage() {
     try {

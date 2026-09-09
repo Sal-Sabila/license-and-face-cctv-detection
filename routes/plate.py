@@ -136,6 +136,17 @@ def list_detections():
         return jsonify({"success": False, "message": str(e), "data": []}), 500
 
 
+@plate_bp.route("/detections/<int:detection_id>", methods=["DELETE"])
+def delete_detection(detection_id):
+    """Menghapus satu histori deteksi beserta data turunannya."""
+    try:
+        if not db.delete_detection(detection_id):
+            return jsonify({"success": False, "message": "Deteksi tidak ditemukan"}), 404
+        return jsonify({"success": True, "message": "Deteksi berhasil dihapus"})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
 # ============================================================
 # ENDPOINT RIWAYAT DETEKSI PLAT & WAJAH
 # ============================================================
@@ -197,6 +208,17 @@ def plate_history():
         return jsonify({"success": True, "data": plate_list})
     except Exception as e:
         return jsonify({"success": False, "message": str(e), "data": []}), 500
+
+
+@plate_bp.route("/plate/history/<int:plate_id>", methods=["DELETE"])
+def delete_plate_history(plate_id):
+    """Menghapus satu histori plat beserta event dan capture terkait."""
+    try:
+        if not db.delete_plate(plate_id):
+            return jsonify({"success": False, "message": "Riwayat plat tidak ditemukan"}), 404
+        return jsonify({"success": True, "message": "Riwayat plat berhasil dihapus"})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
 
 
 @plate_bp.route("/plate/latest", methods=["GET"])

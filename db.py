@@ -175,6 +175,77 @@ def delete_camera(camera_id: int):
             return cur.rowcount > 0
 
 
+def _delete_capture_file(path):
+    """Menghapus file capture lokal tanpa menggagalkan penghapusan database."""
+    if not path:
+        return
+    absolute_path = os.path.join(BASE_DIR, str(path).replace("/", os.sep))
+    try:
+        if os.path.isfile(absolute_path):
+            os.remove(absolute_path)
+    except OSError:
+        pass
+
+
+def delete_detection(detection_id: int) -> bool:
+    """Menghapus satu event deteksi beserta plat/log dan capture terkait."""
+    with get_db() as conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT fd.plate_id, fd.face_image_path, p.plate_image_path
+                    FROM full_detection fd
+                    LEFT JOIN plate p ON p.plate_id = fd.plate_id
+                    WHERE fd.detection_id = %s
+                """, (detection_id,))
+                event = cur.fetchone()
+                if not event:
+                    return False
+
+                cur.execute("DELETE FROM full_detection WHERE detection_id = %s", (detection_id,))
+                if event["plate_id"] is not None:
+                    cur.execute("DELETE FROM plate_logs WHERE plate_id = %s", (event["plate_id"],))
+                    cur.execute("DELETE FROM suspicious_plates WHERE plate_id = %s", (event["plate_id"],))
+                    cur.execute("DELETE FROM plate WHERE plate_id = %s", (event["plate_id"],))
+                conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    _delete_capture_file(event.get("face_image_path"))
+    _delete_capture_file(event.get("plate_image_path"))
+    return True
+
+
+def delete_plate(plate_id: int) -> bool:
+    """Menghapus satu plat beserta event, log, dan capture terkait."""
+    with get_db() as conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT plate_image_path FROM plate WHERE plate_id = %s", (plate_id,))
+                plate = cur.fetchone()
+                if not plate:
+                    return False
+
+                cur.execute("""
+                    SELECT face_image_path FROM full_detection WHERE plate_id = %s
+                """, (plate_id,))
+                face_paths = cur.fetchall()
+                cur.execute("DELETE FROM full_detection WHERE plate_id = %s", (plate_id,))
+                cur.execute("DELETE FROM plate_logs WHERE plate_id = %s", (plate_id,))
+                cur.execute("DELETE FROM suspicious_plates WHERE plate_id = %s", (plate_id,))
+                cur.execute("DELETE FROM plate WHERE plate_id = %s", (plate_id,))
+                conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    _delete_capture_file(plate.get("plate_image_path"))
+    for face in face_paths:
+        _delete_capture_file(face.get("face_image_path"))
+    return True
+
+
 # ============================================================
 # FUNGSI INSERT DETEKSI (PRODUCER / AI WORKER)
 # ============================================================
