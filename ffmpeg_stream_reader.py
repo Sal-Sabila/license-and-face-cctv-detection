@@ -75,14 +75,8 @@ class FFmpegStreamReader:
 
         self.width = width
         self.height = height
-<<<<<<< Updated upstream
         self.rtmp_url = rtmp_url
         self.ffmpeg_path = ffmpeg_path
-=======
-        self.raw_url = rtmp_url
-        self.rtmp_url = normalize_stream_url(rtmp_url)
-        self.ffmpeg_path = find_ffmpeg_executable(ffmpeg_path)
->>>>>>> Stashed changes
 
         # Ukuran 1 frame mentah dalam bytes:
         # width * height * 3 channel warna (BGR), 1 byte per channel

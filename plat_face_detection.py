@@ -900,6 +900,48 @@ def _plate_crop_from_capture(capture):
     return None
 
 
+def _person_capture_image(capture):
+    if not isinstance(capture, dict):
+        return None
+
+    path = capture.get("image_path")
+    if isinstance(path, str) and os.path.exists(path):
+        image = cv2.imread(path)
+        if image is not None and image.size > 0:
+            return image
+
+    return None
+
+
+def _draw_preview_image(panel, image, x1, y1, x2, y2):
+    if image is None:
+        return False
+
+    try:
+        h, w = image.shape[:2]
+        if h <= 0 or w <= 0:
+            return False
+
+        box_w = x2 - x1
+        box_h = y2 - y1
+        scale = min(box_w / w, box_h / h)
+
+        new_w = max(1, int(w * scale))
+        new_h = max(1, int(h * scale))
+
+        resized = cv2.resize(
+            image,
+            (new_w, new_h),
+            interpolation=cv2.INTER_AREA,
+        )
+
+        px = x1 + (box_w - new_w) // 2
+        py = y1 + (box_h - new_h) // 2
+
+        panel[py:py + new_h, px:px + new_w] = resized
+        return True
+    except Exception:
+        return False
 def _draw_panel_title(panel, text, y, font_scale=0.58):
     cv2.putText(
         panel,
@@ -923,7 +965,7 @@ def draw_side_panel(camera):
     - Track ID
     - Waktu
     - History 5 plat terakhir
-    """
+    """n
     panel = np.zeros(
         (PANEL_HEIGHT, PANEL_WIDTH, 3),
         dtype=np.uint8,
@@ -931,6 +973,7 @@ def draw_side_panel(camera):
     panel[:] = (18, 18, 22)
 
     # Border panel
+
     cv2.rectangle(
         panel,
         (1, 1),
@@ -955,6 +998,7 @@ def draw_side_panel(camera):
         "CAPTURE PLAT TERBARU",
         40,
         0.52,
+ main
     )
 
     latest = camera.get("plate_latest_capture")
@@ -1155,6 +1199,8 @@ def draw_side_panel(camera):
             plate = _plate_text(item) or "-"
             conf = _plate_confidence(item)
 
+
+
             track_id = _first_value(
                 item,
                 ["track_id", "id", "tracker_id"],
@@ -1191,7 +1237,6 @@ def draw_side_panel(camera):
                 break
 
     return panel
-
 
 def draw_combined_display(frame, camera):
     """Live CCTV di kiri + panel hasil plat di kanan."""
@@ -1475,7 +1520,7 @@ def main():
             "person_tracked": sv.Detections.empty(),
             "person_capture_state": {},
             "person_total_captured": 0,
-
+            "person_latest_capture": None,
             "plate_tracker": plate_tracker,
             "plate_active_tracks": [],
             "plate_history": [],
@@ -1737,6 +1782,16 @@ def main():
                                         now_ts,
                                     "capture_count":
                                         count,
+                                }
+
+                                target_cam[
+                                    "person_latest_capture"
+                                ] = {
+                                    "image_path": saved_path,
+                                    "track_id": track_id,
+                                    "confidence": conf,
+                                    "timestamp": now,
+                                    "expires_at": time.time() + 5.0,
                                 }
 
                                 print(
