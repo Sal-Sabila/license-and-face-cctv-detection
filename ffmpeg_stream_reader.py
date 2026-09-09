@@ -78,22 +78,38 @@ class FFmpegStreamReader:
         self.rtmp_url = rtmp_url
         self.ffmpeg_path = ffmpeg_path
 
+
+
         # Ukuran 1 frame mentah dalam bytes:
         # width * height * 3 channel warna (BGR), 1 byte per channel
         self.frame_size_bytes = width * height * 3
 
+        url_str = str(self.rtmp_url).strip()
         perintah = [
             self.ffmpeg_path,
-
             "-loglevel", "error",   # supaya stdout FFmpeg bersih
+        ]
 
-            # Timeout koneksi & reconnect untuk HTTP / HLS
-            "-reconnect", "1",
-            "-reconnect_at_eof", "1",
-            "-reconnect_streamed", "1",
-            "-reconnect_delay_max", "2",
-            "-rw_timeout", "15000000",
+        if url_str.startswith("rtsp://"):
+            perintah.extend([
+                "-rtsp_transport", "tcp",
+                "-stimeout", "15000000",
+            ])
+        elif url_str.startswith("rtmp://"):
+            perintah.extend([
+                "-rtmp_live", "live",
+                "-rw_timeout", "15000000",
+            ])
+        elif url_str.startswith("http://") or url_str.startswith("https://"):
+            perintah.extend([
+                "-reconnect", "1",
+                "-reconnect_at_eof", "1",
+                "-reconnect_streamed", "1",
+                "-reconnect_delay_max", "2",
+                "-rw_timeout", "15000000",
+            ])
 
+        perintah.extend([
             "-i", self.rtmp_url,
 
             "-an",                  # tidak perlu audio, buang saja
@@ -104,13 +120,17 @@ class FFmpegStreamReader:
             "-f", "rawvideo",       # output format: piksel mentah
             "-pix_fmt", "bgr24",    # urutan warna sama seperti OpenCV
             "-",                    # tulis hasil ke stdout
-        ]
+        ])
 
-        self.process = subprocess.Popen(
-            perintah,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
+        try:
+            self.process = subprocess.Popen(
+                perintah,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as e:
+            print(f"[FFMPEG ERROR] Gagal menjalankan proses FFmpeg: {e}")
+            self.process = None
 
     def reconnect(self):
         """Restart FFmpeg after a remote stream EOF or network timeout."""
@@ -158,11 +178,23 @@ class FFmpegStreamReader:
             if not chunk:
 
                 # FFmpeg berhenti mengirim data -> stream putus
+                self._capture_error()
                 return None
 
             potongan_data.extend(chunk)
 
         return bytes(potongan_data)
+
+    def _capture_error(self):
+        """Menyimpan pesan FFmpeg terakhir untuk diagnosis operator."""
+        if self.process is None or self.process.stderr is None:
+            return
+        try:
+            error = self.process.stderr.read().decode("utf-8", errors="replace").strip()
+            if error:
+                self.error_message = error[-500:]
+        except (OSError, ValueError):
+            pass
 
     def read(self):
         """

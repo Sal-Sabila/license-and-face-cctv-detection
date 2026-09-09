@@ -25,8 +25,8 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 CAMERA_STREAMS = [
     {
         "id": 1,
-        "name": "GSMasukViewLuar",
-        "url": "rtmp://103.255.15.138:1935/live/GSMasukViewLuar.stream",
+        "name": "Jogokariyan",
+        "url": "rtmp://103.255.15.222:1935/atcs-kota/JogokariyanUtara.stream",
     },
 ]
 
@@ -140,6 +140,7 @@ class FrameGrabber:
     def _open_stream(self):
         if isinstance(self.source, str) and (
             self.source.startswith("rtmp://")
+            or self.source.startswith("rtsp://")
             or self.source.startswith("http://")
             or self.source.startswith("https://")
             or self.source.endswith(".stream")
@@ -1478,13 +1479,39 @@ def main():
     # Cameras
     # --------------------------------------------------------
 
+    active_streams = []
+    if len(sys.argv) > 1 and sys.argv[1].strip():
+        active_streams = [{
+            "id": 1,
+            "name": "CustomStream",
+            "url": sys.argv[1].strip(),
+        }]
+    else:
+        try:
+            import db
+            db_cams = db.get_all_cameras()
+            active_from_db = [c for c in db_cams if c.get("status") == 1]
+            if not active_from_db and db_cams:
+                active_from_db = db_cams[:1]
+            if active_from_db:
+                active_streams = [{
+                    "id": c["camera_id"],
+                    "name": c.get("location") or f"CAM {c['camera_id']}",
+                    "url": c["stream_url"],
+                } for c in active_from_db]
+        except Exception:
+            pass
+
+    if not active_streams:
+        active_streams = CAMERA_STREAMS
+
     cameras = []
 
     print(
-        "[CAMERA] Membuka 1 stream CCTV..."
+        f"[CAMERA] Membuka {len(active_streams)} stream CCTV..."
     )
 
-    for info in CAMERA_STREAMS:
+    for info in active_streams:
 
         print(
             f"  -> CAM {info['id']}: "

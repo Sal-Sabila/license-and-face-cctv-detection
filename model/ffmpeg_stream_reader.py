@@ -61,13 +61,23 @@ class FFmpegStreamReader:
             "-loglevel", "error",   # supaya stdout FFmpeg bersih
         ]
 
-        if self.stream_url.startswith("rtmp://"):
-            perintah.extend(["-rw_timeout", "15000000"])
+        if self.stream_url.startswith("rtsp://"):
+            perintah.extend([
+                "-rtsp_transport", "tcp",
+                "-stimeout", "15000000",
+            ])
+        elif self.stream_url.startswith("rtmp://"):
+            perintah.extend([
+                "-rtmp_live", "live",
+                "-rw_timeout", "15000000",
+            ])
         elif self.stream_url.startswith("http://") or self.stream_url.startswith("https://"):
             perintah.extend([
                 "-reconnect", "1",
+                "-reconnect_at_eof", "1",
                 "-reconnect_streamed", "1",
                 "-reconnect_delay_max", "5",
+                "-rw_timeout", "15000000",
             ])
 
         perintah.extend([
