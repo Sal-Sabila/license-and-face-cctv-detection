@@ -965,7 +965,7 @@ def draw_side_panel(camera):
     - Track ID
     - Waktu
     - History 5 plat terakhir
-    """n
+    """
     panel = np.zeros(
         (PANEL_HEIGHT, PANEL_WIDTH, 3),
         dtype=np.uint8,
