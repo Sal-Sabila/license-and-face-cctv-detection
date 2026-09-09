@@ -18,7 +18,7 @@ from ultralytics import YOLO
 # KONFIGURASI CCTV
 # ============================================================
 
-RTMP_URL = "rtmp://103.255.15.138:1935/live/GSMasukViewLuar.stream"
+RTMP_URL = "rtmp://103.255.15.222:1935/atcs-kota/JogokariyanUtara.stream"
 
 STREAM_WIDTH = 2688
 STREAM_HEIGHT = 1520
