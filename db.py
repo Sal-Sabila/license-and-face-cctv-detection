@@ -3,7 +3,8 @@ import re
 import cv2
 import pymysql
 import pymysql.cursors
-from datetime import datetime
+from datetime import datetime, timedelta
+import random
 
 # ============================================================
 # KONFIGURASI DATABASE (LARAGON MYSQL)
@@ -227,19 +228,25 @@ def save_detection_event(
                     (plate_id, camera_id, log_status)
                 )
 
-            # 2. Simpan dan catat Orang / Wajah (jika terdeteksi)
+            # 2. Simpan dan catat Orang / Wajah / Deteksi Terintegrasi
             detection_id = None
-            if face_crop is not None or face_conf > 0:
+            if face_crop is not None or face_conf > 0 or plate_id is not None:
                 if face_crop is not None:
                     face_rel_path = save_crop_locally(face_crop, FACE_DIR, prefix="face", camera_id=camera_id, track_id=track_id)
 
-                face_status = compute_face_status(face_conf)
+                if face_crop is not None or face_conf > 0:
+                    status_val = compute_face_status(face_conf)
+                    conf_val = face_conf
+                else:
+                    status_val = plate_status
+                    conf_val = plate_conf
+
                 cur.execute(
                     """
                     INSERT INTO full_detection (plate_id, camera_id, detection_status, detection_confidence, face_image_path)
                     VALUES (%s, %s, %s, %s, %s);
                     """,
-                    (plate_id, camera_id, face_status, face_conf, face_rel_path)
+                    (plate_id, camera_id, status_val, conf_val, face_rel_path)
                 )
                 detection_id = cur.lastrowid
 
@@ -293,7 +300,7 @@ def get_recent_detections(limit: int = 50):
 
 
 def get_dashboard_stats():
-    """Mengambil ringkasan statistik untuk widget dashboard."""
+    """Mengambil ringkasan statistik komprehensif untuk widget dashboard."""
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) AS total_plates FROM plate;")
@@ -305,12 +312,720 @@ def get_dashboard_stats():
             cur.execute("SELECT COUNT(*) AS today_detections FROM full_detection WHERE DATE(created_at) = CURDATE();")
             today_detections = cur.fetchone()["today_detections"]
 
-            cur.execute("SELECT COUNT(*) AS active_cameras FROM cameras WHERE status = 1;")
-            active_cameras = cur.fetchone()["active_cameras"]
+            cur.execute("SELECT COUNT(*) AS total_cams, SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END) AS active_cams FROM cameras;")
+            cam_row = cur.fetchone()
+            total_cams = cam_row["total_cams"] or 0
+            active_cameras = cam_row["active_cams"] or 0
+
+            cur.execute("SELECT COUNT(*) AS plate_success FROM plate WHERE detection_status = 1;")
+            plate_success = cur.fetchone()["plate_success"] or 0
+
+            cur.execute("SELECT COUNT(*) AS need_check FROM full_detection WHERE detection_status = 2;")
+            need_check = cur.fetchone()["need_check"] or 0
 
             return {
                 "total_plates": total_plates,
                 "total_full_detections": total_full,
                 "today_detections": today_detections,
-                "active_cameras": active_cameras
+                "active_cameras": active_cameras,
+                "total_cameras": total_cams,
+                "plate_success": plate_success,
+                "need_check": need_check
             }
+
+
+# ============================================================
+# FUNGSI SYSTEM SETTINGS & DIAGNOSTIK
+# ============================================================
+
+def ensure_tables_exist():
+    """Membuat tabel system_settings jika belum ada di database MySQL."""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS `system_settings` (
+                        `setting_key` VARCHAR(100) NOT NULL PRIMARY KEY,
+                        `setting_value` TEXT NULL,
+                        `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+                """)
+                cur.execute("SELECT COUNT(*) AS c FROM system_settings;")
+                if cur.fetchone()["c"] == 0:
+                    defaults = [
+                        ("operator_name", "Administrator"),
+                        ("refresh_interval", "2"),
+                        ("stream_url", "http://103.255.15.138:1935/live/GSMasukViewLuar.stream/playlist.m3u8"),
+                        ("min_confidence_plate", "70"),
+                        ("min_confidence_face", "65"),
+                        ("company_name", "PT CCTV Security Solusindo"),
+                        ("system_title", "PlateVision Enterprise Monitoring")
+                    ]
+                    cur.executemany(
+                        "INSERT INTO system_settings (setting_key, setting_value) VALUES (%s, %s);",
+                        defaults
+                    )
+    except Exception as e:
+        print(f"[DB WARNING] ensure_tables_exist error: {e}")
+
+# Inisialisasi tabel settings saat modul diimpor
+ensure_tables_exist()
+
+
+def get_system_settings() -> dict:
+    """Mengambil seluruh konfigurasi sistem dari database MySQL."""
+    ensure_tables_exist()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT setting_key, setting_value FROM system_settings;")
+            rows = cur.fetchall()
+            return {r["setting_key"]: r["setting_value"] for r in rows}
+
+
+def update_system_settings(settings_dict: dict) -> bool:
+    """Menyimpan atau memperbarui konfigurasi sistem ke MySQL."""
+    ensure_tables_exist()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            for k, v in settings_dict.items():
+                cur.execute(
+                    """
+                    INSERT INTO system_settings (setting_key, setting_value)
+                    VALUES (%s, %s)
+                    ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value);
+                    """,
+                    (str(k), str(v))
+                )
+    return True
+
+
+def get_system_diagnostics() -> dict:
+    """Mengambil informasi diagnostik dan kesehatan sistem."""
+    diag = {
+        "db_connected": False,
+        "db_name": DB_CONFIG["database"],
+        "db_host": DB_CONFIG["host"],
+        "table_counts": {},
+        "storage": {
+            "total_files": 0,
+            "total_size_mb": 0.0
+        },
+        "server_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                diag["db_connected"] = True
+                for tbl in ["cameras", "full_detection", "plate", "plate_logs", "suspicious_plates", "system_settings"]:
+                    try:
+                        cur.execute(f"SELECT COUNT(*) AS cnt FROM {tbl};")
+                        diag["table_counts"][tbl] = cur.fetchone()["cnt"]
+                    except Exception:
+                        diag["table_counts"][tbl] = 0
+
+        # Hitung kapasitas disk folder captures
+        total_size = 0
+        total_files = 0
+        if os.path.exists(CAPTURE_DIR):
+            for root, _, files in os.walk(CAPTURE_DIR):
+                for f in files:
+                    total_files += 1
+                    fp = os.path.join(root, f)
+                    try:
+                        total_size += os.path.getsize(fp)
+                    except Exception:
+                        pass
+        diag["storage"]["total_files"] = total_files
+        diag["storage"]["total_size_mb"] = round(total_size / (1024 * 1024), 2)
+    except Exception as e:
+        diag["error"] = str(e)
+    return diag
+
+
+# ============================================================
+# FUNGSI QUERY PAGINASI DETEKSI & RIWAYAT PLAT
+# ============================================================
+
+def get_all_detections_paginated(
+    page: int = 1,
+    limit: int = 20,
+    type_filter: str = "all",
+    status_filter: str = "all",
+    camera_id: int = None,
+    search: str = None,
+    start_date: str = None,
+    end_date: str = None
+) -> dict:
+    """
+    Mengambil data deteksi gabungan (Wajah & Plat) dengan filter lengkap dan paginasi.
+    """
+    page = max(1, int(page))
+    limit = max(1, min(100, int(limit)))
+    offset = (page - 1) * limit
+
+    where_clauses = ["1=1"]
+    params = []
+
+    if type_filter == "plate":
+        where_clauses.append("fd.plate_id IS NOT NULL")
+    elif type_filter == "face":
+        where_clauses.append("(fd.face_image_path IS NOT NULL OR fd.plate_id IS NULL)")
+
+    if status_filter in ("0", "1", "2"):
+        where_clauses.append("fd.detection_status = %s")
+        params.append(int(status_filter))
+
+    if camera_id is not None and str(camera_id).isdigit():
+        where_clauses.append("fd.camera_id = %s")
+        params.append(int(camera_id))
+
+    if search:
+        s = f"%{search.strip()}%"
+        where_clauses.append("(p.plate_number LIKE %s OR c.location LIKE %s)")
+        params.extend([s, s])
+
+    if start_date:
+        where_clauses.append("DATE(fd.created_at) >= %s")
+        params.append(start_date)
+
+    if end_date:
+        where_clauses.append("DATE(fd.created_at) <= %s")
+        params.append(end_date)
+
+    where_sql = " AND ".join(where_clauses)
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            count_sql = f"""
+                SELECT COUNT(*) AS total
+                FROM full_detection fd
+                LEFT JOIN plate p ON fd.plate_id = p.plate_id
+                LEFT JOIN cameras c ON fd.camera_id = c.camera_id
+                WHERE {where_sql};
+            """
+            cur.execute(count_sql, params)
+            total = cur.fetchone()["total"]
+
+            data_sql = f"""
+                SELECT 
+                    fd.detection_id,
+                    fd.plate_id,
+                    fd.camera_id,
+                    fd.detection_status AS status_code,
+                    fd.detection_confidence,
+                    fd.face_image_path,
+                    fd.created_at AS detected_at,
+                    p.plate_number,
+                    p.detection_status AS plate_status,
+                    p.detection_confidence AS plate_confidence,
+                    p.ocr_confidence,
+                    p.plate_image_path,
+                    COALESCE(c.location, 'CCTV') AS camera_name
+                FROM full_detection fd
+                LEFT JOIN plate p ON fd.plate_id = p.plate_id
+                LEFT JOIN cameras c ON fd.camera_id = c.camera_id
+                WHERE {where_sql}
+                ORDER BY fd.created_at DESC
+                LIMIT %s OFFSET %s;
+            """
+            cur.execute(data_sql, params + [limit, offset])
+            rows = cur.fetchall()
+
+            items = []
+            for r in rows:
+                p_num = r.get("plate_number")
+                has_plate = bool(p_num or r.get("plate_image_path"))
+                has_face = bool(r.get("face_image_path"))
+
+                if has_plate and has_face:
+                    dtype = "combined"
+                elif has_plate:
+                    dtype = "plate"
+                else:
+                    dtype = "face"
+
+                code = r.get("status_code", 1)
+                stext = "Terbaca" if code == 1 else ("Perlu cek" if code == 2 else "Gagal")
+
+                conf = float(r.get("detection_confidence") or r.get("plate_confidence") or 0.0)
+                dt_str = r["detected_at"].strftime("%Y-%m-%d %H:%M:%S") if isinstance(r.get("detected_at"), datetime) else str(r.get("detected_at") or "")
+
+                items.append({
+                    "id": r["detection_id"],
+                    "type": dtype,
+                    "plate": p_num or "-",
+                    "camera": r.get("camera_name") or "CCTV",
+                    "camera_id": r.get("camera_id"),
+                    "confidence": conf,
+                    "confidence_percent": round(conf * 100, 1),
+                    "timestamp": dt_str,
+                    "status": stext,
+                    "status_code": code,
+                    "plate_image_path": r.get("plate_image_path"),
+                    "face_image_path": r.get("face_image_path")
+                })
+
+            total_pages = max(1, (total + limit - 1) // limit)
+            return {
+                "items": items,
+                "total": total,
+                "page": page,
+                "limit": limit,
+                "total_pages": total_pages
+            }
+
+
+def get_plate_history_paginated(
+    page: int = 1,
+    limit: int = 20,
+    search: str = None,
+    camera_id: int = None,
+    status_filter: str = "all",
+    start_date: str = None,
+    end_date: str = None
+) -> dict:
+    """Mengambil riwayat deteksi plat nomor dengan filter pencarian dan paginasi."""
+    page = max(1, int(page))
+    limit = max(1, min(100, int(limit)))
+    offset = (page - 1) * limit
+
+    where_clauses = ["p.plate_number IS NOT NULL"]
+    params = []
+
+    if search:
+        s = f"%{search.strip()}%"
+        where_clauses.append("(p.plate_number LIKE %s OR c.location LIKE %s)")
+        params.extend([s, s])
+
+    if status_filter in ("0", "1", "2"):
+        where_clauses.append("p.detection_status = %s")
+        params.append(int(status_filter))
+
+    if camera_id is not None and str(camera_id).isdigit():
+        where_clauses.append("pl.camera_id = %s")
+        params.append(int(camera_id))
+
+    if start_date:
+        where_clauses.append("DATE(p.created_at) >= %s")
+        params.append(start_date)
+
+    if end_date:
+        where_clauses.append("DATE(p.created_at) <= %s")
+        params.append(end_date)
+
+    where_sql = " AND ".join(where_clauses)
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            count_sql = f"""
+                SELECT COUNT(*) AS total
+                FROM plate p
+                LEFT JOIN plate_logs pl ON p.plate_id = pl.plate_id
+                LEFT JOIN cameras c ON pl.camera_id = c.camera_id
+                WHERE {where_sql};
+            """
+            cur.execute(count_sql, params)
+            total = cur.fetchone()["total"]
+
+            data_sql = f"""
+                SELECT 
+                    p.plate_id,
+                    p.plate_number,
+                    p.detection_status,
+                    p.detection_confidence,
+                    p.ocr_confidence,
+                    p.plate_image_path,
+                    p.created_at AS detected_at,
+                    COALESCE(c.location, 'CCTV') AS camera_name,
+                    pl.camera_id
+                FROM plate p
+                LEFT JOIN plate_logs pl ON p.plate_id = pl.plate_id
+                LEFT JOIN cameras c ON pl.camera_id = c.camera_id
+                WHERE {where_sql}
+                ORDER BY p.created_at DESC
+                LIMIT %s OFFSET %s;
+            """
+            cur.execute(data_sql, params + [limit, offset])
+            rows = cur.fetchall()
+
+            items = []
+            for r in rows:
+                code = r.get("detection_status", 1)
+                stext = "Terbaca" if code == 1 else ("Perlu cek" if code == 2 else "Gagal")
+                conf = float(r.get("ocr_confidence") or r.get("detection_confidence") or 0.0)
+                dt_str = r["detected_at"].strftime("%Y-%m-%d %H:%M:%S") if isinstance(r.get("detected_at"), datetime) else str(r.get("detected_at") or "")
+
+                items.append({
+                    "id": r["plate_id"],
+                    "plate": r["plate_number"],
+                    "camera": r.get("camera_name") or "CCTV",
+                    "camera_id": r.get("camera_id"),
+                    "confidence": conf,
+                    "confidence_percent": round(conf * 100, 1),
+                    "timestamp": dt_str,
+                    "status": stext,
+                    "status_code": code,
+                    "image_path": r.get("plate_image_path")
+                })
+
+            total_pages = max(1, (total + limit - 1) // limit)
+            return {
+                "items": items,
+                "total": total,
+                "page": page,
+                "limit": limit,
+                "total_pages": total_pages
+            }
+
+
+# ============================================================
+# FUNGSI STATISTIK STANDAR PERUSAHAAN (ENTERPRISE ANALYTICS)
+# ============================================================
+
+def get_enterprise_statistics(period: str = "today") -> dict:
+    """
+    Mengambil metrik analitik lengkap berstandar perusahaan:
+    - 6 KPI Korporat (Total Deteksi, Read Rate, Wajah/Orang, Avg Confidence, Need Check, CCTV Health)
+    - Tren Deteksi Waktu Nyata (Time-series per jam atau per hari)
+    - Distribusi Beban Lalu Lintas per Kamera CCTV
+    - Distribusi Kualitas SLA Deteksi (Donut Chart)
+    - Analisis Jam Sibuk (Peak Hours Analysis)
+    - Top 10 Plat Kendaraan Paling Sering Terdeteksi
+    """
+    period = period.lower() if period else "today"
+    now = datetime.now()
+
+    if period == "today":
+        cond_fd = "DATE(fd.created_at) = CURDATE()"
+        cond_p = "DATE(p.created_at) = CURDATE()"
+        period_label = "Hari Ini"
+    elif period == "7d":
+        cond_fd = "fd.created_at >= DATE_SUB(CURDATE(), INTERVAL 6 DAY)"
+        cond_p = "p.created_at >= DATE_SUB(CURDATE(), INTERVAL 6 DAY)"
+        period_label = "7 Hari Terakhir"
+    elif period == "30d":
+        cond_fd = "fd.created_at >= DATE_SUB(CURDATE(), INTERVAL 29 DAY)"
+        cond_p = "p.created_at >= DATE_SUB(CURDATE(), INTERVAL 29 DAY)"
+        period_label = "30 Hari Terakhir"
+    else:
+        cond_fd = "1=1"
+        cond_p = "1=1"
+        period_label = "Semua Waktu"
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # 1. KPI Aggregations
+            kpi_sql = f"""
+                SELECT 
+                    COUNT(*) AS total_detections,
+                    SUM(CASE WHEN fd.plate_id IS NOT NULL THEN 1 ELSE 0 END) AS total_plates,
+                    SUM(CASE WHEN fd.face_image_path IS NOT NULL OR fd.plate_id IS NULL THEN 1 ELSE 0 END) AS total_faces,
+                    SUM(CASE WHEN fd.detection_status = 1 THEN 1 ELSE 0 END) AS status_valid,
+                    SUM(CASE WHEN fd.detection_status = 2 THEN 1 ELSE 0 END) AS status_warning,
+                    SUM(CASE WHEN fd.detection_status = 0 THEN 1 ELSE 0 END) AS status_failed,
+                    AVG(fd.detection_confidence) AS avg_conf
+                FROM full_detection fd
+                WHERE {cond_fd};
+            """
+            cur.execute(kpi_sql)
+            kpi_row = cur.fetchone()
+
+            total_dets = int(kpi_row["total_detections"] or 0)
+            total_plates = int(kpi_row["total_plates"] or 0)
+            total_faces = int(kpi_row["total_faces"] or 0)
+            status_valid = int(kpi_row["status_valid"] or 0)
+            status_warning = int(kpi_row["status_warning"] or 0)
+            status_failed = int(kpi_row["status_failed"] or 0)
+            avg_conf = float(kpi_row["avg_conf"] or 0.85)
+
+            # Hitung Read Rate Plat %
+            plate_read_rate = round((float(status_valid) / max(total_dets, 1)) * 100, 1) if total_dets > 0 else 100.0
+
+            # Hitung Kamera Aktif vs Total
+            cur.execute("SELECT COUNT(*) AS total_cams, SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END) AS active_cams FROM cameras;")
+            cam_info = cur.fetchone()
+            total_cams = int(cam_info["total_cams"] or 0)
+            active_cams = int(cam_info["active_cams"] or 0)
+            cam_availability = round((float(active_cams) / max(total_cams, 1)) * 100, 1)
+
+            # 2. Time-Series Trend Data (Chart.js Line / Bar)
+            trend_labels = []
+            trend_plates = []
+            trend_faces = []
+            trend_totals = []
+
+            if period == "today":
+                # 24 jam (00:00 - 23:00)
+                cur.execute(f"""
+                    SELECT 
+                        HOUR(fd.created_at) AS hr,
+                        COUNT(*) AS total,
+                        SUM(CASE WHEN fd.plate_id IS NOT NULL THEN 1 ELSE 0 END) AS plates,
+                        SUM(CASE WHEN fd.face_image_path IS NOT NULL OR fd.plate_id IS NULL THEN 1 ELSE 0 END) AS faces
+                    FROM full_detection fd
+                    WHERE {cond_fd}
+                    GROUP BY HOUR(fd.created_at)
+                    ORDER BY hr ASC;
+                """)
+                hour_map = {r["hr"]: r for r in cur.fetchall()}
+                for h in range(24):
+                    label = f"{h:02d}:00"
+                    trend_labels.append(label)
+                    row = hour_map.get(h, {})
+                    p_val = int(row.get("plates", 0) or 0)
+                    f_val = int(row.get("faces", 0) or 0)
+                    t_val = int(row.get("total", 0) or 0)
+                    trend_plates.append(p_val)
+                    trend_faces.append(f_val)
+                    trend_totals.append(t_val)
+            elif period in ("7d", "30d"):
+                num_days = 7 if period == "7d" else 30
+                cur.execute(f"""
+                    SELECT 
+                        DATE(fd.created_at) AS dt,
+                        COUNT(*) AS total,
+                        SUM(CASE WHEN fd.plate_id IS NOT NULL THEN 1 ELSE 0 END) AS plates,
+                        SUM(CASE WHEN fd.face_image_path IS NOT NULL OR fd.plate_id IS NULL THEN 1 ELSE 0 END) AS faces
+                    FROM full_detection fd
+                    WHERE {cond_fd}
+                    GROUP BY DATE(fd.created_at)
+                    ORDER BY dt ASC;
+                """)
+                date_map = {str(r["dt"]): r for r in cur.fetchall()}
+                for i in range(num_days - 1, -1, -1):
+                    day_d = now - timedelta(days=i)
+                    d_key = day_d.strftime("%Y-%m-%d")
+                    d_label = day_d.strftime("%d/%m")
+                    trend_labels.append(d_label)
+                    row = date_map.get(d_key, {})
+                    p_val = int(row.get("plates", 0) or 0)
+                    f_val = int(row.get("faces", 0) or 0)
+                    t_val = int(row.get("total", 0) or 0)
+                    trend_plates.append(p_val)
+                    trend_faces.append(f_val)
+                    trend_totals.append(t_val)
+            else:
+                # All time: Group by date (last 60 days or all)
+                cur.execute(f"""
+                    SELECT 
+                        DATE(fd.created_at) AS dt,
+                        COUNT(*) AS total,
+                        SUM(CASE WHEN fd.plate_id IS NOT NULL THEN 1 ELSE 0 END) AS plates,
+                        SUM(CASE WHEN fd.face_image_path IS NOT NULL OR fd.plate_id IS NULL THEN 1 ELSE 0 END) AS faces
+                    FROM full_detection fd
+                    GROUP BY DATE(fd.created_at)
+                    ORDER BY dt ASC
+                    LIMIT 30;
+                """)
+                for r in cur.fetchall():
+                    d_obj = r["dt"]
+                    lbl = d_obj.strftime("%d/%m") if isinstance(d_obj, datetime) else str(d_obj)
+                    trend_labels.append(lbl)
+                    trend_plates.append(int(r.get("plates") or 0))
+                    trend_faces.append(int(r.get("faces") or 0))
+                    trend_totals.append(int(r.get("total") or 0))
+
+            # 3. Camera Traffic Distribution
+            cur.execute(f"""
+                SELECT 
+                    COALESCE(c.location, 'CCTV') AS camera_name,
+                    COUNT(fd.detection_id) AS total_count,
+                    SUM(CASE WHEN fd.plate_id IS NOT NULL THEN 1 ELSE 0 END) AS plate_count,
+                    SUM(CASE WHEN fd.face_image_path IS NOT NULL OR fd.plate_id IS NULL THEN 1 ELSE 0 END) AS face_count
+                FROM full_detection fd
+                LEFT JOIN cameras c ON fd.camera_id = c.camera_id
+                WHERE {cond_fd}
+                GROUP BY fd.camera_id, c.location
+                ORDER BY total_count DESC;
+            """)
+            cam_dist_rows = cur.fetchall()
+            camera_distribution = []
+            for cr in cam_dist_rows:
+                c_tot = int(cr["total_count"] or 0)
+                share = round((c_tot / max(total_dets, 1)) * 100, 1)
+                camera_distribution.append({
+                    "camera_name": cr["camera_name"],
+                    "total_count": c_tot,
+                    "plate_count": int(cr["plate_count"] or 0),
+                    "face_count": int(cr["face_count"] or 0),
+                    "percentage": share
+                })
+
+            # 4. Analisis Jam Sibuk (Peak Hours)
+            cur.execute(f"""
+                SELECT 
+                    HOUR(fd.created_at) AS hr,
+                    COUNT(*) AS cnt
+                FROM full_detection fd
+                WHERE {cond_fd}
+                GROUP BY HOUR(fd.created_at)
+                ORDER BY cnt DESC
+                LIMIT 3;
+            """)
+            peak_rows = cur.fetchall()
+            peak_hours = []
+            for pr in peak_rows:
+                h = pr["hr"]
+                c_peak = pr["cnt"]
+                share = round((c_peak / max(total_dets, 1)) * 100, 1)
+                peak_hours.append({
+                    "time_range": f"{h:02d}:00 - {h+1:02d}:00 WIB",
+                    "count": c_peak,
+                    "percentage": share
+                })
+
+            # 5. Top 10 Plat Paling Sering Terdeteksi
+            cur.execute(f"""
+                SELECT 
+                    p.plate_number,
+                    COUNT(*) AS total_seen,
+                    MAX(p.created_at) AS last_seen,
+                    MAX(p.detection_status) AS last_status,
+                    AVG(p.detection_confidence) AS avg_conf,
+                    COALESCE(MAX(c.location), 'CCTV') AS last_camera
+                FROM plate p
+                LEFT JOIN plate_logs pl ON p.plate_id = pl.plate_id
+                LEFT JOIN cameras c ON pl.camera_id = c.camera_id
+                WHERE p.plate_number IS NOT NULL AND p.plate_number != '' AND {cond_p}
+                GROUP BY p.plate_number
+                ORDER BY total_seen DESC
+                LIMIT 10;
+            """)
+            top_plate_rows = cur.fetchall()
+            top_plates = []
+            for tp in top_plate_rows:
+                code = tp.get("last_status", 1)
+                stext = "Terbaca" if code == 1 else ("Perlu cek" if code == 2 else "Gagal")
+                ls = tp.get("last_seen")
+                ls_str = ls.strftime("%Y-%m-%d %H:%M") if isinstance(ls, datetime) else str(ls or "")
+                top_plates.append({
+                    "plate_number": tp["plate_number"],
+                    "total_seen": tp["total_seen"],
+                    "last_seen": ls_str,
+                    "last_camera": tp.get("last_camera") or "CCTV",
+                    "status": stext,
+                    "status_code": code,
+                    "avg_confidence_percent": round(float(tp.get("avg_conf") or 0.8) * 100, 1)
+                })
+
+            return {
+                "period": period,
+                "period_label": period_label,
+                "kpi": {
+                    "total_detections": total_dets,
+                    "total_plates": total_plates,
+                    "total_faces": total_faces,
+                    "plate_read_rate": plate_read_rate,
+                    "avg_confidence": round(avg_conf * 100, 1),
+                    "need_check_count": status_warning,
+                    "status_valid": status_valid,
+                    "status_failed": status_failed,
+                    "active_cameras": active_cams,
+                    "total_cameras": total_cams,
+                    "camera_availability": cam_availability
+                },
+                "trend": {
+                    "labels": trend_labels,
+                    "plates": trend_plates,
+                    "faces": trend_faces,
+                    "totals": trend_totals
+                },
+                "camera_distribution": camera_distribution,
+                "status_breakdown": {
+                    "valid": status_valid,
+                    "warning": status_warning,
+                    "failed": status_failed
+                },
+                "peak_hours": peak_hours,
+                "top_plates": top_plates
+            }
+
+
+# ============================================================
+# UTILITY: SEED DATA CONTOH (SIMULASI PERUSAHAAN)
+# ============================================================
+
+def seed_demo_data(count: int = 60) -> int:
+    """
+    Menghasilkan data simulasi deteksi realistis (Plat Indonesia & Wajah)
+    yang tersebar di beberapa hari terakhir untuk demonstrasi statistik perusahaan.
+    """
+    sample_plates = [
+        "B 1982 UJ", "B 2341 SKO", "D 1089 AB", "B 8821 QW", "B 1204 PF",
+        "D 4452 KL", "F 3819 GA", "B 9090 VIP", "L 1422 ZX", "B 5512 TYY",
+        "AD 6721 NB", "B 3110 KLA", "DK 8812 BC", "B 4729 MNB", "B 6182 KPR",
+        "B 2888 BOS", "D 3311 BB", "F 9012 QQ", "B 1542 WTR", "B 7001 JKT"
+    ]
+
+    cams = get_all_cameras()
+    cam_ids = [c["camera_id"] for c in cams] if cams else [1]
+
+    now = datetime.now()
+    inserted = 0
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            for _ in range(count):
+                days_ago = random.choice([0, 0, 0, 1, 1, 2, 3, 4, 5, 6])
+                # Bias jam sibuk (07-09, 12-13, 16-18)
+                hour = random.choices(
+                    list(range(24)),
+                    weights=[1, 1, 1, 1, 1, 2, 5, 12, 15, 8, 7, 9, 11, 10, 8, 9, 14, 16, 12, 7, 5, 4, 2, 1]
+                )[0]
+                minute = random.randint(0, 59)
+                second = random.randint(0, 59)
+
+                dt = (now - timedelta(days=days_ago)).replace(hour=hour, minute=minute, second=second)
+                dt_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+
+                cam_id = random.choice(cam_ids)
+                has_plate = random.random() < 0.65
+                has_face = random.random() < 0.85
+
+                plate_id = None
+                p_status = 1
+                p_conf = round(random.uniform(0.75, 0.98), 4)
+
+                if has_plate:
+                    plate_num = random.choice(sample_plates)
+                    if random.random() < 0.15:
+                        p_status = 2
+                        p_conf = round(random.uniform(0.45, 0.68), 4)
+                    elif random.random() < 0.05:
+                        p_status = 0
+                        p_conf = round(random.uniform(0.20, 0.38), 4)
+
+                    cur.execute(
+                        """
+                        INSERT INTO plate (plate_number, detection_status, detection_confidence, ocr_confidence, created_at)
+                        VALUES (%s, %s, %s, %s, %s);
+                        """,
+                        (plate_num, p_status, p_conf, p_conf, dt_str)
+                    )
+                    plate_id = cur.lastrowid
+
+                    cur.execute(
+                        """
+                        INSERT INTO plate_logs (plate_id, camera_id, status, created_at)
+                        VALUES (%s, %s, %s, %s);
+                        """,
+                        (plate_id, cam_id, p_status, dt_str)
+                    )
+
+                if has_face or plate_id:
+                    f_conf = round(random.uniform(0.70, 0.96), 4) if has_face else p_conf
+                    f_status = 1 if f_conf >= 0.65 else 2
+                    if not has_face and plate_id:
+                        f_status = p_status
+
+                    cur.execute(
+                        """
+                        INSERT INTO full_detection (plate_id, camera_id, detection_status, detection_confidence, created_at)
+                        VALUES (%s, %s, %s, %s, %s);
+                        """,
+                        (plate_id, cam_id, f_status, f_conf, dt_str)
+                    )
+                    inserted += 1
+
+    return inserted
+

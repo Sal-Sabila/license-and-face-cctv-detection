@@ -75,18 +75,10 @@ class FFmpegStreamReader:
 
         self.width = width
         self.height = height
-<<<<<<< Updated upstream
         self.rtmp_url = rtmp_url
-<<<<<<< Updated upstream
         self.ffmpeg_path = ffmpeg_path
-=======
-        self.raw_url = rtmp_url
-        self.rtmp_url = normalize_stream_url(rtmp_url)
-        self.ffmpeg_path = find_ffmpeg_executable(ffmpeg_path)
->>>>>>> Stashed changes
-=======
-        self.ffmpeg_path = find_ffmpeg_executable(ffmpeg_path)
->>>>>>> Stashed changes
+
+
 
         # Ukuran 1 frame mentah dalam bytes:
         # width * height * 3 channel warna (BGR), 1 byte per channel
@@ -186,11 +178,23 @@ class FFmpegStreamReader:
             if not chunk:
 
                 # FFmpeg berhenti mengirim data -> stream putus
+                self._capture_error()
                 return None
 
             potongan_data.extend(chunk)
 
         return bytes(potongan_data)
+
+    def _capture_error(self):
+        """Menyimpan pesan FFmpeg terakhir untuk diagnosis operator."""
+        if self.process is None or self.process.stderr is None:
+            return
+        try:
+            error = self.process.stderr.read().decode("utf-8", errors="replace").strip()
+            if error:
+                self.error_message = error[-500:]
+        except (OSError, ValueError):
+            pass
 
     def read(self):
         """
