@@ -1096,6 +1096,19 @@ select {
     border-radius: 8px 8px 0 0;
 }
 
+.date-filter-group {
+    flex: 0 0 auto;
+}
+
+.date-filter-group select {
+    width: 150px;
+}
+
+.date-filter-group input[type="date"] {
+    width: 145px;
+    flex: 0 0 145px;
+}
+
 .preview-img-container {
     background: #0f172a;
     border: 1px solid rgba(255, 255, 255, 0.08);

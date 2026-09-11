@@ -513,7 +513,12 @@ def seed_demo():
 def export_detections_csv():
     """Mengekspor seluruh data deteksi ke format CSV."""
     try:
-        res = db.get_all_detections_paginated(page=1, limit=5000)
+        res = db.get_all_detections_paginated(
+            page=1,
+            limit=5000,
+            start_date=request.args.get("start_date", type=str),
+            end_date=request.args.get("end_date", type=str)
+        )
         items = res.get("items", [])
 
         output = io.StringIO()
@@ -545,7 +550,12 @@ def export_detections_csv():
 def export_plates_csv():
     """Mengekspor riwayat plat nomor ke format CSV."""
     try:
-        res = db.get_plate_history_paginated(page=1, limit=5000)
+        res = db.get_plate_history_paginated(
+            page=1,
+            limit=5000,
+            start_date=request.args.get("start_date", type=str),
+            end_date=request.args.get("end_date", type=str)
+        )
         items = res.get("items", [])
 
         output = io.StringIO()
