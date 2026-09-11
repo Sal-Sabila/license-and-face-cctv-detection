@@ -129,6 +129,10 @@
                                 <p>Satu frame untuk deteksi wajah dan plat nomor.</p>
                             </div>
                             <div class="d-flex gap-2 align-items-center flex-wrap">
+                                <select id="detectionMode" class="form-select form-select-sm" title="Pilih sumber deteksi">
+                                    <option value="stream">Stream CCTV</option>
+                                    <option value="video">File Video</option>
+                                </select>
                                 <div class="form-check form-switch mb-0 d-flex align-items-center gap-2 me-1 bbox-switch-container" title="Aktifkan / Nonaktifkan Bounding Box AI">
                                     <input class="form-check-input" type="checkbox" id="bboxToggle" checked>
                                     <label class="form-check-label small fw-semibold text-nowrap" for="bboxToggle">
@@ -136,12 +140,18 @@
                                     </label>
                                 </div>
                                 <select id="cameraSelect" class="form-select form-select-sm"></select>
+                                <label id="videoFileLabel" class="btn btn-outline-secondary btn-sm mb-0" style="display: none;" title="Pilih file video">
+                                    <i class="bi bi-file-earmark-play"></i>
+                                    <span>Pilih Video</span>
+                                    <input id="videoFileInput" type="file" accept="video/*" hidden>
+                                </label>
                                 <button id="startStreamBtn" class="btn btn-primary btn-sm" title="Mulai Stream"><i class="bi bi-play-fill"></i></button>
                                 <button id="stopStreamBtn" class="btn btn-outline-danger btn-sm" title="Hentikan Stream"><i class="bi bi-stop-fill"></i></button>
                             </div>
                         </div>
                         <div class="video-stage">
                             <img id="liveStreamImg" class="live-stream-feed" alt="Live CCTV Feed" style="display: none;" />
+                            <video id="processedVideo" class="live-stream-feed" controls playsinline style="display: none;" aria-label="Hasil deteksi video"></video>
                             <div class="video-placeholder" id="videoPlaceholder">
                                 <div class="camera-icon"><i class="bi bi-camera-video"></i></div>
                                 <strong id="cameraName">Tidak Ada Kamera</strong>

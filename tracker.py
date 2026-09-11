@@ -217,6 +217,7 @@ class Track:
         self.best_bbox = bbox
 
         self.finalized = False
+        self.is_stable = False
 
     # ========================================================
     # TAMBAH OCR
@@ -382,69 +383,32 @@ class PlateTracker:
 
     def __init__(
         self,
-
         iou_threshold=0.3,
-
         max_frame_gap=30,
-
-        ocr_every_n_matches=5,
-
+        ocr_every_n_matches=3,
+        # Detection minimum
+        min_detection_confidence=0.20,
         # OCR minimum
-        min_ocr_confidence=0.60,
-
+        min_ocr_confidence=0.45,
         # Final OCR minimum
-        min_final_confidence=0.55,
-
+        min_final_confidence=0.45,
         # Minimal jumlah bacaan yang sama
-        min_consistent_reads=2,
-
-        # Satu bacaan boleh lolos jika sangat kuat
-        single_read_ocr_confidence=0.88,
-
-        single_read_detection_confidence=0.65,
-
+        min_consistent_reads=1,
+        # Satu bacaan boleh lolos jika format valid
+        single_read_ocr_confidence=0.55,
+        single_read_detection_confidence=0.20,
         max_history=5,
     ):
-
-        self.iou_threshold = (
-            float(iou_threshold)
-        )
-
-        self.max_frame_gap = (
-            int(max_frame_gap)
-        )
-
-        self.ocr_every_n_matches = (
-            int(ocr_every_n_matches)
-        )
-
-        self.min_ocr_confidence = (
-            float(min_ocr_confidence)
-        )
-
-        self.min_final_confidence = (
-            float(min_final_confidence)
-        )
-
-        self.min_consistent_reads = (
-            int(min_consistent_reads)
-        )
-
-        self.single_read_ocr_confidence = (
-            float(
-                single_read_ocr_confidence
-            )
-        )
-
-        self.single_read_detection_confidence = (
-            float(
-                single_read_detection_confidence
-            )
-        )
-
-        self.max_history = (
-            int(max_history)
-        )
+        self.iou_threshold = float(iou_threshold)
+        self.max_frame_gap = int(max_frame_gap)
+        self.ocr_every_n_matches = int(ocr_every_n_matches)
+        self.min_detection_confidence = float(min_detection_confidence)
+        self.min_ocr_confidence = float(min_ocr_confidence)
+        self.min_final_confidence = float(min_final_confidence)
+        self.min_consistent_reads = int(min_consistent_reads)
+        self.single_read_ocr_confidence = float(single_read_ocr_confidence)
+        self.single_read_detection_confidence = float(single_read_detection_confidence)
+        self.max_history = int(max_history)
 
         self.tracks = {}
 
@@ -734,7 +698,7 @@ class PlateTracker:
             # Safety filter
             if (
                 detection_confidence
-                < 0.50
+                < self.min_detection_confidence
             ):
                 continue
 
@@ -845,7 +809,8 @@ class PlateTracker:
             # =================================================
 
             if (
-                track.matches_since_last_ocr
+                not track.is_stable
+                and track.matches_since_last_ocr
                 >= self.ocr_every_n_matches
             ):
 
@@ -876,15 +841,24 @@ class PlateTracker:
                     int(y2)
                 )
 
-                if (
-                    x2 <= x1
-                    or y2 <= y1
-                ):
+                cw = x2 - x1
+                ch = y2 - y1
+
+                # Abaikan crop yang terlalu kecil untuk menghemat CPU
+                if cw < 30 or ch < 10:
                     continue
 
+                # Crop dengan sedikit margin kontekstual
+                pad_x = max(2, int(cw * 0.08))
+                pad_y = max(2, int(ch * 0.08))
+                cx1 = max(0, x1 - pad_x)
+                cy1 = max(0, y1 - pad_y)
+                cx2 = min(frame.shape[1], x2 + pad_x)
+                cy2 = min(frame.shape[0], y2 + pad_y)
+
                 crop = frame[
-                    y1:y2,
-                    x1:x2
+                    cy1:cy2,
+                    cx1:cx2
                 ]
 
                 # =================================================
@@ -989,8 +963,12 @@ class PlateTracker:
                         x2,
                         y2
                     ),
-
                 )
+
+                # Jika sudah mendapatkan bacaan plat Indonesia yang valid dan jelas,
+                # tandai track sebagai stabil agar tidak membebani CPU dengan OCR berulang
+                if hasil_ocr.get("is_indonesia_pattern", False) and ocr_confidence >= 0.58:
+                    track.is_stable = True
 
         # ====================================================
         # EXPIRED TRACK

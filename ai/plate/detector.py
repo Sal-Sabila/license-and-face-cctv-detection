@@ -6,14 +6,14 @@ class PlateDetector:
     def __init__(
         self,
         model_path="models/plate/license-plate-finetune-v2n.pt",
-        confidence=0.50,
+        confidence=0.25,
         imgsz=640,
         device="cpu",
         max_det=10,
         iou=0.45,
-        min_width=30,
+        min_width=25,
         min_height=10,
-        min_aspect_ratio=1.5,
+        min_aspect_ratio=1.1,
         max_aspect_ratio=6.5
     ):
 
@@ -118,8 +118,14 @@ class PlateDetector:
                 if aspect_ratio > self.max_aspect_ratio:
                     continue
 
-                # Crop
-                crop = frame[y1:y2, x1:x2]
+                # Crop dengan padding kontekstual agar huruf di tepi plat tidak terpotong
+                pad_w = max(2, int(width * 0.08))
+                pad_h = max(2, int(height * 0.08))
+                cy1 = max(0, y1 - pad_h)
+                cy2 = min(frame_height, y2 + pad_h)
+                cx1 = max(0, x1 - pad_w)
+                cx2 = min(frame_width, x2 + pad_w)
+                crop = frame[cy1:cy2, cx1:cx2]
 
                 if crop is None or crop.size == 0:
                     continue

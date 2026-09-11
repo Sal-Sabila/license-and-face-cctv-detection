@@ -227,6 +227,11 @@ async function initDashboard() {
     const startBtn = document.getElementById('startStreamBtn');
     const stopBtn = document.getElementById('stopStreamBtn');
     const bboxToggle = document.getElementById('bboxToggle');
+    const detectionMode = document.getElementById('detectionMode');
+    const videoFileLabel = document.getElementById('videoFileLabel');
+    const videoFileInput = document.getElementById('videoFileInput');
+    const processedVideo = document.getElementById('processedVideo');
+    let videoJobPoller = null;
 
     function getStreamUrl(camId) {
         const showBbox = bboxToggle ? (bboxToggle.checked ? 1 : 0) : 1;
@@ -237,6 +242,12 @@ async function initDashboard() {
         if (!streamImg) return;
         const cam = cameras.find(c => String(c.id) === String(camId));
         if (cam) {
+            if (videoJobPoller) clearInterval(videoJobPoller);
+            if (processedVideo) {
+                processedVideo.pause();
+                processedVideo.removeAttribute('src');
+                processedVideo.style.display = 'none';
+            }
             streamImg.src = getStreamUrl(cam.id);
             streamImg.style.display = 'block';
             if (placeholder) placeholder.style.display = 'none';
@@ -248,13 +259,103 @@ async function initDashboard() {
         if (!streamImg) return;
         streamImg.src = '';
         streamImg.style.display = 'none';
+        if (videoJobPoller) clearInterval(videoJobPoller);
+        if (processedVideo) {
+            processedVideo.pause();
+            processedVideo.removeAttribute('src');
+            processedVideo.style.display = 'none';
+        }
         if (placeholder) placeholder.style.display = 'flex';
         if (cameraNameEl) cameraNameEl.textContent = 'Stream Dihentikan';
     }
 
-    const activeCam = cameras.find(item => item.active) || cameras[0];
-    if (activeCam && activeCam.active) {
-        if (select) select.value = activeCam.id;
+    function updateDetectionMode() {
+        const videoMode = detectionMode?.value === 'video';
+        if (videoFileLabel) videoFileLabel.style.display = videoMode ? 'inline-flex' : 'none';
+        if (streamImg) streamImg.style.display = videoMode ? (videoJobPoller ? 'block' : 'none') : streamImg.src ? 'block' : 'none';
+        if (processedVideo && !videoMode) processedVideo.style.display = 'none';
+    }
+
+    async function startVideoJob(file, camId) {
+        if (!file || !camId) return;
+        stopCameraStream();
+        if (cameraNameEl) cameraNameEl.textContent = `Memproses ${file.name}`;
+
+        const formData = new FormData();
+        formData.append('video', file);
+        formData.append('camera_id', camId);
+
+        try {
+            const response = await fetch('/api/video_jobs', { method: 'POST', body: formData });
+            const result = await response.json();
+            if (!response.ok || !result.success) throw new Error(result.message || 'Upload video gagal');
+            localStorage.setItem('platevision.videoJobId', result.job_id);
+            monitorVideoJob(result.job_id);
+        } catch (error) {
+            if (cameraNameEl) cameraNameEl.textContent = error.message;
+            if (placeholder) placeholder.style.display = 'flex';
+        }
+    }
+
+    function monitorVideoJob(jobId) {
+        if (!jobId) return;
+        if (videoJobPoller) clearInterval(videoJobPoller);
+        if (streamImg) {
+            streamImg.src = `/api/video_jobs/${jobId}/feed`;
+            streamImg.style.display = 'block';
+        }
+        if (placeholder) placeholder.style.display = 'none';
+        if (processedVideo) processedVideo.style.display = 'none';
+
+        const checkJob = async () => {
+            try {
+                const statusResult = await json(`/api/video_jobs/${jobId}`);
+                const job = statusResult.data;
+                if (job.status === 'completed') {
+                    clearInterval(videoJobPoller);
+                    if (streamImg) {
+                        streamImg.src = '';
+                        streamImg.style.display = 'none';
+                    }
+                    if (processedVideo) {
+                        processedVideo.src = `${job.output_url}?t=${Date.now()}`;
+                        processedVideo.style.display = 'block';
+                        processedVideo.load();
+                        processedVideo.play().catch(() => {});
+                    }
+                    if (placeholder) placeholder.style.display = 'none';
+                    if (cameraNameEl) cameraNameEl.textContent = 'Hasil Deteksi Video';
+                } else if (job.status === 'failed') {
+                    clearInterval(videoJobPoller);
+                    localStorage.removeItem('platevision.videoJobId');
+                    if (cameraNameEl) cameraNameEl.textContent = `Gagal: ${job.error || 'proses video'}`;
+                } else if (cameraNameEl) {
+                    cameraNameEl.textContent = `Memproses video (${job.progress || 0}%)`;
+                }
+            } catch (error) {
+                clearInterval(videoJobPoller);
+                console.error('Status video error:', error);
+            }
+        };
+
+        checkJob();
+        videoJobPoller = setInterval(checkJob, 1000);
+    }
+
+    const savedMode = localStorage.getItem('platevision.mode') || 'stream';
+    const savedCameraId = localStorage.getItem('platevision.cameraId');
+    const savedVideoJobId = localStorage.getItem('platevision.videoJobId');
+    if (detectionMode) detectionMode.value = savedMode;
+    if (savedCameraId && cameras.some(camera => String(camera.id) === savedCameraId)) {
+        select.value = savedCameraId;
+    }
+
+    const activeCam = cameras.find(item => String(item.id) === String(select?.value)) || cameras.find(item => item.active) || cameras[0];
+    if (activeCam && select) select.value = activeCam.id;
+
+    if (savedMode === 'video' && savedVideoJobId) {
+        monitorVideoJob(savedVideoJobId);
+    } else if (activeCam && activeCam.active) {
         startCameraStream(activeCam.id);
     } else {
         stopCameraStream();
@@ -262,14 +363,28 @@ async function initDashboard() {
 
     if (select) {
         select.addEventListener('change', () => {
+            localStorage.setItem('platevision.cameraId', select.value);
+            if (detectionMode?.value === 'video') return;
             if (select.value) startCameraStream(select.value);
         });
     }
 
+    detectionMode?.addEventListener('change', () => {
+        localStorage.setItem('platevision.mode', detectionMode.value);
+        if (detectionMode.value === 'video') stopCameraStream();
+        updateDetectionMode();
+    });
+
+    videoFileInput?.addEventListener('change', () => {
+        const selectedId = select?.value || activeCam?.id;
+        const file = videoFileInput.files?.[0];
+        if (file && selectedId) startVideoJob(file, selectedId);
+    });
+
     if (bboxToggle) {
         bboxToggle.addEventListener('change', () => {
             const selectedId = select?.value || activeCam?.id;
-            if (selectedId && streamImg && streamImg.style.display !== 'none') {
+            if (selectedId && detectionMode?.value !== 'video' && streamImg && streamImg.style.display !== 'none') {
                 startCameraStream(selectedId);
             }
         });
@@ -278,15 +393,23 @@ async function initDashboard() {
     if (startBtn) {
         startBtn.addEventListener('click', () => {
             const selectedId = select?.value || activeCam?.id;
-            if (selectedId) startCameraStream(selectedId);
+            if (!selectedId) return;
+            if (detectionMode?.value === 'video') {
+                startVideoJob(videoFileInput?.files?.[0], selectedId);
+            } else {
+                startCameraStream(selectedId);
+            }
         });
     }
 
     if (stopBtn) {
         stopBtn.addEventListener('click', () => {
+            localStorage.removeItem('platevision.videoJobId');
             stopCameraStream();
         });
     }
+
+    updateDetectionMode();
 
     async function refreshRecentList() {
         try {

@@ -146,12 +146,24 @@ def koreksi_plat_indonesia(raw_text: str) -> dict:
                 }
 
     # ------------------------------------------------------------
-    # SKENARIO 2: Teks utuh tanpa pemisah (contoh: "B2750TRO", "AB1618SI", "ABBC83BZ")
+    # SKENARIO 2: Teks utuh tanpa pemisah (contoh: "B2750TRO", "AB1618SI", "P4712Y")
     # Coba berbagai kemungkinan pemotongan segmen (Prefix, Number, Suffix)
     # ------------------------------------------------------------
     best_candidate = None
 
-    for prefix_len in [2, 1]:
+    # Tentukan urutan pengecekan prefix:
+    # Jika karakter pertama adalah kode wilayah 1 huruf dan karakter kedua adalah angka,
+    # prioritaskan prefix 1 huruf terlebih dahulu agar tidak merusak plat seperti P 4712 Y -> PA 712 Y.
+    first_char = cleaned[0] if len(cleaned) > 0 else ""
+    second_char = cleaned[1] if len(cleaned) > 1 else ""
+    single_codes = {"A", "B", "D", "E", "F", "G", "H", "K", "L", "M", "N", "P", "R", "S", "T", "W", "Z"}
+
+    if first_char in single_codes and (second_char.isdigit() or second_char in CHAR_TO_DIGIT):
+        prefix_options = [1, 2]
+    else:
+        prefix_options = [2, 1]
+
+    for prefix_len in prefix_options:
         if len(cleaned) < prefix_len + 2:
             continue
 
@@ -176,20 +188,41 @@ def koreksi_plat_indonesia(raw_text: str) -> dict:
             if raw_p3 and (not p3.isalpha() or len(p3) > 3):
                 continue
 
+            # Hitung mutasi karakter (penalti jika mengubah karakter asli)
+            mutations = (
+                sum(c1 != c2 for c1, c2 in zip(raw_p1, p1))
+                + sum(c1 != c2 for c1, c2 in zip(raw_p2, p2))
+                + sum(c1 != c2 for c1, c2 in zip(raw_p3, p3))
+            )
+
             score = 0
             if is_known_prefix:
-                score += 12
+                score += 15
             elif any(kw[0] == p1[0] for kw in KODE_WILAYAH_INDONESIA if len(kw) == 2):
-                score += 6
+                score += 5
+
+            # Bonus kecocokan alami (tanpa mutasi)
+            if mutations == 0:
+                score += 10
+            else:
+                score -= (mutations * 4)
+
+            # Bonus jika prefix 1 huruf asli tidak dipaksa menjadi 2 huruf
+            if prefix_len == 1 and raw_p1 in single_codes:
+                score += 5
 
             if p1.isalpha():
                 score += 3
             if p2.isdigit():
                 score += 4
             if raw_p2.isdigit():
-                score += 2
+                score += 3
             if raw_p3 and raw_p3.isalpha():
                 score += 3
+
+            # Plat Indonesia umumnya memiliki 1-4 digit angka
+            if 1 <= len(p2) <= 4:
+                score += 2
 
             candidate = {
                 "text": f"{p1}{p2}{p3}",
@@ -296,13 +329,20 @@ def filter_dan_gabung_spasial(rec_texts, rec_boxes, rec_scores, min_confidence=0
     valid_items = []
 
     for it in items:
-        # Cek jika teks jelas-jelas format tanggal pajak (misal "08.28")
+        clean_text = re.sub(r"[^A-Z0-9]", "", it["text"].upper())
+
+        # Cek jika teks jelas format tanggal pajak
         if is_tax_date_format(it["text"]):
             continue
 
-        # Cek jika tinggi box jauh lebih kecil (<= 60% dari box terbesar)
-        # dan posisinya berada di area bawah
-        if max_h > 0 and it["h"] <= 0.60 * max_h and it["yc"] > min_yc:
+        # Jika teks berada di area bawah (yc jauh lebih besar dari min_yc)
+        # dan teksnya pendek (hanya angka masa berlaku seperti '12', '28', '190')
+        is_bottom = (it["yc"] - min_yc) > max(8.0, max_h * 0.50)
+        if is_bottom and (clean_text.isdigit() or len(clean_text) <= 3):
+            continue
+
+        # Cek jika tinggi box jauh lebih kecil (<= 60% dari box terbesar) dan posisinya di bawah
+        if max_h > 0 and it["h"] <= 0.60 * max_h and is_bottom:
             continue
 
         valid_items.append(it)
@@ -321,22 +361,21 @@ def filter_dan_gabung_spasial(rec_texts, rec_boxes, rec_scores, min_confidence=0
         for line in lines:
             avg_h = sum(x["h"] for x in line) / len(line)
             avg_yc = sum(x["yc"] for x in line) / len(line)
-            if abs(it["yc"] - avg_yc) <= max(6.0, avg_h * 0.55):
+            if abs(it["yc"] - avg_yc) <= max(4.0, avg_h * 0.40):
                 line.append(it)
                 placed = True
                 break
         if not placed:
             lines.append([it])
 
-    # Baris utama plat adalah baris dengan total tinggi & score karakter terbesar
-    best_line = max(
-        lines,
-        key=lambda l: (
-            sum(x["h"] for x in l),
-            sum(x["score"] for x in l),
-            len(l)
-        )
-    )
+    # Baris utama plat adalah baris dengan pola plat Indonesia terbaik / score terbesar
+    def _line_score(line):
+        raw_str = " ".join(x["text"] for x in sorted(line, key=lambda it: it["box"][0]))
+        res = koreksi_plat_indonesia(raw_str)
+        bonus = 30.0 if res["is_indonesia_pattern"] else (15.0 if res["valid"] else 0.0)
+        return bonus + sum(x["score"] for x in line) + sum(x["h"] for x in line)
+
+    best_line = max(lines, key=_line_score)
 
     # Urutkan elemen pada baris utama dari KIRI ke KANAN (horizontal sort by X)
     best_line.sort(key=lambda it: it["box"][0])

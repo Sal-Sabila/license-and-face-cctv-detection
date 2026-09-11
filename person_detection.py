@@ -32,6 +32,10 @@ import supervision as sv
 # Filter deprecation warning dari ByteTrack di terminal
 warnings.filterwarnings("ignore", category=FutureWarning)
 
+import torch
+torch.set_num_threads(2)
+cv2.setNumThreads(2)
+
 from ffmpeg_reader import FFmpegStreamReader
 
 
@@ -74,7 +78,7 @@ MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "yolov8n.p
 CAPTURE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "captures")
 
 # ── Deteksi YOLO ──
-CONFIDENCE_THRESHOLD = 0.40   # confidence minimum
+CONFIDENCE_THRESHOLD = 0.30   # confidence minimum (dioptimalkan untuk pejalan kaki CCTV)
 PERSON_CLASS_ID = 0            # class ID "person" di COCO
 MIN_BBOX_AREA = 1200           # batas minimal luas bbox (dalam skala tile 640x360)
 INFERENCE_IMGSZ = 480          # ukuran input gambar ke YOLO

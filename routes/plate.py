@@ -3,12 +3,76 @@ import cv2
 import csv
 import io
 import numpy as np
-from flask import Blueprint, jsonify, request, Response
+import os
+import threading
+import uuid
+import queue
+from flask import Blueprint, jsonify, request, Response, send_from_directory
 from datetime import datetime
 import db
 from ffmpeg_stream_reader import FFmpegStreamReader, normalize_stream_url
 
 plate_bp = Blueprint("plate", __name__)
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+VIDEO_DIR = os.path.join(BASE_DIR, "videos")
+VIDEO_UPLOAD_DIR = os.path.join(VIDEO_DIR, "uploads")
+VIDEO_OUTPUT_DIR = os.path.join(VIDEO_DIR, "processed")
+VIDEO_EXTENSIONS = {"mp4", "avi", "mov", "mkv", "webm", "m4v"}
+VIDEO_JOBS = {}
+VIDEO_JOBS_LOCK = threading.Lock()
+
+os.makedirs(VIDEO_UPLOAD_DIR, exist_ok=True)
+os.makedirs(VIDEO_OUTPUT_DIR, exist_ok=True)
+
+
+def _video_job(job_id, input_path, output_path, camera_id):
+    try:
+        from services.video_ai_service import VideoAIService
+
+        def update_progress(frame_number, total_frames, processed_frame=None):
+            progress = round((frame_number / total_frames) * 100, 1) if total_frames else 0
+            with VIDEO_JOBS_LOCK:
+                if job_id in VIDEO_JOBS:
+                    VIDEO_JOBS[job_id]["progress"] = progress
+                    if processed_frame is not None:
+                        encoded, buffer = cv2.imencode(
+                            ".jpg", processed_frame,
+                            [int(cv2.IMWRITE_JPEG_QUALITY), 78]
+                        )
+                        if encoded:
+                            VIDEO_JOBS[job_id]["latest_frame"] = buffer.tobytes()
+
+        with VIDEO_JOBS_LOCK:
+            VIDEO_JOBS[job_id]["status"] = "processing"
+
+        service = VideoAIService(
+            video_path=input_path,
+            output_path=output_path,
+            camera_id=camera_id,
+            show_window=False,
+            progress_callback=update_progress
+        )
+        service.run()
+
+        with VIDEO_JOBS_LOCK:
+            VIDEO_JOBS[job_id].update({
+                "status": "completed",
+                "progress": 100,
+                "output_url": f"/api/video_jobs/{job_id}/result"
+            })
+    except Exception as exc:
+        print(f"[VIDEO JOB ERROR] {job_id}: {exc}")
+        with VIDEO_JOBS_LOCK:
+            VIDEO_JOBS[job_id].update({
+                "status": "failed",
+                "error": str(exc)
+            })
+    finally:
+        try:
+            os.remove(input_path)
+        except OSError:
+            pass
 
 
 def parse_confidence(data):
@@ -16,6 +80,101 @@ def parse_confidence(data):
         return float(data.get("confidence"))
     except (TypeError, ValueError):
         return None
+
+
+@plate_bp.route("/video_jobs", methods=["POST"])
+def create_video_job():
+    """Menerima video dan memprosesnya di background agar request web tidak tertahan."""
+    uploaded = request.files.get("video")
+    if not uploaded or not uploaded.filename:
+        return jsonify({"success": False, "message": "File video wajib dipilih"}), 400
+
+    extension = uploaded.filename.rsplit(".", 1)[-1].lower() if "." in uploaded.filename else ""
+    if extension not in VIDEO_EXTENSIONS:
+        return jsonify({"success": False, "message": "Format video tidak didukung"}), 400
+
+    try:
+        camera_id = int(request.form.get("camera_id", 1))
+    except (TypeError, ValueError):
+        camera_id = 1
+
+    job_id = uuid.uuid4().hex
+    input_path = os.path.join(VIDEO_UPLOAD_DIR, f"{job_id}.{extension}")
+    output_path = os.path.join(VIDEO_OUTPUT_DIR, f"{job_id}.mp4")
+    uploaded.save(input_path)
+
+    with VIDEO_JOBS_LOCK:
+        VIDEO_JOBS[job_id] = {
+            "status": "queued",
+            "progress": 0,
+            "output_url": None,
+            "error": None,
+            "latest_frame": None
+        }
+
+    worker = threading.Thread(
+        target=_video_job,
+        args=(job_id, input_path, output_path, camera_id),
+        daemon=True
+    )
+    worker.start()
+
+    return jsonify({"success": True, "job_id": job_id}), 202
+
+
+@plate_bp.route("/video_jobs/<job_id>", methods=["GET"])
+def video_job_status(job_id):
+    with VIDEO_JOBS_LOCK:
+        job = VIDEO_JOBS.get(job_id)
+        if not job:
+            return jsonify({"success": False, "message": "Job video tidak ditemukan"}), 404
+        status = {
+            key: value
+            for key, value in job.items()
+            if key != "latest_frame"
+        }
+        return jsonify({"success": True, "data": status})
+
+
+@plate_bp.route("/video_jobs/<job_id>/result", methods=["GET"])
+def video_job_result(job_id):
+    filename = f"{job_id}.mp4"
+    with VIDEO_JOBS_LOCK:
+        job = VIDEO_JOBS.get(job_id)
+        if not job or job.get("status") != "completed":
+            return jsonify({"success": False, "message": "Video belum selesai diproses"}), 404
+    return send_from_directory(VIDEO_OUTPUT_DIR, filename, as_attachment=False)
+
+
+@plate_bp.route("/video_jobs/<job_id>/feed", methods=["GET"])
+def video_job_feed(job_id):
+    """Feed MJPEG frame deteksi terbaru selama video masih diproses."""
+    def generate_frames():
+        last_frame = None
+        while True:
+            with VIDEO_JOBS_LOCK:
+                job = VIDEO_JOBS.get(job_id)
+                if not job:
+                    return
+                status = job["status"]
+                frame = job.get("latest_frame")
+
+            if frame and frame != last_frame:
+                last_frame = frame
+                yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
+
+            if status in ("completed", "failed"):
+                return
+            time.sleep(0.12)
+
+    with VIDEO_JOBS_LOCK:
+        if job_id not in VIDEO_JOBS:
+            return jsonify({"success": False, "message": "Job video tidak ditemukan"}), 404
+
+    return Response(
+        generate_frames(),
+        mimetype="multipart/x-mixed-replace; boundary=frame"
+    )
 
 
 # ============================================================
@@ -480,6 +639,38 @@ def generate_mjpeg_stream(stream_url, width=960, height=540, draw_bbox=True, cam
     except Exception as e:
         print(f"[AI STREAM WARNING] AI Service load error: {e}")
 
+    # Pembacaan dan pengiriman frame tidak boleh menunggu inferensi AI.
+    # Queue satu item menjaga latency tetap rendah saat CPU sedang penuh.
+    ai_input = queue.Queue(maxsize=1)
+    ai_output = queue.Queue(maxsize=1)
+    stop_worker = threading.Event()
+
+    def run_ai_worker():
+        while not stop_worker.is_set():
+            try:
+                source_frame = ai_input.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            try:
+                result_frame = ai_service.process_frame(
+                    source_frame,
+                    draw_bbox=draw_bbox,
+                    camera_id=camera_id
+                )
+                while True:
+                    try:
+                        ai_output.get_nowait()
+                    except queue.Empty:
+                        break
+                ai_output.put_nowait(result_frame)
+            except Exception as e:
+                print(f"[AI STREAM ERROR] Frame processing failed: {e}")
+
+    worker = None
+    if ai_service is not None:
+        worker = threading.Thread(target=run_ai_worker, daemon=True)
+        worker.start()
+
     try:
         failed_reads = 0
         while True:
@@ -500,12 +691,22 @@ def generate_mjpeg_stream(stream_url, width=960, height=540, draw_bbox=True, cam
                            b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
                 break
 
-            # Jalankan deteksi & gambar bounding box jika aktif
+            # Jalankan AI di worker; frame terbaru tetap dikirim tanpa menunggu.
             if ai_service is not None:
                 try:
-                    frame = ai_service.process_frame(frame, draw_bbox=draw_bbox, camera_id=camera_id)
+                    while True:
+                        ai_input.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    ai_input.put_nowait(frame.copy())
                 except Exception as e:
-                    print(f"[AI STREAM ERROR] Frame processing failed: {e}")
+                    print(f"[AI STREAM ERROR] Queue frame failed: {e}")
+
+                try:
+                    frame = ai_output.get_nowait()
+                except queue.Empty:
+                    pass
 
             ret, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
             if not ret:
@@ -518,6 +719,7 @@ def generate_mjpeg_stream(stream_url, width=960, height=540, draw_bbox=True, cam
     except Exception:
         pass
     finally:
+        stop_worker.set()
         reader.release()
 
 

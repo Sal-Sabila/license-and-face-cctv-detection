@@ -1,45 +1,90 @@
 import cv2
-import re
 import json
+import re
 import time
+from collections import Counter
+
 from paddleocr import PaddleOCR
-from ai.plate.plate_utils import filter_dan_gabung_spasial, koreksi_plat_indonesia
+
+try:
+    from ai.plate.plate_utils import (
+        filter_dan_gabung_spasial,
+        koreksi_plat_indonesia,
+    )
+except Exception:
+    filter_dan_gabung_spasial = None
+    koreksi_plat_indonesia = None
 
 
 class PlateOCR:
     """
-    OCR plat nomor menggunakan PaddleOCR.
+    OCR plat nomor Indonesia menggunakan PaddleOCR.
 
-    Output utama:
+    Pipeline:
+        crop plat
+          -> padding + resize
+          -> beberapa preprocessing
+          -> PaddleOCR
+          -> gabung teks secara spasial
+          -> normalisasi
+          -> koreksi karakter ambigu
+          -> validasi format plat Indonesia
+          -> pilih hasil terbaik
+
+    Output:
         {
-            "text": "...",
-            "formatted": "...",
-            "confidence": 0.0,
-            "is_indonesia_pattern": True/False,
-            "variant": "original"/"clahe",
-            "elapsed": 0.0
+            "text": "B1234CD",
+            "formatted": "B 1234 CD",
+            "raw_text": "B1234CD",
+            "confidence": 0.82,
+            "is_indonesia_pattern": True,
+            "variant": "clahe",
+            "elapsed": 0.40,
+            "variants_tried": 3,
         }
     """
 
+    # OCR confusion yang umum pada plat.
+    LETTER_TO_DIGIT = {
+        "O": "0",
+        "Q": "0",
+        "D": "0",
+        "I": "1",
+        "L": "1",
+        "T": "1",
+        "Z": "2",
+        "S": "5",
+        "G": "6",
+        "B": "8",
+    }
+
+    DIGIT_TO_LETTER = {
+        "0": "O",
+        "1": "I",
+        "2": "Z",
+        "5": "S",
+        "6": "G",
+        "8": "B",
+    }
+
     def __init__(
         self,
-        scale=2.0,
-        min_confidence=0.20,
+        scale=2.5,
+        min_confidence=0.15,
         verbose=False,
         fast_mode=True,
     ):
-        self.scale = scale
-        self.min_confidence = min_confidence
-        self.verbose = verbose
-        self.fast_mode = fast_mode
+        self.scale = max(float(scale), 2.0)
+        self.min_confidence = float(min_confidence)
+        self.verbose = bool(verbose)
+        self.fast_mode = bool(fast_mode)
 
-        # Batas panjang karakter plat yang wajar
         self.min_candidate_length = 3
-        self.max_candidate_length = 12
+        self.max_candidate_length = 9
 
-        print("=" * 60)
-        print("[OCR] Loading PaddleOCR (Optimized ALPR)...")
-        print("=" * 60)
+        print("=" * 65)
+        print("[OCR] Loading PaddleOCR - Multi Preprocess ALPR")
+        print("=" * 65)
 
         try:
             self.ocr = PaddleOCR(
@@ -49,25 +94,69 @@ class PlateOCR:
                 use_textline_orientation=False,
             )
         except TypeError:
-            # Kompatibilitas dengan versi PaddleOCR lama
+            # Kompatibilitas PaddleOCR versi lama.
             self.ocr = PaddleOCR(lang="en")
 
-        print("[OCR] PaddleOCR siap digunakan")
-        print(f"[OCR] Scale           : {self.scale}")
-        print(f"[OCR] Min confidence  : {self.min_confidence}")
-        print(f"[OCR] Fast mode       : {self.fast_mode}")
-        print("=" * 60)
+        print("[OCR] PaddleOCR siap")
+        print(f"[OCR] Scale          : {self.scale}")
+        print(f"[OCR] Min confidence : {self.min_confidence}")
+        print(f"[OCR] Fast mode      : {self.fast_mode}")
+        print("[OCR] Variants       : original + clahe + sharpen + threshold")
+        print("=" * 65)
 
-    # ============================================================
-    # PREPARE IMAGE
-    # ============================================================
+    # ------------------------------------------------------------------
+    # BASIC HELPERS
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _safe_float(value, default=0.0):
+        try:
+            return float(value)
+        except Exception:
+            return float(default)
+
+    def normalize_text(self, text):
+        if text is None:
+            return ""
+        text = str(text).upper().strip()
+        text = re.sub(r"[^A-Z0-9]", "", text)
+        return text
+
+    # Alias lama agar kode lain tetap kompatibel.
+    _normalize_plate_text = normalize_text
+
+    def _format_plate(self, text):
+        text = self.normalize_text(text)
+        if not text:
+            return ""
+
+        # Cari bentuk: 1-2 huruf + 1-4 angka + 0-3 huruf.
+        match = re.match(r"^([A-Z]{1,2})([0-9]{1,4})([A-Z]{0,3})$", text)
+        if not match:
+            return text
+
+        prefix, number, suffix = match.groups()
+        return " ".join(x for x in (prefix, number, suffix) if x)
+
+    def is_valid_indonesian_plate(self, text):
+        text = self.normalize_text(text)
+        if not text:
+            return False
+        if not (self.min_candidate_length <= len(text) <= self.max_candidate_length):
+            return False
+        return bool(re.match(r"^[A-Z]{1,2}[0-9]{1,4}[A-Z]{0,3}$", text))
+
+    # Alias kompatibilitas.
+    _is_valid_indonesian_plate = is_valid_indonesian_plate
+
+    # ------------------------------------------------------------------
+    # IMAGE PREPARATION
+    # ------------------------------------------------------------------
 
     def prepare_image(self, image):
         """
-        Persiapan crop plat:
-        - Mempertahankan aspect ratio.
-        - Padding tipis agar karakter tepi tidak terpotong.
-        - Resize proporsional.
+        Menyiapkan crop plat tanpa mengubah aspect ratio.
+        Ukuran dibatasi supaya OCR CPU tetap masuk akal.
         """
         if image is None or image.size == 0:
             return None
@@ -79,12 +168,12 @@ class PlateOCR:
                 image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
 
             h, w = image.shape[:2]
-
             if h <= 0 or w <= 0:
                 return None
 
+            # Padding kecil supaya karakter tepi tidak terpotong.
             pad_y = max(2, int(h * 0.08))
-            pad_x = max(3, int(w * 0.08))
+            pad_x = max(3, int(w * 0.06))
 
             padded = cv2.copyMakeBorder(
                 image,
@@ -96,15 +185,12 @@ class PlateOCR:
             )
 
             ph, pw = padded.shape[:2]
+            target_w = max(1, int(pw * self.scale))
+            target_h = max(1, int(ph * self.scale))
 
-            scale = max(self.scale, 2.0)
-            target_w = int(pw * scale)
-            target_h = int(ph * scale)
-
-            # Batas dimensi agar inference tetap ringan
+            # Plat biasanya lebar. Pertahankan rasio dengan resolusi optimal untuk CPU
             max_w = 320
-            max_h = 128
-
+            max_h = 100
             scale_down = min(
                 max_w / max(1, target_w),
                 max_h / max(1, target_h),
@@ -114,74 +200,90 @@ class PlateOCR:
             new_w = max(1, int(target_w * scale_down))
             new_h = max(1, int(target_h * scale_down))
 
-            resized = cv2.resize(
+            return cv2.resize(
                 padded,
                 (new_w, new_h),
-                interpolation=cv2.INTER_CUBIC,
+                interpolation=cv2.INTER_LINEAR,
             )
 
-            return resized
-
-        except Exception as e:
+        except Exception as exc:
             if self.verbose:
-                print(f"[OCR PREPARE ERROR] {e}")
+                print(f"[OCR PREPARE ERROR] {exc}")
             return None
 
-    # ============================================================
-    # PREPROCESSING VARIANT
-    # ============================================================
+    # ------------------------------------------------------------------
+    # PREPROCESSING VARIANTS
+    # ------------------------------------------------------------------
+
+    def preprocess_original(self, image):
+        return image.copy() if image is not None else None
 
     def preprocess_clahe(self, image):
-        """
-        CLAHE + contrast enhancement ringan.
-        Digunakan sebagai fallback untuk plat yang kurang jelas.
-        """
         if image is None or image.size == 0:
             return None
-
         try:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-            clahe = cv2.createCLAHE(
-                clipLimit=2.0,
-                tileGridSize=(6, 6),
-            )
-
+            clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8))
             enhanced = clahe.apply(gray)
-
-            blur = cv2.GaussianBlur(
-                enhanced,
-                (0, 0),
-                1.0,
-            )
-
-            sharp = cv2.addWeighted(
-                enhanced,
-                1.30,
-                blur,
-                -0.30,
-                0,
-            )
-
-            return cv2.cvtColor(sharp, cv2.COLOR_GRAY2BGR)
-
-        except Exception as e:
+            return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+        except Exception as exc:
             if self.verbose:
-                print(f"[OCR CLAHE ERROR] {e}")
+                print(f"[OCR CLAHE ERROR] {exc}")
             return None
 
-    # ============================================================
-    # EXTRACT RESULT FROM PADDLE
-    # ============================================================
+    def preprocess_sharpen(self, image):
+        if image is None or image.size == 0:
+            return None
+        try:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            clahe = cv2.createCLAHE(clipLimit=1.8, tileGridSize=(8, 8))
+            gray = clahe.apply(gray)
+            blur = cv2.GaussianBlur(gray, (0, 0), 1.0)
+            sharp = cv2.addWeighted(gray, 1.45, blur, -0.45, 0)
+            return cv2.cvtColor(sharp, cv2.COLOR_GRAY2BGR)
+        except Exception as exc:
+            if self.verbose:
+                print(f"[OCR SHARPEN ERROR] {exc}")
+            return None
+
+    def preprocess_threshold(self, image):
+        if image is None or image.size == 0:
+            return None
+        try:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            gray = cv2.GaussianBlur(gray, (3, 3), 0)
+            binary = cv2.adaptiveThreshold(
+                gray,
+                255,
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY,
+                31,
+                7,
+            )
+            return cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+        except Exception as exc:
+            if self.verbose:
+                print(f"[OCR THRESHOLD ERROR] {exc}")
+            return None
+
+    def generate_variants(self, prepared):
+        """Urutan variant: CLAHE pertama (terbukti terbaik untuk kontras CCTV), kemudian original."""
+        variants = [
+            ("clahe", self.preprocess_clahe(prepared)),
+            ("original", self.preprocess_original(prepared)),
+        ]
+
+        if not self.fast_mode:
+            variants.append(("sharpen", self.preprocess_sharpen(prepared)))
+
+        return [(name, img) for name, img in variants if img is not None]
+
+    # ------------------------------------------------------------------
+    # PADDLE RESULT EXTRACTION
+    # ------------------------------------------------------------------
 
     def extract_result(self, result):
-        """
-        Mengekstrak texts, boxes, dan scores dari berbagai format
-        kembalian PaddleOCR / PaddleX.
-        """
-        texts = []
-        boxes = []
-        scores = []
+        texts, boxes, scores = [], [], []
 
         if result is None:
             return texts, boxes, scores
@@ -192,75 +294,42 @@ class PlateOCR:
                 texts.extend(t)
                 boxes.extend(b)
                 scores.extend(s)
-
             return texts, boxes, scores
 
         data = result
 
         if hasattr(data, "json"):
             try:
-                j = data.json() if callable(data.json) else data.json
-
-                if isinstance(j, str):
-                    j = json.loads(j)
-
-                if isinstance(j, dict):
-                    data = j.get("res", j)
-
+                raw = data.json() if callable(data.json) else data.json
+                if isinstance(raw, str):
+                    raw = json.loads(raw)
+                if isinstance(raw, dict):
+                    data = raw.get("res", raw)
             except Exception:
                 pass
 
-        # Format PaddleX dictionary
         if isinstance(data, dict):
-            raw_texts = data.get("rec_texts", [])
-            raw_scores = data.get("rec_scores", [])
-            raw_boxes = data.get("rec_boxes", [])
+            raw_texts = data.get("rec_texts", []) or []
+            raw_scores = data.get("rec_scores", []) or []
+            raw_boxes = data.get("rec_boxes", []) or []
 
-            if (
-                raw_boxes is None
-                or len(raw_boxes) == 0
-            ) and "dt_polys" in data:
-
-                raw_polys = data.get("dt_polys", [])
-                boxes_from_poly = []
-
-                for poly in raw_polys:
+            if not raw_boxes and data.get("dt_polys") is not None:
+                raw_boxes = []
+                for poly in data.get("dt_polys") or []:
                     try:
-                        xs = [p[0] for p in poly]
-                        ys = [p[1] for p in poly]
-
-                        boxes_from_poly.append([
-                            min(xs),
-                            min(ys),
-                            max(xs),
-                            max(ys),
-                        ])
-
+                        xs = [float(p[0]) for p in poly]
+                        ys = [float(p[1]) for p in poly]
+                        raw_boxes.append([min(xs), min(ys), max(xs), max(ys)])
                     except Exception:
-                        boxes_from_poly.append([
-                            0, 0, 0, 0
-                        ])
+                        raw_boxes.append([0, 0, 0, 0])
 
-                raw_boxes = boxes_from_poly
-
-            for i, txt in enumerate(raw_texts or []):
-                score = (
-                    float(raw_scores[i])
-                    if raw_scores is not None
-                    and i < len(raw_scores)
-                    else 0.0
+            for i, txt in enumerate(raw_texts):
+                score = self._safe_float(
+                    raw_scores[i] if i < len(raw_scores) else 0.0
                 )
-
-                box = (
-                    raw_boxes[i]
-                    if raw_boxes is not None
-                    and i < len(raw_boxes)
-                    else [0, 0, 0, 0]
-                )
-
+                box = raw_boxes[i] if i < len(raw_boxes) else [0, 0, 0, 0]
                 if hasattr(box, "tolist"):
                     box = box.tolist()
-
                 texts.append(str(txt))
                 boxes.append(box)
                 scores.append(score)
@@ -268,54 +337,37 @@ class PlateOCR:
             if texts:
                 return texts, boxes, scores
 
-            # Format teks tunggal generic
             if "text" in data:
-                texts.append(str(data["text"]))
+                texts.append(str(data.get("text") or ""))
                 scores.append(
-                    float(
-                        data.get(
-                            "confidence",
-                            data.get("score", 0.0),
-                        )
+                    self._safe_float(
+                        data.get("confidence", data.get("score", 0.0))
                     )
                 )
                 boxes.append([0, 0, 0, 0])
-
                 return texts, boxes, scores
 
-        # Format objek lama PaddleOCR
         if hasattr(data, "rec_texts"):
-            raw_texts = getattr(data, "rec_texts", [])
-            raw_scores = getattr(data, "rec_scores", [])
-            raw_boxes = getattr(data, "rec_boxes", [])
+            raw_texts = getattr(data, "rec_texts", []) or []
+            raw_scores = getattr(data, "rec_scores", []) or []
+            raw_boxes = getattr(data, "rec_boxes", []) or []
 
-            for i, txt in enumerate(raw_texts or []):
-                score = (
-                    float(raw_scores[i])
-                    if raw_scores is not None
-                    and i < len(raw_scores)
-                    else 0.0
+            for i, txt in enumerate(raw_texts):
+                score = self._safe_float(
+                    raw_scores[i] if i < len(raw_scores) else 0.0
                 )
-
-                box = (
-                    raw_boxes[i]
-                    if raw_boxes is not None
-                    and i < len(raw_boxes)
-                    else [0, 0, 0, 0]
-                )
-
+                box = raw_boxes[i] if i < len(raw_boxes) else [0, 0, 0, 0]
                 if hasattr(box, "tolist"):
                     box = box.tolist()
-
                 texts.append(str(txt))
                 boxes.append(box)
                 scores.append(score)
 
         return texts, boxes, scores
 
-    # ============================================================
-    # INFERENCE ONE VARIANT
-    # ============================================================
+    # ------------------------------------------------------------------
+    # OCR ONE VARIANT
+    # ------------------------------------------------------------------
 
     def _run_ocr(self, image, variant="original"):
         if image is None or image.size == 0:
@@ -337,207 +389,320 @@ class PlateOCR:
                     f"texts={texts} scores={scores}"
                 )
 
-            combined = filter_dan_gabung_spasial(
-                texts,
-                boxes,
-                scores,
-                min_confidence=self.min_confidence,
-            )
+            combined = None
+            if filter_dan_gabung_spasial is not None:
+                try:
+                    combined = filter_dan_gabung_spasial(
+                        texts,
+                        boxes,
+                        scores,
+                        min_confidence=self.min_confidence,
+                    )
+                except Exception as exc:
+                    if self.verbose:
+                        print(f"[OCR SPATIAL WARNING] {exc}")
+
+            # Fallback sederhana jika helper project gagal/tidak ada.
+            if combined is None and texts:
+                valid_items = []
+                for txt, score in zip(texts, scores):
+                    clean = self.normalize_text(txt)
+                    if clean and score >= self.min_confidence:
+                        valid_items.append((clean, score))
+                if valid_items:
+                    valid_items.sort(key=lambda x: x[1], reverse=True)
+                    joined = "".join(x[0] for x in valid_items)
+                    avg_score = sum(x[1] for x in valid_items) / len(valid_items)
+                    combined = {
+                        "text": joined,
+                        "formatted": joined,
+                        "confidence": avg_score,
+                    }
 
             if combined is None:
                 return None
 
+            raw_text = combined.get("text", "")
+            confidence = self._safe_float(combined.get("confidence", 0.0))
             elapsed = time.perf_counter() - started
 
             return {
-                "text": combined["text"],
-                "formatted": combined.get(
-                    "formatted",
-                    combined["text"],
-                ),
-                "confidence": float(
-                    combined["confidence"]
-                ),
-                "is_indonesia_pattern": combined.get(
-                    "is_indonesia_pattern",
-                    False,
+                "text": self.normalize_text(raw_text),
+                "formatted": combined.get("formatted", raw_text),
+                "raw_text": str(raw_text or ""),
+                "confidence": confidence,
+                "is_indonesia_pattern": bool(
+                    combined.get("is_indonesia_pattern", False)
                 ),
                 "variant": variant,
                 "elapsed": elapsed,
             }
 
-        except Exception as e:
-            if self.verbose:
-                print(
-                    f"[OCR ERROR] variant={variant}: {e}"
-                )
-
-            return None
-
-    # ============================================================
-    # WARMUP
-    # ============================================================
-
-    def warmup(self):
-        """Warm-up awal untuk menginisialisasi model."""
-        try:
-            dummy = (
-                255
-                * cv2.UMat(
-                    64,
-                    160,
-                    cv2.CV_8UC3,
-                ).get()
-            ).astype("uint8")
-
-            self._run_ocr(dummy, "warmup")
-            print("[OCR] Warm-up selesai")
-
         except Exception as exc:
             if self.verbose:
-                print(
-                    f"[OCR WARMUP WARNING] {exc}"
-                )
+                print(f"[OCR ERROR] variant={variant}: {exc}")
+            return None
 
-    # ============================================================
-    # READ
-    # ============================================================
+    # ------------------------------------------------------------------
+    # CHARACTER CORRECTION
+    # ------------------------------------------------------------------
+
+    def _correct_segment(self, segment, target):
+        if target == "digit":
+            return "".join(self.LETTER_TO_DIGIT.get(ch, ch) for ch in segment)
+        return "".join(self.DIGIT_TO_LETTER.get(ch, ch) for ch in segment)
+
+    def _apply_external_correction(self, text):
+        if not text or koreksi_plat_indonesia is None:
+            return text
+        try:
+            corrected = koreksi_plat_indonesia(text)
+            if isinstance(corrected, str) and corrected.strip():
+                return self.normalize_text(corrected)
+            if isinstance(corrected, dict):
+                value = (
+                    corrected.get("formatted")
+                    or corrected.get("text")
+                    or corrected.get("plate")
+                )
+                if value:
+                    return self.normalize_text(value)
+        except Exception:
+            pass
+        return text
+
+    def correct_plate_text(self, text, confidence=0.0):
+        """
+        Koreksi konservatif berdasarkan pola Indonesia.
+
+        Tidak mengubah karakter yang tidak ambigu. Koreksi hanya dilakukan
+        pada posisi prefix/angka/suffix yang paling masuk akal.
+        """
+        raw = self.normalize_text(text)
+        if not raw:
+            return {
+                "text": "",
+                "formatted": "",
+                "correction_applied": False,
+                "correction_score": 0.0,
+            }
+
+        external = self._apply_external_correction(raw)
+        if external and self.is_valid_indonesian_plate(external):
+            return {
+                "text": external,
+                "formatted": self._format_plate(external),
+                "correction_applied": external != raw,
+                "correction_score": 1.0,
+            }
+
+        candidates = []
+        n = len(raw)
+
+        # Coba seluruh pemisahan prefix 1-2, angka 1-4, suffix 0-3.
+        for prefix_len in (1, 2):
+            for digit_len in range(1, 5):
+                suffix_len = n - prefix_len - digit_len
+                if suffix_len < 0 or suffix_len > 3:
+                    continue
+
+                prefix = raw[:prefix_len]
+                number = raw[prefix_len:prefix_len + digit_len]
+                suffix = raw[prefix_len + digit_len:]
+
+                # Koreksi hanya karakter ambigu di segmen yang seharusnya
+                # berupa angka/huruf.
+                prefix_c = self._correct_segment(prefix, "letter")
+                number_c = self._correct_segment(number, "digit")
+                suffix_c = self._correct_segment(suffix, "letter")
+                candidate = prefix_c + number_c + suffix_c
+
+                if not self.is_valid_indonesian_plate(candidate):
+                    continue
+
+                changes = sum(a != b for a, b in zip(raw, candidate))
+                # Penalti perubahan agar koreksi tidak terlalu agresif.
+                score = 1.0 - min(changes * 0.12, 0.60)
+
+                # Panjang umum 5-8 karakter mendapat sedikit bonus.
+                if 5 <= len(candidate) <= 8:
+                    score += 0.05
+
+                candidates.append((score, candidate, changes))
+
+        if not candidates:
+            return {
+                "text": raw,
+                "formatted": self._format_plate(raw),
+                "correction_applied": False,
+                "correction_score": 0.0,
+            }
+
+        candidates.sort(key=lambda x: (x[0], -x[2]), reverse=True)
+        _, best, changes = candidates[0]
+
+        return {
+            "text": best,
+            "formatted": self._format_plate(best),
+            "correction_applied": best != raw,
+            "correction_score": max(0.0, min(1.0, 1.0 - changes * 0.12)),
+        }
+
+    # ------------------------------------------------------------------
+    # SCORE RESULT
+    # ------------------------------------------------------------------
+
+    def _score_result(self, result):
+        if result is None:
+            return -1.0
+
+        text = self.normalize_text(result.get("text", ""))
+        conf = self._safe_float(result.get("confidence", 0.0))
+        valid = self.is_valid_indonesian_plate(text)
+        indonesia_flag = bool(result.get("is_indonesia_pattern", False))
+
+        score = conf
+        if valid:
+            score += 0.35
+        elif indonesia_flag:
+            score += 0.15
+
+        if 5 <= len(text) <= 8:
+            score += 0.03
+
+        return score
+
+    # ------------------------------------------------------------------
+    # WARMUP
+    # ------------------------------------------------------------------
+
+    def warmup(self):
+        try:
+            dummy = 255 * __import__("numpy").ones(
+                (64, 180, 3), dtype="uint8"
+            )
+            self._run_ocr(dummy, "warmup")
+            print("[OCR] Warm-up selesai")
+        except Exception as exc:
+            if self.verbose:
+                print(f"[OCR WARMUP WARNING] {exc}")
+
+    # ------------------------------------------------------------------
+    # PUBLIC READ
+    # ------------------------------------------------------------------
 
     def read(self, image):
-        """
-        Pipeline OCR:
-        1. Prepare crop.
-        2. OCR original.
-        3. Early return jika confidence tinggi / pola Indonesia.
-        4. Fallback CLAHE.
-        5. Pilih hasil terbaik.
-        """
         total_start = time.perf_counter()
 
+        empty = {
+            "text": "",
+            "formatted": "",
+            "raw_text": "",
+            "confidence": 0.0,
+            "is_indonesia_pattern": False,
+            "variant": "none",
+            "elapsed": 0.0,
+            "variants_tried": 0,
+            "correction_applied": False,
+        }
+
         if image is None or image.size == 0:
-            return {
-                "text": "",
-                "formatted": "",
-                "confidence": 0.0,
-                "is_indonesia_pattern": False,
-                "elapsed": 0.0,
-            }
+            return empty
 
         prepared = self.prepare_image(image)
-
         if prepared is None:
-            return {
-                "text": "",
-                "formatted": "",
-                "confidence": 0.0,
-                "is_indonesia_pattern": False,
-                "elapsed": time.perf_counter()
-                - total_start,
-            }
+            empty["elapsed"] = time.perf_counter() - total_start
+            return empty
 
-        # --------------------------------------------------------
-        # PASS 1: ORIGINAL
-        # --------------------------------------------------------
+        candidates = []
+        variants = self.generate_variants(prepared)
 
-        result = self._run_ocr(
-            prepared,
-            "original",
-        )
+        # Jalankan semua variant sampai menemukan hasil yang sangat kuat.
+        for variant_name, variant_image in variants:
+            result = self._run_ocr(variant_image, variant_name)
+            if result is None:
+                continue
 
-        if result is not None:
-            conf = result["confidence"]
-            is_valid_id = result.get(
-                "is_indonesia_pattern",
-                False,
+            correction = self.correct_plate_text(
+                result.get("text", ""),
+                result.get("confidence", 0.0),
             )
 
+            corrected_text = correction["text"]
+            result["raw_text"] = result.get("raw_text") or result.get("text", "")
+            result["text"] = corrected_text
+            result["formatted"] = correction["formatted"] or corrected_text
+            result["is_indonesia_pattern"] = self.is_valid_indonesian_plate(
+                corrected_text
+            )
+            result["correction_applied"] = correction["correction_applied"]
+            result["correction_score"] = correction["correction_score"]
+
+            candidates.append(result)
+
+            if self.verbose:
+                print(
+                    f"[OCR CANDIDATE] {variant_name} -> "
+                    f"{result['formatted']} | "
+                    f"conf={result['confidence']:.3f} | "
+                    f"valid={result['is_indonesia_pattern']}"
+                )
+
+            # Early stop cerdas: jika format plat Indonesia valid dan confidence mencukupi (>=0.55),
+            # atau confidence sangat tinggi (>=0.70), hentikan segera untuk menghemat CPU.
             if (
-                (is_valid_id and conf >= 0.50)
-                or conf >= 0.75
-            ):
-                result["elapsed"] = (
-                    time.perf_counter()
-                    - total_start
-                )
+                result["is_indonesia_pattern"]
+                and result["confidence"] >= 0.55
+            ) or (result["confidence"] >= 0.70):
+                break
 
-                if self.verbose:
-                    print(
-                        f"[OCR FAST] "
-                        f"{result['formatted']} | "
-                        f"conf={conf:.3f} | "
-                        f"time={result['elapsed']:.2f}s"
-                    )
+            # Fast mode: setelah original+clahe+sharpen, threshold menjadi
+            # fallback terakhir. Tetap dicoba jika hasil belum kuat.
 
-                return result
+        if not candidates:
+            empty["elapsed"] = time.perf_counter() - total_start
+            return empty
 
-        # --------------------------------------------------------
-        # PASS 2: CLAHE FALLBACK
-        # --------------------------------------------------------
+        # Pilih hasil terbaik berdasarkan confidence + validitas pola.
+        best = max(candidates, key=self._score_result)
 
-        clahe_img = self.preprocess_clahe(
-            prepared
+        # Jika ada beberapa variant dengan teks sama, naikkan confidence
+        # sedikit karena hasil konsisten lintas preprocessing.
+        normalized_best = self.normalize_text(best.get("text", ""))
+        same_text = [
+            r for r in candidates
+            if self.normalize_text(r.get("text", "")) == normalized_best
+        ]
+        if len(same_text) >= 2:
+            best = dict(best)
+            best["confidence"] = min(
+                0.99,
+                max(
+                    best["confidence"],
+                    sum(self._safe_float(r.get("confidence", 0.0)) for r in same_text)
+                    / len(same_text)
+                    + 0.05,
+                ),
+            )
+            best["cross_variant_votes"] = len(same_text)
+        else:
+            best["cross_variant_votes"] = 1
+
+        best["elapsed"] = time.perf_counter() - total_start
+        best["variants_tried"] = len(candidates)
+        best["formatted"] = self._format_plate(best.get("text", ""))
+        best["text"] = self.normalize_text(best.get("text", ""))
+        best["is_indonesia_pattern"] = self.is_valid_indonesian_plate(
+            best["text"]
         )
-
-        result_clahe = self._run_ocr(
-            clahe_img,
-            "clahe",
-        )
-
-        # Pilih hasil terbaik
-        best = result
-
-        if result_clahe is not None:
-            if best is None:
-                best = result_clahe
-
-            else:
-                score_best = (
-                    best["confidence"]
-                    + (
-                        0.20
-                        if best.get(
-                            "is_indonesia_pattern"
-                        )
-                        else 0.0
-                    )
-                )
-
-                score_clahe = (
-                    result_clahe["confidence"]
-                    + (
-                        0.20
-                        if result_clahe.get(
-                            "is_indonesia_pattern"
-                        )
-                        else 0.0
-                    )
-                )
-
-                if score_clahe > score_best:
-                    best = result_clahe
-
-        total_time = (
-            time.perf_counter()
-            - total_start
-        )
-
-        if best is None:
-            return {
-                "text": "",
-                "formatted": "",
-                "confidence": 0.0,
-                "is_indonesia_pattern": False,
-                "elapsed": total_time,
-            }
-
-        best["elapsed"] = total_time
 
         if self.verbose:
             print(
-                f"[OCR BEST] "
-                f"{best['formatted']} | "
+                f"[OCR BEST] {best['formatted']} | "
                 f"conf={best['confidence']:.3f} | "
-                f"time={total_time:.2f}s"
+                f"variant={best['variant']} | "
+                f"votes={best.get('cross_variant_votes', 1)} | "
+                f"time={best['elapsed']:.2f}s"
             )
 
         return best
