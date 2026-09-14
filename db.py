@@ -26,9 +26,11 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CAPTURE_DIR = os.path.join(BASE_DIR, "static", "captures")
 PLATE_DIR = os.path.join(CAPTURE_DIR, "plates")
 FACE_DIR = os.path.join(CAPTURE_DIR, "faces")
+VEHICLE_DIR = os.path.join(CAPTURE_DIR, "vehicles")
 
 os.makedirs(PLATE_DIR, exist_ok=True)
 os.makedirs(FACE_DIR, exist_ok=True)
+os.makedirs(VEHICLE_DIR, exist_ok=True)
 
 
 def get_db():
@@ -50,7 +52,8 @@ def ensure_event_schema():
                         ("vehicle_confidence", "DECIMAL(6,5) NULL"), ("plate_detection_confidence", "DECIMAL(6,5) NULL"),
                         ("ocr_confidence", "DECIMAL(6,5) NULL"), ("person_confidence", "DECIMAL(6,5) NULL"),
                         ("face_confidence", "DECIMAL(6,5) NULL"), ("direction", "ENUM('entry','exit','unknown') NOT NULL DEFAULT 'unknown'"),
-                        ("driver_track_id", "BIGINT NULL"), ("driver_face_path", "VARCHAR(500) NULL"), ("event_key", "VARCHAR(160) NULL")
+                        ("driver_track_id", "BIGINT NULL"), ("driver_face_path", "VARCHAR(500) NULL"),
+                        ("vehicle_image_path", "VARCHAR(500) NULL"), ("event_key", "VARCHAR(160) NULL")
                     ],
                     "plate": [("raw_ocr_text", "VARCHAR(100) NULL"), ("normalized_plate_number", "VARCHAR(30) NULL")]
                 }
@@ -177,12 +180,20 @@ def save_crop_locally(image, folder_path, prefix="cap", camera_id=1, track_id=No
     if image is None or image.size == 0:
         return None
 
-    now_str = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:19]
+    os.makedirs(folder_path, exist_ok=True)
+    now_str = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
     tid_str = f"_{track_id}" if track_id is not None else ""
     filename = f"{prefix}_cam{camera_id}_{now_str}{tid_str}.jpg"
     abs_path = os.path.join(folder_path, filename)
 
-    cv2.imwrite(abs_path, image)
+    try:
+        written = cv2.imwrite(abs_path, image)
+    except Exception as exc:
+        print(f"[CAPTURE ERROR] {abs_path}: {exc}")
+        return None
+    if not written or not os.path.isfile(abs_path):
+        print(f"[CAPTURE ERROR] cv2.imwrite failed: {abs_path}")
+        return None
 
     # Path relatif untuk web (static/captures/...)
     rel_path = os.path.relpath(abs_path, BASE_DIR).replace("\\", "/")
@@ -280,7 +291,7 @@ def delete_detection(detection_id: int) -> bool:
         try:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT fd.plate_id, fd.face_image_path, p.plate_image_path
+                    SELECT fd.plate_id, fd.face_image_path, fd.vehicle_image_path, p.plate_image_path
                     FROM full_detection fd
                     LEFT JOIN plate p ON p.plate_id = fd.plate_id
                     WHERE fd.detection_id = %s
@@ -300,6 +311,7 @@ def delete_detection(detection_id: int) -> bool:
             raise
 
     _delete_capture_file(event.get("face_image_path"))
+    _delete_capture_file(event.get("vehicle_image_path"))
     _delete_capture_file(event.get("plate_image_path"))
     return True
 
@@ -315,7 +327,7 @@ def delete_plate(plate_id: int) -> bool:
                     return False
 
                 cur.execute("""
-                    SELECT face_image_path FROM full_detection WHERE plate_id = %s
+                    SELECT face_image_path, vehicle_image_path FROM full_detection WHERE plate_id = %s
                 """, (plate_id,))
                 face_paths = cur.fetchall()
                 cur.execute("DELETE FROM full_detection WHERE plate_id = %s", (plate_id,))
@@ -330,6 +342,7 @@ def delete_plate(plate_id: int) -> bool:
     _delete_capture_file(plate.get("plate_image_path"))
     for face in face_paths:
         _delete_capture_file(face.get("face_image_path"))
+        _delete_capture_file(face.get("vehicle_image_path"))
     return True
 
 
@@ -353,7 +366,8 @@ def save_detection_event(
     driver_track_id: int = None,
     direction: str = "unknown",
     event_key: str = None,
-    raw_ocr_text: str = None
+    raw_ocr_text: str = None,
+    vehicle_crop = None
 ) -> dict:
     """
     Menyimpan hasil deteksi lengkap ke database `real_cctv`:
@@ -373,6 +387,13 @@ def save_detection_event(
             plate_id = None
             plate_rel_path = None
             face_rel_path = None
+            vehicle_rel_path = None
+            if object_type == "vehicle" and vehicle_crop is not None:
+                vehicle_rel_path = save_crop_locally(vehicle_crop, VEHICLE_DIR, prefix="vehicle", camera_id=camera_id, track_id=track_id)
+                if vehicle_rel_path:
+                    print(f"[VEHICLE CAPTURE] camera={camera_id} track_id={track_id} vehicle_type={vehicle_type} confidence={float(vehicle_confidence or 0):.3f} path={vehicle_rel_path}")
+                else:
+                    print(f"[VEHICLE CAPTURE ERROR] camera={camera_id} track_id={track_id}")
 
             # 1. Simpan dan catat Plat Nomor (jika terdeteksi)
             if has_plate:
@@ -407,9 +428,20 @@ def save_detection_event(
                 cur.execute("SELECT detection_id FROM full_detection WHERE event_key = %s LIMIT 1", (event_key,))
                 existing = cur.fetchone()
                 if existing:
-                    if plate_id:
+                    if plate_id and object_type == "vehicle":
+                        cur.execute("""
+                            UPDATE full_detection
+                            SET plate_id = %s, has_plate = 1,
+                                plate_detection_confidence = %s, ocr_confidence = %s,
+                                detection_status = %s, detection_confidence = vehicle_confidence,
+                                vehicle_image_path = COALESCE(vehicle_image_path, %s)
+                            WHERE detection_id = %s
+                        """, (plate_id, plate_conf, ocr_conf, plate_status, vehicle_rel_path, existing["detection_id"]))
+                    elif plate_id:
                         cur.execute("DELETE FROM plate_logs WHERE plate_id = %s", (plate_id,))
                         cur.execute("DELETE FROM plate WHERE plate_id = %s", (plate_id,))
+                    if vehicle_rel_path:
+                        _delete_capture_file(vehicle_rel_path)
                     return {"plate_id": plate_id, "detection_id": existing["detection_id"], "duplicate": True,
                             "plate_image_path": plate_rel_path, "face_image_path": None, "plate_number": normalized_plate or None}
 
@@ -428,15 +460,16 @@ def save_detection_event(
                     INSERT INTO full_detection (plate_id, camera_id, track_id, object_type, vehicle_type,
                         has_plate, has_driver, detection_status, detection_confidence, vehicle_confidence,
                         plate_detection_confidence, ocr_confidence, person_confidence, face_confidence,
-                        direction, driver_track_id, face_image_path, event_key)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        direction, driver_track_id, face_image_path, vehicle_image_path, event_key)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (plate_id, camera_id, track_id, object_type, vehicle_type, int(has_plate), int(has_driver),
                      status_val, conf_val, vehicle_confidence if object_type == "vehicle" else None,
                      plate_conf if has_plate else None, ocr_conf if has_plate else None,
                      face_conf if has_driver else (face_conf if object_type == "person" else None),
                      None,
-                     direction, driver_track_id, face_rel_path if object_type == "person" else None, event_key)
+                     direction, driver_track_id, face_rel_path if object_type == "person" else None,
+                     vehicle_rel_path if object_type == "vehicle" else None, event_key)
                 )
                 detection_id = cur.lastrowid
 
@@ -445,6 +478,7 @@ def save_detection_event(
                 "detection_id": detection_id,
                 "plate_image_path": plate_rel_path,
                 "face_image_path": face_rel_path,
+                "vehicle_image_path": vehicle_rel_path,
                 "plate_number": normalized_plate or None,
                 "object_type": object_type,
                 "vehicle_type": vehicle_type,
@@ -486,6 +520,7 @@ def get_recent_detections(limit: int = 50):
                     fd.detection_status AS face_status,
                     fd.detection_confidence AS legacy_detection_confidence,
                     fd.face_image_path,
+                    fd.vehicle_image_path,
                     fd.created_at AS detected_at,
                     p.plate_number,
                     p.detection_status AS plate_status,
@@ -871,7 +906,11 @@ def get_all_detections_paginated(
                     fd.person_confidence,
                     fd.face_confidence,
                     fd.direction,
+                    fd.driver_track_id,
+                    fd.driver_face_path,
+                    fd.event_key,
                     fd.face_image_path,
+                    fd.vehicle_image_path,
                     fd.created_at AS detected_at,
                     p.plate_number,
                     p.detection_status AS plate_status,
@@ -914,11 +953,18 @@ def get_all_detections_paginated(
                     "has_plate": has_plate,
                     "has_driver": bool(r.get("has_driver")),
                     "direction": r.get("direction") or "unknown",
+                    "event_key": r.get("event_key"),
+                    "driver_track_id": r.get("driver_track_id"),
                     "plate": p_num or "-",
                     "camera": r.get("camera_name") or "CCTV",
                     "camera_id": r.get("camera_id"),
                     "confidence": conf,
                     "confidence_percent": round(conf * 100, 1),
+                    "vehicle_confidence": float(r.get("vehicle_confidence") or 0),
+                    "plate_detection_confidence": float(r.get("plate_confidence") or r.get("plate_detection_confidence") or 0),
+                    "ocr_confidence": float(r.get("event_ocr_confidence") or r.get("ocr_confidence") or 0),
+                    "person_confidence": float(r.get("person_confidence") or 0),
+                    "face_confidence": float(r.get("face_confidence") or 0),
                     "vehicle_confidence_percent": round(float(r.get("vehicle_confidence") or 0) * 100, 1),
                     "plate_confidence_percent": round(float(r.get("plate_confidence") or r.get("plate_detection_confidence") or 0) * 100, 1),
                     "ocr_confidence_percent": round(float(r.get("event_ocr_confidence") or r.get("ocr_confidence") or 0) * 100, 1),
@@ -928,6 +974,8 @@ def get_all_detections_paginated(
                     "status_code": code,
                     "plate_image_path": r.get("plate_image_path"),
                     "face_image_path": r.get("face_image_path")
+                    ,"driver_face_path": r.get("driver_face_path")
+                    ,"vehicle_image_path": r.get("vehicle_image_path")
                 })
 
             total_pages = max(1, (total + limit - 1) // limit)

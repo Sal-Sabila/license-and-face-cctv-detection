@@ -709,7 +709,10 @@ def generate_mjpeg_stream(stream_url, width=960, height=540, draw_bbox=True, cam
                         ai_output.get_nowait()
                     except queue.Empty:
                         break
-                ai_output.put_nowait(result_frame)
+                if result_frame is not None and getattr(result_frame, "size", 0):
+                    ai_output.put_nowait(result_frame)
+                else:
+                    print(f"[AI STREAM ERROR] Invalid processed frame for camera={camera_id}")
             except Exception as e:
                 print(f"[AI STREAM ERROR] Frame processing failed: {e}")
 
@@ -755,16 +758,20 @@ def generate_mjpeg_stream(stream_url, width=960, height=540, draw_bbox=True, cam
                 except queue.Empty:
                     pass
 
+            if frame is None or not hasattr(frame, "size") or frame.size == 0:
+                print(f"[STREAM ERROR] Empty frame skipped for camera={camera_id}")
+                continue
             ret, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
             if not ret:
+                print(f"[STREAM ERROR] JPEG encode failed for camera={camera_id}")
                 continue
             yield (b'--frame\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
             time.sleep(0.03)  # cap ~30 FPS untuk kestabilan CPU
     except GeneratorExit:
         pass
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[STREAM ERROR] MJPEG generator failed for camera={camera_id}: {exc}")
     finally:
         stop_worker.set()
         reader.release()

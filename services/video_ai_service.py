@@ -84,7 +84,7 @@ CAMERA_NAME = "Video CCTV"
 # AI CONFIG
 # ============================================================
 
-VEHICLE_CLASSES = [0, 2, 3, 5]
+VEHICLE_CLASSES = [0, 2, 3, 5, 7]
 VEHICLE_CONFIDENCE = 0.35
 VEHICLE_IMGSZ = 512
 
@@ -440,16 +440,18 @@ def save_plate_capture(crop, track_id, text, video_time, prefix="plate"):
 
 def get_vehicle_crop_for_plate(frame, plate_bbox, vehicle_dets):
     if frame is None or plate_bbox is None:
-        return None, 0.0
+        return None, 0.0, None
 
     px1, py1, px2, py2 = [int(v) for v in plate_bbox]
     plate_area = max(1, (px2 - px1) * (py2 - py1))
 
     best_crop = None
     best_score = 0.0
+    best_track_id = None
+    best_confidence = 0.0
 
     for vehicle in vehicle_dets or []:
-        if vehicle.get("cls") not in (2, 3, 5):
+        if vehicle.get("cls") not in (2, 3, 5, 7):
             continue
 
         vx1, vy1, vx2, vy2 = [int(v) for v in vehicle["box"]]
@@ -474,8 +476,10 @@ def get_vehicle_crop_for_plate(frame, plate_bbox, vehicle_dets):
         if crop.size:
             best_crop = crop
             best_score = score
+            best_track_id = vehicle.get("track_id")
+            best_confidence = safe_float(vehicle.get("conf", 0.0))
 
-    return best_crop, best_score
+    return best_crop, best_confidence, best_track_id
 
 
 # ============================================================
@@ -1137,6 +1141,8 @@ class VideoAIService:
                     "track_id": track_id,
                     "conf": conf,
                     "cls": cls_id,
+                    "object_type": "vehicle" if cls_id in (2, 3, 5, 7) else "person",
+                    "vehicle_type": {2: "car", 3: "motorcycle", 5: "bus", 7: "truck"}.get(cls_id, "unknown"),
                 })
 
         except Exception as exc:
@@ -1146,6 +1152,7 @@ class VideoAIService:
 
     def _save_person_events(self, frame, detections, video_time):
         h, w = frame.shape[:2]
+        vehicle_boxes = [item["box"] for item in detections if item.get("cls") in (2, 3, 5, 7)]
 
         for item in detections:
             if item.get("cls") != 0:
@@ -1169,6 +1176,8 @@ class VideoAIService:
                 continue
 
             crop = frame[y1:y2, x1:x2]
+            if any(self._intersection_ratio(item["box"], box) >= 0.25 for box in vehicle_boxes):
+                continue
             path = save_person_capture(
                 frame,
                 [x1, y1, x2, y2],
@@ -1189,6 +1198,9 @@ class VideoAIService:
                     face_crop=crop,
                     face_conf=conf,
                     track_id=track_id,
+                    object_type="person",
+                    direction=db.get_camera_direction(self.camera_id),
+                    event_key=f"person:{self.camera_id}:{track_id}:{db.get_camera_direction(self.camera_id)}",
                 )
             except Exception as exc:
                 print(f"[DB PERSON ERROR] {exc}")
@@ -1198,6 +1210,46 @@ class VideoAIService:
                 f"conf={conf:.1%} -> {os.path.basename(path)}"
             )
 
+    @staticmethod
+    def _intersection_ratio(inner_box, outer_box):
+        ix1 = max(inner_box[0], outer_box[0])
+        iy1 = max(inner_box[1], outer_box[1])
+        ix2 = min(inner_box[2], outer_box[2])
+        iy2 = min(inner_box[3], outer_box[3])
+        intersection = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+        area = max(1, (inner_box[2] - inner_box[0]) * (inner_box[3] - inner_box[1]))
+        return intersection / area
+
+    def _save_vehicle_events(self, frame, detections, video_time):
+        direction = db.get_camera_direction(self.camera_id)
+        for item in detections:
+            if item.get("cls") not in (2, 3, 5, 7):
+                continue
+            track_id = int(item.get("track_id", -1))
+            if track_id < 0:
+                continue
+            event_key = f"vehicle:{self.camera_id}:{track_id}:{direction}"
+            if event_key in self.person_capture_state:
+                continue
+            x1, y1, x2, y2 = [int(v) for v in item["box"]]
+            crop = frame[max(0, y1):min(frame.shape[0], y2), max(0, x1):min(frame.shape[1], x2)]
+            if crop.size == 0:
+                continue
+            self.person_capture_state[event_key] = video_time
+            try:
+                db.save_detection_event(
+                    camera_id=self.camera_id,
+                    track_id=track_id,
+                    object_type="vehicle",
+                    vehicle_type=item.get("vehicle_type", "unknown"),
+                    vehicle_confidence=safe_float(item.get("conf", 0.0)),
+                    vehicle_crop=crop,
+                    direction=direction,
+                    event_key=event_key,
+                )
+            except Exception as exc:
+                print(f"[DB VEHICLE ERROR] {exc}")
+
     # ------------------------------------------------------------
     # PLATE ROI
     # ------------------------------------------------------------
@@ -1206,7 +1258,7 @@ class VideoAIService:
         h, w = frame.shape[:2]
         vehicles = [
             item for item in vehicle_dets
-            if item.get("cls") in (2, 3, 5)
+            if item.get("cls") in (2, 3, 5, 7)
         ]
         vehicles.sort(
             key=lambda item: (
@@ -1414,12 +1466,14 @@ class VideoAIService:
             prefix=prefix,
         )
 
-        vehicle_crop, vehicle_score = get_vehicle_crop_for_plate(
+        vehicle_crop, vehicle_score, vehicle_track_id = get_vehicle_crop_for_plate(
             frame,
             bbox,
             vehicle_dets,
         )
 
+        vehicle_track_id = finished.get("vehicle_track_id") or vehicle_track_id or track_id
+        direction = db.get_camera_direction(self.camera_id)
         try:
             db.save_detection_event(
                 camera_id=self.camera_id,
@@ -1427,8 +1481,13 @@ class VideoAIService:
                 plate_crop=crop,
                 plate_conf=det_conf,
                 ocr_conf=ocr_conf,
-                face_crop=vehicle_crop,
-                face_conf=vehicle_score,
+                track_id=int(vehicle_track_id) if str(vehicle_track_id).lstrip("-").isdigit() else None,
+                object_type="vehicle",
+                vehicle_type="unknown",
+                vehicle_confidence=vehicle_score,
+                vehicle_crop=vehicle_crop,
+                direction=direction,
+                event_key=f"vehicle:{self.camera_id}:{vehicle_track_id}:{direction}",
             )
         except Exception as exc:
             print(f"[DB PLATE ERROR] {exc}")
@@ -1484,6 +1543,7 @@ class VideoAIService:
         self.lighting = self._analyze_lighting_bbox(ai_frame, target_bbox)
         self.lighting["target_type"] = self.focus_target_type
 
+        self._save_vehicle_events(ai_frame, person_dets, video_time)
         self._save_person_events(ai_frame, person_dets, video_time)
 
         plate_display = []

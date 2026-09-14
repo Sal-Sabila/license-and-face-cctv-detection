@@ -95,6 +95,7 @@ VEHICLE_TYPES = {
     5: "bus",
     7: "truck",
 }
+VEHICLE_CLASSES = [0, 2, 3, 5, 7]
 
 # Plate detector
 # Nilai aktual juga dikontrol oleh PlateDetector.
@@ -481,6 +482,7 @@ class StreamAIService:
         self.focus_plate_last_seen = 0.0
         self.focus_info = {"type":"AREA", "box":None, "track_id":None, "lighting":None}
         self.latest_raw_plate_detections = []
+        self.camera_states = {}
 
         print("[AI STREAM] Vehicle classes : person/car/motorcycle/bus")
         print("[AI STREAM] Plate ROI       : kendaraan")
@@ -492,7 +494,34 @@ class StreamAIService:
     # DETECTION
     # ------------------------------------------------------------
 
-    def _detect_vehicles(self, frame):
+    def _camera_state(self, camera_id):
+        state = self.camera_states.get(camera_id)
+        if state is None:
+            state = {
+                "last_ai_time": 0.0,
+                "last_results_time": 0.0,
+                "last_results": {"persons": [], "plates": []},
+                "person_tracker": sv.ByteTrack(
+                    track_activation_threshold=0.35,
+                    lost_track_buffer=60,
+                    minimum_matching_threshold=0.7,
+                    frame_rate=25,
+                ),
+                "plate_tracker": PlateTracker(
+                    iou_threshold=PLATE_TRACKER_IOU,
+                    max_frame_gap=PLATE_TRACKER_FRAME_GAP,
+                    ocr_every_n_matches=PLATE_TRACKER_OCR_EVERY,
+                    min_final_confidence=PLATE_TRACKER_MIN_CONFIDENCE,
+                    min_consistent_reads=2,
+                    single_read_ocr_confidence=0.72,
+                    single_read_detection_confidence=0.55,
+                    max_history=PLATE_TRACKER_MAX_HISTORY,
+                ),
+            }
+            self.camera_states[camera_id] = state
+        return state
+
+    def _detect_vehicles(self, frame, camera_id=1):
         detections = []
 
         try:
@@ -514,7 +543,7 @@ class StreamAIService:
             if boxes is None or len(boxes) == 0:
                 tracked = sv.Detections.empty()
             else:
-                tracked = self.person_tracker.update_with_detections(
+                tracked = self._camera_state(camera_id)["person_tracker"].update_with_detections(
                     sv.Detections.from_ultralytics(result)
                 )
 
@@ -659,7 +688,8 @@ class StreamAIService:
     # ------------------------------------------------------------
 
     def _consume_finished_plate(self, frame, vehicle_dets, camera_id):
-        finished = self.plate_tracker.consume_latest_finished_capture()
+        plate_tracker = self._camera_state(camera_id)["plate_tracker"]
+        finished = plate_tracker.consume_latest_finished_capture()
         if finished is None:
             return None
 
@@ -696,26 +726,6 @@ class StreamAIService:
             prefix=prefix,
         )
 
-        associated_crop, associated_conf = _find_vehicle_for_plate(
-            frame,
-            bbox,
-            vehicle_dets,
-        )
-
-        # DB tetap dipanggil seperti pipeline lama.
-        try:
-            db.save_detection_event(
-                camera_id=camera_id,
-                plate_number=text if valid else None,
-                plate_crop=crop,
-                plate_conf=det_conf,
-                ocr_conf=ocr_conf,
-                face_crop=associated_crop,
-                face_conf=associated_conf,
-            )
-        except Exception as exc:
-            print(f"[AI STREAM ERROR] Save plate DB failed: {exc}")
-
         finished = dict(finished)
         finished.update({
             "text": text,
@@ -727,7 +737,7 @@ class StreamAIService:
         })
 
         self.last_plate_capture = finished
-        self.last_plate_history = list(self.plate_tracker.history)
+        self.last_plate_history = list(plate_tracker.history)
 
         print(
             f"[PLATE RESULT] Cam={camera_id} "
@@ -744,46 +754,9 @@ class StreamAIService:
     # ------------------------------------------------------------
 
     def _save_person_events(self, frame, person_dets, camera_id, current_time):
-        h, w = frame.shape[:2]
-
-        for person in person_dets:
-            if person.get("cls") != 0:
-                continue
-            track_id = int(person.get("track_id", -1))
-            conf = _safe_float(person.get("conf", 0.0))
-
-            if track_id < 0 or conf < PERSON_CAPTURE_CONFIDENCE:
-                continue
-
-            key = f"person_{camera_id}_{track_id}"
-            last = self.captured_tracks.get(key)
-            if last is not None and current_time - last < PERSON_COOLDOWN:
-                continue
-
-            x1, y1, x2, y2 = [int(v) for v in person["box"]]
-            x1 = max(0, min(x1, w - 1))
-            y1 = max(0, min(y1, h - 1))
-            x2 = max(0, min(x2, w))
-            y2 = max(0, min(y2, h))
-            if x2 <= x1 or y2 <= y1:
-                continue
-
-            crop = frame[y1:y2, x1:x2]
-            if crop.size == 0:
-                continue
-
-            self._save_consistent_events(
-                frame,
-                [x1, y1, x2, y2],
-                track_id,
-                camera_id,
-            )
-            if not path:
-                continue
-
-            return output_frame
-
-        return frame
+        # Event writer sudah menggabungkan person-driver dan pedestrian.
+        # Jangan menyimpan person melalui jalur kedua karena akan menggandakan event.
+        return None
 
     # ========================================================
     # SAVE EVENTS
@@ -848,6 +821,7 @@ class StreamAIService:
                     object_type="vehicle",
                     vehicle_type=vehicle_type,
                     vehicle_confidence=float(vehicle.get("conf", 0.0) or 0),
+                    vehicle_crop=frame[max(0, int(vehicle_box[1])):min(frame.shape[0], int(vehicle_box[3])), max(0, int(vehicle_box[0])):min(frame.shape[1], int(vehicle_box[2]))],
                     has_driver=driver is not None,
                     driver_track_id=(driver or {}).get("track_id"),
                     direction=direction,
@@ -1000,7 +974,7 @@ class StreamAIService:
 
     def _select_dynamic_focus(self, frame, vehicle_dets, plate_raw, now):
         h,w=frame.shape[:2]
-        vehicles=[d for d in vehicle_dets if d.get("cls") in (2,3,5) and d.get("track_id",-1)>=0]
+        vehicles=[d for d in vehicle_dets if d.get("cls") in (2,3,5,7) and d.get("track_id",-1)>=0]
         target_type = "VEHICLE"
         if not vehicles:
             vehicles=[d for d in vehicle_dets if d.get("cls") == 0 and d.get("track_id",-1)>=0]
@@ -1059,10 +1033,11 @@ class StreamAIService:
 
         # Lock mencegah dua request Flask menjalankan model bersamaan.
         with self.processing_lock:
-            should_run = (now - self.last_ai_time) >= AI_INTERVAL
+            camera_state = self._camera_state(camera_id)
+            should_run = (now - camera_state["last_ai_time"]) >= AI_INTERVAL
 
             if should_run:
-                self.last_ai_time = now
+                camera_state["last_ai_time"] = now
 
                 # Enhancement adaptif untuk inference; output/capture tetap memakai frame asli.
                 h0, w0 = frame.shape[:2]
@@ -1070,73 +1045,9 @@ class StreamAIService:
                 base_light = _lighting_metrics(frame, base_box)
                 ai_frame = _enhance_for_lighting(frame, base_light)
 
-                for vehicle in person_dets:
-
-                    cls_id = vehicle.get(
-                        "cls",
-                        0
-                    )
-
-                    if cls_id not in (
-                        2,
-                        3,
-                        5,
-                        7
-                    ):
-                        continue
-
-                    vx1, vy1, vx2, vy2 = (
-                        vehicle["box"]
-                    )
-
-                    # Cek intersection
-                    intersects = (
-                        vx1 <= bx2
-                        and
-                        vx2 >= bx1
-                        and
-                        vy1 <= by2
-                        and
-                        vy2 >= by1
-                    )
-
-                    if not intersects:
-                        continue
-
-                    p_x1 = max(
-                        0,
-                        int(vx1)
-                    )
-
-                    p_y1 = max(
-                        0,
-                        int(vy1)
-                    )
-
-                    p_x2 = min(
-                        w,
-                        int(vx2)
-                    )
-
-                    p_y2 = min(
-                        h,
-                        int(vy2)
-                    )
-
-                    if (
-                        p_x2 > p_x1
-                        and
-                        p_y2 > p_y1
-                    ):
-
-                        associated_person_crop = (
-                            frame[
-                                p_y1:p_y2,
-                                p_x1:p_x2
-                            ]
-                        )
-
                 # PlateTracker melakukan OCR multi-frame.
+                person_dets = self._detect_vehicles(ai_frame, camera_id)
+                plate_dets = []
                 if self.plate_ocr is not None:
                     try:
                         plate_detections = self._detect_plates_in_vehicles(
@@ -1146,7 +1057,8 @@ class StreamAIService:
                         self.latest_raw_plate_detections = plate_detections
                         self._select_dynamic_focus(frame, person_dets, plate_detections, now)
 
-                        active_tracks = self.plate_tracker.update(
+                        plate_tracker = self._camera_state(camera_id)["plate_tracker"]
+                        active_tracks = plate_tracker.update(
                             plate_detections,
                             ai_frame,
                             self.plate_ocr,
@@ -1158,26 +1070,29 @@ class StreamAIService:
                                 plate_dets.append(result)
 
                         # Event baru keluar saat tracker memfinalisasi track.
-                        self._consume_finished_plate(
+                        finished = self._consume_finished_plate(
                             frame,
                             person_dets,
                             camera_id,
                         )
+                        if finished is not None:
+                            plate_dets.append(finished)
 
                     except Exception as exc:
                         print(f"[AI STREAM ERROR] Plate pipeline failed: {exc}")
 
                 has_detections = bool(person_dets or plate_dets)
-                if has_detections or now - self.last_results_time >= RESULT_HOLD_SECONDS:
-                    self.last_results = {
+                if has_detections or now - camera_state["last_results_time"] >= RESULT_HOLD_SECONDS:
+                    camera_state["last_results"] = {
                         "persons": person_dets,
                         "plates": plate_dets,
                     }
-                    self.last_results_time = now
+                    camera_state["last_results_time"] = now
 
-                self._save_person_events(
+                self._save_consistent_events(
                     frame,
                     person_dets,
+                    plate_dets,
                     camera_id,
                     now,
                 )
@@ -1186,7 +1101,7 @@ class StreamAIService:
             return frame
 
         output = frame.copy()
-        self._draw_clean_bboxes(output, self.last_results)
+        self._draw_clean_bboxes(output, camera_state["last_results"])
         self._draw_dynamic_focus(output)
         return output
 
