@@ -1,9 +1,9 @@
 :root {
     --sidebar-width: 208px;
     --sidebar-mini-width: 68px;
-    --bg: #f4f7fb;
-    --body: #edf3ff;
-    --panel: rgba(255, 255, 255, 0.92);
+    --bg: #eaf0f8;
+    --body: #e6edf7;
+    --panel: rgba(248, 251, 255, 0.96);
     --panel-strong: #ffffff;
     --sidebar: #0b1220;
     --sidebar-soft: #172235;
@@ -18,8 +18,8 @@
     --danger-soft: #fee2e2;
     --text: #172033;
     --muted: #64748b;
-    --line: #e6edf8;
-    --shadow: 0 16px 36px rgba(15, 23, 42, 0.06);
+    --line: #d7e1ef;
+    --shadow: 0 16px 36px rgba(30, 58, 95, 0.09);
 }
 
 * {
@@ -32,7 +32,7 @@ html {
 
 body {
     font-family: "Segoe UI", Inter, Arial, sans-serif;
-    background: linear-gradient(180deg, var(--body) 0%, #f8fbff 100%);
+    background: linear-gradient(135deg, #e4ecf7 0%, #f4f7fb 48%, #e8f0fa 100%);
     color: var(--text);
     margin: 0;
     padding: 0;
@@ -81,7 +81,7 @@ select {
     min-height: 100vh;
     width: 100%;
     position: relative;
-    background: linear-gradient(180deg, var(--body) 0%, #f8fbff 100%);
+    background: linear-gradient(135deg, rgba(228, 236, 247, 0.96) 0%, rgba(244, 247, 251, 0.98) 48%, rgba(232, 240, 250, 0.96) 100%);
 }
 
 /* Mobile Backdrop */
@@ -1129,6 +1129,214 @@ select {
 .preview-img-container {
     background: #0f172a;
     border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* Dashboard surface treatment */
+.panel,
+.stat-card,
+.user-pill,
+.icon-btn,
+.sidebar-toggle-btn {
+    border-color: rgba(166, 184, 208, 0.62);
+}
+
+.panel {
+    background: linear-gradient(145deg, rgba(250, 252, 255, 0.98), rgba(239, 245, 253, 0.96));
+    box-shadow: 0 14px 30px rgba(38, 68, 105, 0.09);
+}
+
+.panel-header {
+    background: rgba(232, 240, 250, 0.58);
+    border-bottom: 1px solid rgba(166, 184, 208, 0.36);
+}
+
+.filter-toolbar,
+.analytics-filters {
+    background: linear-gradient(135deg, #e6eef9 0%, #f4f8fd 100%) !important;
+    border-color: rgba(166, 184, 208, 0.5) !important;
+}
+
+.filter-toolbar .form-control,
+.filter-toolbar .form-select,
+.analytics-filters .form-control,
+.analytics-filters .form-select,
+.form-control,
+.form-select {
+    background-color: rgba(255, 255, 255, 0.78);
+    border-color: #c8d5e6;
+    color: var(--text);
+    box-shadow: 0 2px 5px rgba(51, 78, 112, 0.04);
+}
+
+.form-control:focus,
+.form-select:focus {
+    background-color: #ffffff;
+    border-color: #6d9be8;
+    box-shadow: 0 0 0 0.2rem rgba(37, 99, 235, 0.14);
+}
+
+.table-responsive {
+    background: #edf3fa;
+    padding: 0 1px 1px;
+}
+
+.table {
+    --bs-table-bg: transparent;
+    --bs-table-striped-bg: rgba(222, 233, 246, 0.52);
+    --bs-table-hover-bg: rgba(198, 218, 241, 0.58);
+}
+
+.table thead th {
+    background: linear-gradient(135deg, #243b5a 0%, #315579 100%);
+    color: #edf5ff;
+    border-bottom: 0;
+    padding-top: 14px;
+    padding-bottom: 14px;
+    letter-spacing: 0.07em;
+}
+
+.table tbody tr {
+    background: rgba(248, 251, 255, 0.92);
+    transition: background 0.16s ease, transform 0.16s ease;
+}
+
+.table tbody tr:nth-child(even) {
+    background: rgba(231, 240, 250, 0.76);
+}
+
+.table tbody tr:hover {
+    background: #dceafa;
+}
+
+.table tbody td {
+    border-bottom-color: rgba(184, 201, 222, 0.58);
+    color: #3b506b;
+}
+
+.table strong {
+    color: #1f3858;
+}
+
+.panel-footer {
+    background: rgba(230, 239, 249, 0.68);
+    border-top-color: rgba(166, 184, 208, 0.48) !important;
+}
+
+.stat-card {
+    background: linear-gradient(145deg, rgba(250, 252, 255, 0.98), rgba(235, 243, 252, 0.96));
+}
+
+.btn-action-outline,
+.btn-light {
+    background: #e8f0fa;
+    border-color: #bdcde0;
+}
+
+.btn-action-outline:hover,
+.btn-light:hover {
+    background: #d9e7f7;
+    border-color: #91acce;
+}
+
+/* Colored application navbar */
+.topbar {
+    position: relative;
+    padding: 14px 18px;
+    margin-bottom: 24px;
+    border: 1px solid rgba(123, 157, 194, 0.46);
+    border-radius: 18px;
+    background: linear-gradient(120deg, #173653 0%, #28577d 58%, #397da0 100%);
+    box-shadow: 0 14px 28px rgba(31, 67, 103, 0.18);
+    overflow: hidden;
+}
+
+.topbar::after {
+    content: "";
+    position: absolute;
+    width: 220px;
+    height: 220px;
+    right: 18%;
+    top: -160px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 50%;
+    pointer-events: none;
+}
+
+.topbar-left,
+.topbar-actions {
+    position: relative;
+    z-index: 1;
+}
+
+.topbar h1 {
+    color: #f7fbff;
+    letter-spacing: -0.02em;
+}
+
+.topbar p {
+    color: #c7dced;
+}
+
+.sidebar-toggle-btn,
+.icon-btn,
+.user-pill {
+    border-color: rgba(255, 255, 255, 0.22);
+    background: rgba(255, 255, 255, 0.13);
+    color: #f7fbff;
+    box-shadow: 0 6px 14px rgba(10, 31, 52, 0.14);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+}
+
+.sidebar-toggle-btn:hover,
+.icon-btn:hover,
+.user-pill:hover {
+    background: rgba(255, 255, 255, 0.23);
+    border-color: rgba(255, 255, 255, 0.4);
+    color: #ffffff;
+}
+
+.user-pill strong {
+    color: #ffffff;
+}
+
+.user-pill span {
+    color: #c7dced;
+}
+
+/* Colored side navigation */
+.sidebar {
+    background: linear-gradient(165deg, #0b1d31 0%, #123b55 52%, #155565 100%);
+    box-shadow: 8px 0 26px rgba(12, 39, 61, 0.2);
+}
+
+.sidebar-header {
+    border-bottom-color: rgba(170, 222, 232, 0.16);
+}
+
+.brand-mark {
+    background: linear-gradient(135deg, #37c6cf 0%, #1476a0 100%);
+    box-shadow: 0 8px 18px rgba(30, 190, 203, 0.28);
+}
+
+.brand-text small,
+.nav-section {
+    color: #9ac7d3;
+}
+
+.nav-link {
+    color: #d8edf2;
+}
+
+.nav-link:hover {
+    background: rgba(115, 211, 220, 0.14);
+    color: #ffffff;
+}
+
+.nav-link.active {
+    background: linear-gradient(135deg, #1da9b7 0%, #16708e 100%);
+    box-shadow: 0 8px 18px rgba(15, 157, 174, 0.26);
+    color: #ffffff;
 }
 
 /* Print Styling for Executive PDF / Print Reports */

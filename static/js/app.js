@@ -51,11 +51,11 @@ function applyCustomDateRange(state, startInputId, endInputId) {
         return true;
     }
     if ((startDate && endDate) && startDate > endDate) {
-        alert('Tanggal mulai tidak boleh lebih besar dari tanggal akhir.');
+        showNotification('Tanggal mulai tidak boleh lebih besar dari tanggal akhir.', 'warning');
         return false;
     }
     if (startDate > todayValue || endDate > todayValue) {
-        alert('Tanggal tidak boleh melebihi tanggal hari ini.');
+        showNotification('Tanggal tidak boleh melebihi tanggal hari ini.', 'warning');
         return false;
     }
 
@@ -87,6 +87,61 @@ async function json(url, options = {}) {
     }
     return response.json();
 }
+
+function showNotification(message, type = 'info', title = '') {
+    const toastEl = document.getElementById('appToast');
+    if (!toastEl || !window.bootstrap) return;
+
+    const presets = {
+        success: { title: 'Berhasil', icon: 'bi-check-circle-fill text-success' },
+        danger: { title: 'Terjadi Kesalahan', icon: 'bi-x-circle-fill text-danger' },
+        warning: { title: 'Perhatian', icon: 'bi-exclamation-triangle-fill text-warning' },
+        info: { title: 'Informasi', icon: 'bi-info-circle-fill text-primary' }
+    };
+    const preset = presets[type] || presets.info;
+    const icon = document.getElementById('toastIcon');
+    const titleEl = document.getElementById('toastTitle');
+    const messageEl = document.getElementById('toastMessage');
+    if (icon) icon.className = `bi ${preset.icon} me-2`;
+    if (titleEl) titleEl.textContent = title || preset.title;
+    if (messageEl) messageEl.textContent = message || '';
+    bootstrap.Toast.getOrCreateInstance(toastEl, { delay: 4200 }).show();
+}
+window.showNotification = showNotification;
+
+function askConfirmation(message, title = 'Konfirmasi') {
+    return new Promise(resolve => {
+        const modalEl = document.getElementById('appConfirmModal');
+        const acceptButton = document.getElementById('confirmAccept');
+        if (!modalEl || !acceptButton || !window.bootstrap) {
+            resolve(window.confirm(message));
+            return;
+        }
+
+        document.getElementById('confirmTitle').textContent = title;
+        document.getElementById('confirmMessage').textContent = message;
+        const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+        let settled = false;
+        const finish = value => {
+            if (settled) return;
+            settled = true;
+            resolve(value);
+        };
+        const onAccept = () => {
+            finish(true);
+            modal.hide();
+        };
+        const onHidden = () => {
+            finish(false);
+            acceptButton.removeEventListener('click', onAccept);
+            modalEl.removeEventListener('hidden.bs.modal', onHidden);
+        };
+        acceptButton.addEventListener('click', onAccept);
+        modalEl.addEventListener('hidden.bs.modal', onHidden);
+        modal.show();
+    });
+}
+window.askConfirmation = askConfirmation;
 
 // ============================================================
 // MODAL GLOBAL: PRATINJAU GAMBAR & DETAIL DETEKSI
@@ -180,7 +235,7 @@ async function exportCameras(format) {
         const result = await json('/api/cameras');
         const cameras = result.data || [];
         if (!cameras.length) {
-            alert('Belum ada kamera untuk diekspor.');
+            showNotification('Belum ada kamera untuk diekspor.', 'info');
             return;
         }
 
@@ -211,7 +266,7 @@ async function exportCameras(format) {
         }
     } catch (err) {
         console.error('Gagal mengekspor kamera:', err);
-        alert('Gagal mengekspor kamera.');
+        showNotification('Gagal mengekspor kamera.', 'danger');
     }
 }
 window.exportCameras = exportCameras;
@@ -241,9 +296,10 @@ async function initMonitoring() {
         const id = Number(button.dataset.id);
         const camera = cameras.find(item => item.id === id);
         if (button.dataset.action === 'edit') openCameraModal(camera);
-        if (button.dataset.action === 'delete' && confirm('Hapus kamera ini?')) {
+        if (button.dataset.action === 'delete' && await askConfirmation('Hapus kamera ini?', 'Hapus Kamera')) {
             await json(`/api/cameras/${id}`, { method: 'DELETE' });
             cameras = await loadCameras();
+            showNotification('Kamera berhasil dihapus.', 'success');
         }
         if (button.dataset.action === 'toggle') {
             await json(`/api/cameras/${id}`, {
@@ -678,14 +734,14 @@ async function loadDetections() {
 }
 
 async function deleteDetection(detectionId) {
-    if (!confirm('Hapus histori deteksi ini beserta capture terkait?')) return;
+    if (!await askConfirmation('Hapus histori deteksi ini beserta capture terkait?', 'Hapus Deteksi')) return;
     try {
         const result = await json(`/api/detections/${encodeURIComponent(detectionId)}`, { method: 'DELETE' });
         if (!result.success) throw new Error(result.message || 'Penghapusan gagal');
         await loadDetections();
     } catch (error) {
         console.error('Error deleteDetection:', error);
-        alert(error.message || 'Gagal menghapus deteksi.');
+        showNotification(error.message || 'Gagal menghapus deteksi.', 'danger');
     }
 }
 window.deleteDetection = deleteDetection;
@@ -883,14 +939,14 @@ async function loadPlateHistory() {
 }
 
 async function deletePlateHistory(plateId) {
-    if (!confirm('Hapus riwayat plat ini beserta event dan capture terkait?')) return;
+    if (!await askConfirmation('Hapus riwayat plat ini beserta event dan capture terkait?', 'Hapus Riwayat Plat')) return;
     try {
         const result = await json(`/api/plate/history/${encodeURIComponent(plateId)}`, { method: 'DELETE' });
         if (!result.success) throw new Error(result.message || 'Penghapusan gagal');
         await loadPlateHistory();
     } catch (error) {
         console.error('Error deletePlateHistory:', error);
-        alert(error.message || 'Gagal menghapus riwayat plat.');
+        showNotification(error.message || 'Gagal menghapus riwayat plat.', 'danger');
     }
 }
 window.deletePlateHistory = deletePlateHistory;
@@ -1055,7 +1111,7 @@ async function initRecap() {
     await populateAnalyticsCameraSelect('recapCamera');
     document.getElementById('recapApply')?.addEventListener('click', () => {
         loadRecap().catch(err => {
-            if (err.message) alert(err.message);
+            if (err.message) showNotification(err.message, 'warning');
         });
     });
     document.getElementById('recapExport')?.addEventListener('click', exportRecap);
@@ -1366,7 +1422,7 @@ async function initStatistics() {
     setDateFilterLimits();
     await populateAnalyticsCameraSelect('statsCamera');
     document.getElementById('statsApply')?.addEventListener('click', () => {
-        loadEnterpriseStatistics(document.getElementById('statsPeriod')?.value || 'today').catch(err => alert(err.message));
+        loadEnterpriseStatistics(document.getElementById('statsPeriod')?.value || 'today').catch(err => showNotification(err.message, 'warning'));
     });
     const periodGroup = document.getElementById('statsPeriodGroup');
     if (periodGroup) {
@@ -1454,10 +1510,10 @@ async function seedDemoData() {
             body: JSON.stringify({ count: 35 })
         });
 
-        alert(res.message || 'Data simulasi berhasil ditambahkan!');
+        showNotification(res.message || 'Data simulasi berhasil ditambahkan!', 'success');
         await loadSettingsFromDb();
     } catch (e) {
-        alert('Gagal menambahkan data simulasi: ' + e.message);
+        showNotification('Gagal menambahkan data simulasi: ' + e.message, 'danger');
     } finally {
         if (btn) {
             btn.disabled = false;
