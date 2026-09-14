@@ -192,7 +192,8 @@ def list_cameras():
                 "name": c["location"],
                 "url": c["stream_url"],
                 "stream_type": c.get("stream_type", 1),
-                "active": bool(c["status"])
+                "active": bool(c["status"]),
+                "direction": c.get("direction") or "unknown"
             }
             for c in cameras_db
         ]
@@ -208,19 +209,21 @@ def create_camera():
     name = str(data.get("name", "")).strip()
     url = str(data.get("url", "")).strip()
     active = bool(data.get("active", True))
+    direction = str(data.get("direction", "unknown"))
 
     if not name or not url:
         return jsonify({"success": False, "message": "Nama dan URL kamera wajib diisi"}), 400
 
     try:
-        new_id = db.add_camera(location=name, stream_url=url, stream_type=1, status=1 if active else 0)
+        new_id = db.add_camera(location=name, stream_url=url, stream_type=1, status=1 if active else 0, direction=direction)
         return jsonify({
             "success": True,
             "data": {
                 "id": new_id,
                 "name": name,
                 "url": url,
-                "active": active
+                "active": active,
+                "direction": direction
             }
         }), 201
     except Exception as e:
@@ -234,9 +237,10 @@ def update_camera(camera_id):
     location = data.get("name")
     stream_url = data.get("url")
     status = 1 if data.get("active") else (0 if "active" in data else None)
+    direction = data.get("direction")
 
     try:
-        ok = db.update_camera(camera_id, location=location, stream_url=stream_url, status=status)
+        ok = db.update_camera(camera_id, location=location, stream_url=stream_url, status=status, direction=direction)
         if not ok:
             return jsonify({"success": False, "message": "Kamera tidak ditemukan atau tidak ada perubahan"}), 404
         return jsonify({"success": True, "message": "Kamera berhasil diperbarui"})
@@ -395,9 +399,9 @@ def face_history():
         records = db.get_recent_detections(limit=100)
         face_list = []
         for r in records:
-            if r.get("face_image_path") or r.get("face_status") is not None:
+            if r.get("object_type") == "person" or (not r.get("object_type") and r.get("face_image_path") and not r.get("plate_id")):
                 status_text = "Terbaca" if r.get("face_status") == 1 else ("Perlu cek" if r.get("face_status") == 2 else "Gagal")
-                conf = float(r.get("face_confidence") or 0.0)
+                conf = float(r.get("person_confidence") or r.get("face_confidence") or 0.0)
                 dt_str = r["detected_at"].strftime("%Y-%m-%d %H:%M:%S") if isinstance(r.get("detected_at"), datetime) else str(r.get("detected_at") or "")
 
                 face_list.append({
@@ -437,6 +441,15 @@ def stats_summary():
         return jsonify({"success": False, "message": str(e)}), 500
 
 
+@plate_bp.route("/analytics", methods=["GET"])
+def analytics():
+    """Shared filtered analytics payload for dashboard, recap and statistics."""
+    try:
+        return jsonify({"success": True, "data": db.get_analytics(request.args.to_dict())})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e), "data": {}}), 500
+
+
 @plate_bp.route("/statistics/enterprise", methods=["GET"])
 def stats_enterprise():
     """
@@ -450,8 +463,30 @@ def stats_enterprise():
     """
     period = request.args.get("period", "today")
     try:
-        data = db.get_enterprise_statistics(period=period)
-        return jsonify({"success": True, "data": data})
+        analytics = db.get_analytics(request.args.to_dict())
+        summary = analytics["summary"]
+        daily = analytics["daily"]
+        hourly = analytics["hourly"]
+        return jsonify({"success": True, "data": {
+            "period": analytics["period"],
+            "period_label": period,
+            "kpi": {
+                "total_detections": summary["vehicles"] + summary["people"],
+                "total_plates": summary["plates"],
+                "total_faces": summary["people"],
+                "plate_read_rate": round(summary["plates"] / max(summary["vehicles"], 1) * 100, 1),
+                "avg_confidence": 0,
+                "need_check_count": 0,
+                "active_cameras": summary["active_cameras"],
+                "total_cameras": summary["total_cameras"],
+                "camera_availability": round(summary["active_cameras"] / max(summary["total_cameras"], 1) * 100, 1)
+            },
+            "trend": {"labels": [item["date"] for item in daily], "plates": [item["vehicles"] for item in daily], "faces": [item["people"] for item in daily], "totals": [item["vehicles"] + item["people"] for item in daily]},
+            "camera_distribution": [{"camera_name": item["camera"], "total_count": item["vehicles"] + item["people"], "plate_count": item["unique_plates"], "face_count": item["people"], "percentage": 0} for item in analytics["cameras"]],
+            "status_breakdown": {"valid": 0, "warning": 0, "failed": 0},
+            "peak_hours": [{"time_range": f"{item['label']} - {(item['hour'] + 1) % 24:02d}:00 WIB", "count": item["vehicles"], "percentage": 0} for item in sorted(hourly, key=lambda value: value["vehicles"], reverse=True)[:3]],
+            "top_plates": [{"plate_number": item["plate"], "total_seen": item["count"], "last_camera": item["camera"], "last_seen": item["last_seen"], "status": "Aktual", "status_code": 1, "avg_confidence_percent": item["confidence"]} for item in analytics["top_plates"]]
+        }})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
@@ -587,40 +622,42 @@ def export_statistics_csv():
     """Mengekspor laporan statistik analitik eksekutif ke CSV."""
     period = request.args.get("period", "today")
     try:
-        data = db.get_enterprise_statistics(period=period)
-        kpi = data.get("kpi", {})
+        data = db.get_analytics(request.args.to_dict())
+        summary = data.get("summary", {})
         top_plates = data.get("top_plates", [])
-        cam_dist = data.get("camera_distribution", [])
+        cam_dist = data.get("cameras", [])
 
         output = io.StringIO()
         writer = csv.writer(output)
 
         writer.writerow(["LAPORAN EKSEKUTIF ANALITIK CCTV - PLATEVISION"])
-        writer.writerow(["Periode", data.get("period_label", period)])
+        writer.writerow(["Periode", data.get("period", period)])
         writer.writerow(["Tanggal Cetak", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
         writer.writerow([])
 
         writer.writerow(["RINGKASAN KPI UTAMA"])
         writer.writerow(["Metrik", "Nilai"])
-        writer.writerow(["Total Deteksi", kpi.get("total_detections", 0)])
-        writer.writerow(["Total Plat Nomor", kpi.get("total_plates", 0)])
-        writer.writerow(["Total Wajah / Orang", kpi.get("total_faces", 0)])
-        writer.writerow(["Plate Recognition Rate (%)", f"{kpi.get('plate_read_rate', 0)}%"])
-        writer.writerow(["Rata-rata Akurasi AI (%)", f"{kpi.get('avg_confidence', 0)}%"])
-        writer.writerow(["Perlu Review Manual", kpi.get("need_check_count", 0)])
-        writer.writerow(["Kamera Aktif", f"{kpi.get('active_cameras', 0)} / {kpi.get('total_cameras', 0)}"])
+        writer.writerow(["Total Kendaraan", summary.get("vehicles", 0)])
+        writer.writerow(["Kendaraan Masuk", summary.get("vehicle_entry", 0)])
+        writer.writerow(["Kendaraan Keluar", summary.get("vehicle_exit", 0)])
+        writer.writerow(["Total Plat Terdeteksi", summary.get("plates", 0)])
+        writer.writerow(["Plat Unik", summary.get("unique_plates", 0)])
+        writer.writerow(["Total Orang", summary.get("people", 0)])
+        writer.writerow(["Orang Masuk", summary.get("people_entry", 0)])
+        writer.writerow(["Orang Keluar", summary.get("people_exit", 0)])
+        writer.writerow(["Kamera Aktif", f"{summary.get('active_cameras', 0)} / {summary.get('total_cameras', 0)}"])
         writer.writerow([])
 
         writer.writerow(["DISTRIBUSI LALU LINTAS PER KAMERA CCTV"])
-        writer.writerow(["Nama CCTV", "Total Deteksi", "Plat", "Wajah", "Pangsa (%)"])
+        writer.writerow(["Nama CCTV", "Arah", "Kendaraan", "Orang", "Plat Unik", "Status"])
         for c in cam_dist:
-            writer.writerow([c["camera_name"], c["total_count"], c["plate_count"], c["face_count"], f"{c['percentage']}%"])
+            writer.writerow([c["camera"], c["direction"], c["vehicles"], c["people"], c["unique_plates"], c["status"]])
         writer.writerow([])
 
         writer.writerow(["TOP 10 PLAT PALING SERING TERDETEKSI"])
-        writer.writerow(["Nomor Plat", "Frekuensi", "Lokasi Terakhir", "Waktu Terakhir", "Status"])
+        writer.writerow(["Nomor Plat", "Frekuensi", "Lokasi Terakhir", "Waktu Terakhir", "Confidence (%)"])
         for tp in top_plates:
-            writer.writerow([tp["plate_number"], tp["total_seen"], tp["last_camera"], tp["last_seen"], tp["status"]])
+            writer.writerow([tp["plate"], tp["count"], tp["camera"], tp["last_seen"], tp["confidence"]])
 
         output.seek(0)
         return Response(

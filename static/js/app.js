@@ -264,18 +264,39 @@ async function initMonitoring() {
 async function initDashboard() {
     async function updateDashboardMetrics() {
         try {
-            const summaryRes = await json('/api/statistics/summary');
-            const data = summaryRes.data || {};
+            const summaryRes = await json('/api/analytics?period=today');
+            const data = summaryRes.data?.summary || {};
 
             const elTotalVeh = document.getElementById('totalVehicle');
             const elPlateRead = document.getElementById('plateRead');
             const elNeedCheck = document.getElementById('needCheck');
             const elCamStatus = document.getElementById('cameraStatus');
 
-            if (elTotalVeh) elTotalVeh.textContent = data.today_detections || data.total_full_detections || 0;
-            if (elPlateRead) elPlateRead.textContent = data.plate_success || data.total_plates || 0;
-            if (elNeedCheck) elNeedCheck.textContent = data.need_check || 0;
+            if (elTotalVeh) elTotalVeh.textContent = data.vehicles || 0;
+            if (elPlateRead) elPlateRead.textContent = data.plates || 0;
+            if (elNeedCheck) elNeedCheck.textContent = data.people || 0;
             if (elCamStatus) elCamStatus.textContent = `${data.active_cameras || 0} / ${data.total_cameras || 0}`;
+            const unique = document.getElementById('uniquePlateCount');
+            const people = document.getElementById('peopleTotal');
+            const vehicleLabel = document.getElementById('vehicleFlowLabel');
+            const peopleLabel = document.getElementById('peopleFlowLabel');
+            const vehicleTotal = document.getElementById('vehicleFlowTotal');
+            const peopleTotal = document.getElementById('peopleFlowTotal');
+            const vehicleDetail = document.getElementById('vehicleFlowDetail');
+            const peopleDetail = document.getElementById('peopleFlowDetail');
+            if (unique) unique.textContent = data.unique_plates || 0;
+            if (people) people.textContent = data.people || 0;
+            if (vehicleLabel) vehicleLabel.textContent = `Masuk ${data.vehicle_entry || 0} · Keluar ${data.vehicle_exit || 0}`;
+            if (peopleLabel) peopleLabel.textContent = `Masuk ${data.people_entry || 0} · Keluar ${data.people_exit || 0}`;
+            if (vehicleTotal) vehicleTotal.textContent = data.vehicles || 0;
+            if (peopleTotal) peopleTotal.textContent = data.people || 0;
+            if (vehicleDetail) vehicleDetail.textContent = `Masuk ${data.vehicle_entry || 0} · Keluar ${data.vehicle_exit || 0}`;
+            if (peopleDetail) peopleDetail.textContent = `Masuk ${data.people_entry || 0} · Keluar ${data.people_exit || 0}`;
+            const insight = document.getElementById('dashboardInsights');
+            if (insight) {
+                const insightData = summaryRes.data?.insights || [];
+                insight.innerHTML = insightData.map(item => `<li>${esc(item)}</li>`).join('') || '<li>Belum ada data cukup untuk insight.</li>';
+            }
         } catch (e) {
             console.error('Update dashboard metrics error:', e);
         }
@@ -493,9 +514,10 @@ async function initDashboard() {
                 }
 
                 recent.innerHTML = items.map(item => {
-                    const isPlate = item.type === 'plate' || Boolean(item.plate && item.plate !== '-');
-                    const label = isPlate ? esc(item.plate) : 'Wajah / Pengendara';
-                    const icon = isPlate ? 'P' : '<i class="bi bi-person-fill"></i>';
+                    const isVehicle = item.object_type === 'vehicle' || item.type === 'vehicle' || item.type === 'vehicle_with_plate' || item.type === 'plate';
+                    const isPlate = item.type === 'vehicle_with_plate' || Boolean(item.plate && item.plate !== '-');
+                    const label = isVehicle ? (isPlate ? esc(item.plate) : 'Kendaraan') : 'Orang / Pejalan Kaki';
+                    const icon = isVehicle ? 'K' : '<i class="bi bi-person-fill"></i>';
                     const photoPath = item.plate_image_path || item.face_image_path || '';
 
                     return `
@@ -592,16 +614,17 @@ async function loadDetections() {
         }
 
         tableBody.innerHTML = items.map(item => {
-            const isPlate = item.type === 'plate' || (item.plate && item.plate !== '-');
-            const targetLabel = isPlate ? `<strong>${esc(item.plate)}</strong>` : `<span class="text-muted fst-italic">Wajah / Pejalan Kaki</span>`;
+            const isVehicle = item.object_type === 'vehicle' || item.type === 'vehicle' || item.type === 'vehicle_with_plate' || item.type === 'plate';
+            const isPlate = item.type === 'vehicle_with_plate' || (isVehicle && item.has_plate);
+            const targetLabel = isVehicle ? `<strong>${esc(isPlate ? item.plate : 'Kendaraan')}</strong>` : `<span class="text-muted fst-italic">Orang / Pejalan Kaki</span>`;
             
             let typeBadge = '';
-            if (item.type === 'combined') {
-                typeBadge = `<span class="badge bg-primary-subtle text-primary border border-primary-subtle">Terpadu (Plat + Wajah)</span>`;
-            } else if (item.type === 'plate') {
-                typeBadge = `<span class="badge bg-info-subtle text-info border border-info-subtle"><i class="bi bi-card-heading"></i> Plat Nomor</span>`;
+            if (isPlate) {
+                typeBadge = `<span class="badge bg-info-subtle text-info border border-info-subtle"><i class="bi bi-car-front"></i> Kendaraan / Plat Nomor</span>`;
+            } else if (isVehicle) {
+                typeBadge = `<span class="badge bg-primary-subtle text-primary border border-primary-subtle"><i class="bi bi-car-front"></i> Kendaraan</span>`;
             } else {
-                typeBadge = `<span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle"><i class="bi bi-person"></i> Orang</span>`;
+                typeBadge = `<span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle"><i class="bi bi-person"></i> Orang / Pejalan Kaki</span>`;
             }
 
             let statusBadge = '';
@@ -613,9 +636,12 @@ async function loadDetections() {
                 statusBadge = `<span class="badge bg-danger-subtle text-danger border border-danger-subtle">Gagal</span>`;
             }
 
-            const photo = item.plate_image_path || item.face_image_path || '';
+            const photo = item.plate_image_path || (isVehicle ? '' : item.face_image_path) || '';
+            const confidenceText = isPlate
+                ? `Kendaraan ${item.vehicle_confidence_percent || 0}% · Plat ${item.plate_confidence_percent || 0}% · OCR ${item.ocr_confidence_percent || 0}%`
+                : (isVehicle ? `Kendaraan ${item.vehicle_confidence_percent || item.confidence_percent || 0}%` : `Orang ${item.person_confidence_percent || item.confidence_percent || 0}%`);
             const thumbHtml = photo
-                ? `<img src="/${esc(photo.replace(/^\/+/, ''))}" alt="Thumb" class="rounded border" style="width: 50px; height: 36px; object-fit: cover; cursor: pointer;" onclick="openImageModal('${esc(photo)}', '${esc(item.plate || 'Deteksi')}', '${esc(item.camera)} · ${esc(item.timestamp)}', 'Akurasi: <b>${item.confidence_percent}%</b>')">`
+                ? `<img src="/${esc(photo.replace(/^\/+/, ''))}" alt="Thumb" class="rounded border" style="width: 50px; height: 36px; object-fit: cover; cursor: pointer;" onclick="openImageModal('${esc(photo)}', '${esc(item.plate || 'Deteksi')}', '${esc(item.camera)} · ${esc(item.timestamp)}', '${esc(confidenceText)}')">`
                 : `<div class="rounded border bg-light text-muted d-flex align-items-center justify-content-center small" style="width: 50px; height: 36px;"><i class="bi bi-image"></i></div>`;
 
             return `
@@ -635,7 +661,7 @@ async function loadDetections() {
                     <td><span class="small text-muted">${esc(item.timestamp)}</span></td>
                     <td>${statusBadge}</td>
                     <td class="text-center">
-                        <button class="btn btn-outline-primary btn-sm px-2 py-1" title="Lihat Foto" onclick="openImageModal('${esc(photo)}', '${esc(item.plate || 'Detail Deteksi')}', '${esc(item.camera)} · ${esc(item.timestamp)}', 'Akurasi: <b>${item.confidence_percent}%</b> · Status: <b>${esc(item.status)}</b>')">
+                        <button class="btn btn-outline-primary btn-sm px-2 py-1" title="Lihat Foto" onclick="openImageModal('${esc(photo)}', '${esc(item.plate || 'Detail Deteksi')}', '${esc(item.camera)} · ${esc(item.timestamp)}', '${esc(confidenceText)} · Status: ${esc(item.status)}')">
                             <i class="bi bi-eye"></i>
                         </button>
                         <button class="btn btn-outline-danger btn-sm px-2 py-1" title="Hapus Deteksi" onclick="deleteDetection(${item.id})">
@@ -954,6 +980,61 @@ window.exportPlates = exportPlates;
 // MODUL: STATISTIK STANDAR PERUSAHAAN (ENTERPRISE ANALYTICS)
 // ============================================================
 
+function analyticsParams(prefix) {
+    const period = document.getElementById(`${prefix}Period`)?.value || 'today';
+    const params = new URLSearchParams({ period });
+    const start = document.getElementById(`${prefix}Start`)?.value;
+    const end = document.getElementById(`${prefix}End`)?.value;
+    const camera = document.getElementById(`${prefix}Camera`)?.value;
+    const region = document.getElementById(`${prefix}Region`)?.value;
+    const gate = document.getElementById(`${prefix}Gate`)?.value;
+    const type = document.getElementById(`${prefix}ObjectType`)?.value;
+    const direction = document.getElementById(`${prefix}Direction`)?.value;
+    if (start) params.set('start_date', start);
+    if (end) params.set('end_date', end);
+    if (camera) params.set('camera_id', camera);
+    if (region) params.set('region', region);
+    if (gate) params.set('gate', gate);
+    if (type) params.set('object_type', type);
+    if (direction) params.set('direction', direction);
+    return params;
+}
+
+async function populateAnalyticsCameraSelect(id) {
+    const select = document.getElementById(id);
+    if (!select) return;
+    const res = await json('/api/cameras').catch(() => ({ data: [] }));
+    select.innerHTML = '<option value="">Semua CCTV</option>' + (res.data || []).map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+}
+
+async function loadRecap() {
+    const res = await json(`/api/analytics?${analyticsParams('recap').toString()}`);
+    const data = res.data || {};
+    const s = data.summary || {};
+    const cards = [
+        ['Kendaraan masuk', s.vehicle_entry], ['Kendaraan keluar', s.vehicle_exit], ['Total kendaraan', s.vehicles],
+        ['Orang masuk', s.people_entry], ['Orang keluar', s.people_exit], ['Total orang', s.people]
+    ];
+    const totals = document.getElementById('recapTotals');
+    if (totals) totals.innerHTML = cards.map(([label, value]) => `<div class="col-xl-2 col-md-4 col-6"><div class="stat-card recap-stat"><div><span>${label}</span><strong>${value || 0}</strong></div></div></div>`).join('');
+    const cameraTable = document.getElementById('recapCameraTable');
+    if (cameraTable) cameraTable.innerHTML = (data.cameras || []).map(c => `<tr><td><strong>${esc(c.camera)}</strong></td><td>${esc(c.direction)}</td><td>${c.vehicles}</td><td>${c.people}</td><td>${c.unique_plates}</td><td><span class="status ${c.status === 'Aktif' ? 'success' : 'warning'}">${c.status}</span></td></tr>`).join('') || '<tr><td colspan="6" class="text-center text-muted py-4">Belum ada event pada filter ini.</td></tr>';
+    const dailyTable = document.getElementById('recapDailyTable');
+    if (dailyTable) dailyTable.innerHTML = (data.daily || []).map(d => `<tr><td>${esc(d.date)}</td><td>${d.vehicles}</td><td>${d.unique_plates}</td><td>${d.entry}</td><td>${d.exit}</td><td>${d.people}</td></tr>`).join('') || '<tr><td colspan="6" class="text-center text-muted py-4">Belum ada data harian.</td></tr>';
+}
+
+function exportRecap() {
+    window.location.href = `/api/export/statistics?${analyticsParams('recap').toString()}`;
+}
+window.loadRecap = loadRecap;
+
+function initRecap() {
+    populateAnalyticsCameraSelect('recapCamera');
+    document.getElementById('recapApply')?.addEventListener('click', loadRecap);
+    document.getElementById('recapExport')?.addEventListener('click', exportRecap);
+    loadRecap().catch(err => console.error('Error loadRecap:', err));
+}
+
 window._currentStatsPeriod = 'today';
 window._trendChart = null;
 window._donutChart = null;
@@ -961,6 +1042,38 @@ window._cameraChart = null;
 
 async function loadEnterpriseStatistics(period = 'today') {
     window._currentStatsPeriod = period;
+
+    const analyticsRes = await json(`/api/analytics?${analyticsParams('stats').toString()}`).catch(() => null);
+    if (analyticsRes?.data) {
+        const data = analyticsRes.data;
+        const s = data.summary || {};
+        const kpiValues = {
+            kpiTotalDets: s.vehicles, kpiTotalPlates: s.plates, kpiTotalFaces: s.people,
+            kpiPlateRate: s.vehicles ? `${Math.round((s.plates / s.vehicles) * 100)}%` : '0%',
+            kpiAvgConf: '-', kpiNeedCheck: '-', kpiCamStatus: `${s.active_cameras || 0} / ${s.total_cameras || 0}`, kpiCamUptime: '-'
+        };
+        Object.entries(kpiValues).forEach(([id, value]) => { const el = document.getElementById(id); if (el) el.textContent = value ?? 0; });
+        const trend = data.daily?.length ? data.daily : data.hourly;
+        const labels = trend.map(item => item.date || item.label);
+        const vehicleData = trend.map(item => item.vehicles || 0);
+        const peopleData = trend.map(item => item.people || 0);
+        const trendCanvas = document.getElementById('trendChartCanvas');
+        if (trendCanvas && window.Chart) {
+            if (window._trendChart) window._trendChart.destroy();
+            window._trendChart = new Chart(trendCanvas, { type: 'line', data: { labels, datasets: [{ label: 'Kendaraan', data: vehicleData, borderColor: '#2563eb', backgroundColor: 'rgba(37,99,235,.12)', fill: true, tension: .3 }, { label: 'Orang', data: peopleData, borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,.08)', fill: true, tension: .3 }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true } } } });
+        }
+        const camCanvas = document.getElementById('cameraBarCanvas');
+        if (camCanvas && window.Chart) {
+            if (window._cameraChart) window._cameraChart.destroy();
+            window._cameraChart = new Chart(camCanvas, { type: 'bar', data: { labels: (data.cameras || []).map(c => c.camera), datasets: [{ label: 'Kendaraan', data: (data.cameras || []).map(c => c.vehicles), backgroundColor: '#2563eb' }, { label: 'Orang', data: (data.cameras || []).map(c => c.people), backgroundColor: '#f59e0b' }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true } } } });
+        }
+        const peak = (data.hourly || []).reduce((best, item) => item.vehicles > (best?.vehicles || -1) ? item : best, null);
+        const peakContainer = document.getElementById('peakHoursList');
+        if (peakContainer) peakContainer.innerHTML = peak ? `<div class="p-3 bg-light rounded border"><strong>${peak.label} - ${String((peak.hour + 1) % 24).padStart(2, '0')}:00</strong><span class="d-block text-primary mt-1">${peak.vehicles} kendaraan · ${peak.people} orang</span></div>` : '<div class="text-muted">Belum ada data.</div>';
+        const topBody = document.getElementById('topPlatesTable');
+        if (topBody) topBody.innerHTML = (data.top_plates || []).map((p, i) => `<tr><td>${i + 1}</td><td><strong>${esc(p.plate)}</strong></td><td>${p.count} kali</td><td>${esc(p.camera)}</td><td>${esc(p.last_seen)}</td><td>${p.confidence}%</td><td><span class="badge bg-success-subtle text-success">Aktual</span></td></tr>`).join('') || '<tr><td colspan="7" class="text-center text-muted py-4">Belum ada data plat.</td></tr>';
+        return;
+    }
 
     const badgeEl = document.getElementById('statsPeriodBadge');
     if (badgeEl) {
@@ -1208,6 +1321,8 @@ function exportStatsReport() {
 window.exportStatsReport = exportStatsReport;
 
 function initStatistics() {
+    populateAnalyticsCameraSelect('statsCamera');
+    document.getElementById('statsApply')?.addEventListener('click', () => loadEnterpriseStatistics(document.getElementById('statsPeriod')?.value || 'today'));
     const periodGroup = document.getElementById('statsPeriodGroup');
     if (periodGroup) {
         periodGroup.addEventListener('click', e => {
@@ -1420,6 +1535,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (document.getElementById('plateHistoryTable')) {
         initHistoryPage();
+    }
+    if (document.getElementById('recapPage')) {
+        initRecap();
     }
     if (document.getElementById('trendChartCanvas')) {
         initStatistics();
