@@ -1,3 +1,5 @@
+import cv2
+
 from ultralytics import YOLO
 
 
@@ -14,7 +16,8 @@ class PlateDetector:
         min_width=25,
         min_height=10,
         min_aspect_ratio=1.1,
-        max_aspect_ratio=6.5
+        max_aspect_ratio=6.5,
+        small_roi_scale=2.0,
     ):
 
         self.model = YOLO(model_path)
@@ -30,6 +33,7 @@ class PlateDetector:
 
         self.min_aspect_ratio = min_aspect_ratio
         self.max_aspect_ratio = max_aspect_ratio
+        self.small_roi_scale = max(1.0, float(small_roi_scale))
 
         print("=" * 60)
         print("[PLATE] Detector siap")
@@ -50,8 +54,25 @@ class PlateDetector:
 
         try:
 
+            original_height, original_width = frame.shape[:2]
+            inference_frame = frame
+            scale = 1.0
+            # Small vehicle ROIs lose plate characters when YOLO resizes them
+            # directly to imgsz. Upscale only those ROIs to keep CPU bounded.
+            if max(original_height, original_width) < 640:
+                scale = min(
+                    self.small_roi_scale,
+                    640.0 / max(1, max(original_height, original_width)),
+                )
+                if scale > 1.05:
+                    inference_frame = cv2.resize(
+                        frame,
+                        (int(original_width * scale), int(original_height * scale)),
+                        interpolation=cv2.INTER_CUBIC,
+                    )
+
             results = self.model.predict(
-                source=frame,
+                source=inference_frame,
                 conf=self.confidence,
                 imgsz=self.imgsz,
                 device=self.device,
@@ -85,7 +106,7 @@ class PlateDetector:
                     if class_id != 0:
                         continue
 
-                    x1, y1, x2, y2 = box.xyxy[0].tolist()
+                    x1, y1, x2, y2 = [value / scale for value in box.xyxy[0].tolist()]
 
                 except Exception:
                     continue

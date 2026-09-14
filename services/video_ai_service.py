@@ -86,14 +86,14 @@ CAMERA_NAME = "Video CCTV"
 
 VEHICLE_CLASSES = [0, 2, 3, 5]
 VEHICLE_CONFIDENCE = 0.35
-VEHICLE_IMGSZ = 416
+VEHICLE_IMGSZ = 512
 
-PLATE_CONFIDENCE = 0.55
-PLATE_IMGSZ = 416
+PLATE_CONFIDENCE = 0.42
+PLATE_IMGSZ = 640
 PLATE_MAX_DET = 5
 PLATE_IOU = 0.45
-PLATE_MIN_WIDTH = 30
-PLATE_MIN_HEIGHT = 10
+PLATE_MIN_WIDTH = 20
+PLATE_MIN_HEIGHT = 7
 
 # Video offline: AI berbasis frame, bukan wall-clock.
 # 2 berarti AI memproses frame 1,3,5,... pada video 25 FPS ~12.5 AI FPS.
@@ -133,6 +133,9 @@ FOCUS_MIN_HEIGHT = 80
 FOCUS_TARGET_HOLD_FRAMES = 8
 FOCUS_SWITCH_MARGIN = 0.12
 FOCUS_PLATE_PRIORITY = True
+FOCUS_PLATE_HOLD_FRAMES = 12
+PLATE_RESULT_HOLD_FRAMES = 6
+FOCUS_PLATE_HOLD_FRAMES = 12
 
 # Titik asal beam/cahaya pada tampilan: posisi kamera relatif terhadap frame.
 CAMERA_POINT_NORMALIZED = (0.50, 0.05)
@@ -497,6 +500,7 @@ class VideoAIService:
 
         self.person_capture_state = {}
         self.last_results = {"persons": [], "plates": []}
+        self.last_plate_result_frame = -999999
         self.last_plate_capture = None
         self.last_plate_history = []
         self.person_capture_count = 0
@@ -525,6 +529,7 @@ class VideoAIService:
         self.focus_target_plate_bbox = None
         self.focus_target_vehicle_bbox = None
         self.focus_last_seen_frame = -999999
+        self.focus_plate_last_seen_frame = -999999
 
         self.yolo_person = None
         self.plate_detector = None
@@ -686,6 +691,10 @@ class VideoAIService:
         if not box:
             return
 
+        previous_focus_type = self.focus_target_type
+        previous_focus_track_id = self.focus_target_track_id
+        previous_focus_bbox = self.focus_bbox
+        previous_focus_point = self.focus_point
         self.focus_bbox = self._expand_bbox(
             box,
             frame.shape,
@@ -699,10 +708,22 @@ class VideoAIService:
         self.focus_target_track_id = int(best.get("track_id", -1))
         self.focus_target_conf = safe_float(best.get("conf", 0.0))
         self.focus_target_vehicle_bbox = list(box)
-        self.focus_target_plate_bbox = None
         self.focus_last_seen_frame = frame_number
 
-    def _update_plate_focus(self, frame, plate_dets):
+        if (
+            previous_focus_type == "PLATE"
+            and previous_focus_track_id == int(best.get("track_id", -1))
+            and frame_number - self.focus_plate_last_seen_frame <= FOCUS_PLATE_HOLD_FRAMES
+        ):
+            if previous_focus_bbox is not None:
+                self.focus_bbox = previous_focus_bbox
+            self.focus_point = previous_focus_point
+            self.focus_target_type = "PLATE"
+            return
+
+        self.focus_target_plate_bbox = None
+
+    def _update_plate_focus(self, frame, plate_dets, frame_number):
         """Jika plat ditemukan pada target kendaraan, fokus dipindahkan ke plat."""
         if not DYNAMIC_FOCUS_ENABLED or not FOCUS_PLATE_PRIORITY:
             return
@@ -734,7 +755,7 @@ class VideoAIService:
         self.focus_point = self._bbox_center(bbox)
         self.focus_target_type = "PLATE"
         self.focus_target_plate_bbox = list(bbox)
-        self.focus_last_seen_frame = self.focus_last_seen_frame
+        self.focus_plate_last_seen_frame = frame_number
 
     def _analyze_lighting_bbox(self, frame, bbox):
         """Hitung kualitas cahaya pada bbox tertentu."""
@@ -1050,8 +1071,8 @@ class VideoAIService:
             iou=PLATE_IOU,
             min_width=PLATE_MIN_WIDTH,
             min_height=PLATE_MIN_HEIGHT,
-            min_aspect_ratio=1.8,
-            max_aspect_ratio=6.0,
+            min_aspect_ratio=1.5,
+            max_aspect_ratio=7.0,
         )
 
         try:
@@ -1476,7 +1497,7 @@ class VideoAIService:
 
                 # Tahap 2: jika plat milik target kendaraan ditemukan,
                 # pindahkan focus + beam ke plat tersebut.
-                self._update_plate_focus(ai_frame, detections)
+                self._update_plate_focus(ai_frame, detections, frame_number)
                 target_bbox = self._get_focus_bbox(ai_frame)
                 self.lighting = self._analyze_lighting_bbox(ai_frame, target_bbox)
                 self.lighting["target_type"] = self.focus_target_type
@@ -1503,6 +1524,15 @@ class VideoAIService:
 
             except Exception as exc:
                 print(f"[PLATE PIPELINE ERROR] {exc}")
+
+        if (
+            not plate_display
+            and self.last_results.get("plates")
+            and frame_number - self.last_plate_result_frame <= PLATE_RESULT_HOLD_FRAMES
+        ):
+            plate_display = list(self.last_results["plates"])
+        elif plate_display:
+            self.last_plate_result_frame = frame_number
 
         self.last_results = {
             "persons": person_dets,

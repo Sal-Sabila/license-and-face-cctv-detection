@@ -185,12 +185,19 @@ class PlateOCR:
             )
 
             ph, pw = padded.shape[:2]
-            target_w = max(1, int(pw * self.scale))
-            target_h = max(1, int(ph * self.scale))
+            # Keep distant plates large enough for PaddleOCR to distinguish
+            # narrow characters, while retaining the original aspect ratio.
+            effective_scale = max(
+                self.scale,
+                64.0 / max(1, ph),
+                240.0 / max(1, pw),
+            )
+            target_w = max(1, int(pw * effective_scale))
+            target_h = max(1, int(ph * effective_scale))
 
             # Plat biasanya lebar. Pertahankan rasio dengan resolusi optimal untuk CPU
-            max_w = 320
-            max_h = 100
+            max_w = 420
+            max_h = 140
             scale_down = min(
                 max_w / max(1, target_w),
                 max_h / max(1, target_h),

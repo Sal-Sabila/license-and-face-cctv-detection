@@ -78,14 +78,14 @@ os.makedirs(PLATE_CAPTURE_DIR, exist_ok=True)
 
 VEHICLE_CLASSES = [0, 2, 3, 5]  # person, car, motorcycle, bus
 VEHICLE_CONFIDENCE = 0.35
-VEHICLE_IMGSZ = 416
+VEHICLE_IMGSZ = 512
 
-PLATE_CONFIDENCE = 0.55
-PLATE_IMGSZ = 416
+PLATE_CONFIDENCE = 0.42
+PLATE_IMGSZ = 640
 PLATE_MAX_DET = 5
 PLATE_IOU = 0.45
-PLATE_MIN_WIDTH = 30
-PLATE_MIN_HEIGHT = 10
+PLATE_MIN_WIDTH = 20
+PLATE_MIN_HEIGHT = 7
 
 # Stream tetap hemat CPU: AI dijalankan berbasis waktu nyata.
 AI_INTERVAL = 0.35
@@ -110,6 +110,7 @@ MAX_PLATES_PER_CYCLE = 3
 
 # Dynamic lighting/focus
 FOCUS_TARGET_HOLD_SECONDS = 1.5
+RESULT_HOLD_SECONDS = 1.0
 FOCUS_PADDING_VEHICLE = 0.12
 FOCUS_PADDING_PLATE = 0.55
 LIGHT_DARK_THRESHOLD = 72.0
@@ -422,8 +423,8 @@ class StreamAIService:
             iou=PLATE_IOU,
             min_width=PLATE_MIN_WIDTH,
             min_height=PLATE_MIN_HEIGHT,
-            min_aspect_ratio=1.8,
-            max_aspect_ratio=6.0,
+            min_aspect_ratio=1.5,
+            max_aspect_ratio=7.0,
         )
 
         try:
@@ -461,11 +462,13 @@ class StreamAIService:
         self.saved_plate_events = {}
         self.last_ai_time = 0.0
         self.last_results = {"persons": [], "plates": []}
+        self.last_results_time = 0.0
         self.last_plate_history = []
         self.last_plate_capture = None
         self.processing_lock = threading.Lock()
         self.focus_track_id = None
         self.focus_last_seen = 0.0
+        self.focus_plate_last_seen = 0.0
         self.focus_info = {"type":"AREA", "box":None, "track_id":None, "lighting":None}
         self.latest_raw_plate_detections = []
 
@@ -783,6 +786,10 @@ class StreamAIService:
     def _select_dynamic_focus(self, frame, vehicle_dets, plate_raw, now):
         h,w=frame.shape[:2]
         vehicles=[d for d in vehicle_dets if d.get("cls") in (2,3,5) and d.get("track_id",-1)>=0]
+        target_type = "VEHICLE"
+        if not vehicles:
+            vehicles=[d for d in vehicle_dets if d.get("cls") == 0 and d.get("track_id",-1)>=0]
+            target_type = "PERSON"
         by_id={int(d["track_id"]):d for d in vehicles}
         target=by_id.get(self.focus_track_id) if self.focus_track_id is not None else None
         if target is None and self.focus_track_id is not None and now-self.focus_last_seen < FOCUS_TARGET_HOLD_SECONDS:
@@ -800,11 +807,15 @@ class StreamAIService:
             self.focus_info={"type":"AREA","box":box,"track_id":None,"lighting":_lighting_metrics(frame,box)}
             return
         self.focus_last_seen=now
-        tid=int(target["track_id"]); focus_type='VEHICLE'; box=_clamp_box(target["box"],w,h,FOCUS_PADDING_VEHICLE)
+        tid=int(target["track_id"]); focus_type=target_type; box=_clamp_box(target["box"],w,h,FOCUS_PADDING_VEHICLE)
         matches=[p for p in plate_raw if int(p.get("vehicle_track_id",-999))==tid and len(p.get("bbox",[]))==4]
         if matches:
             best=max(matches,key=lambda p:_safe_float(p.get("confidence",p.get("conf",0))))
             box=_clamp_box(best["bbox"],w,h,FOCUS_PADDING_PLATE); focus_type='PLATE'
+            self.focus_plate_last_seen = now
+        elif self.focus_info.get("type") == "PLATE" and now - self.focus_plate_last_seen < FOCUS_TARGET_HOLD_SECONDS:
+            box = self.focus_info.get("box") or box
+            focus_type = "PLATE"
         self.focus_info={"type":focus_type,"box":box,"track_id":tid,"lighting":_lighting_metrics(frame,box)}
 
     def _draw_dynamic_focus(self, frame):
@@ -878,10 +889,13 @@ class StreamAIService:
                     except Exception as exc:
                         print(f"[AI STREAM ERROR] Plate pipeline failed: {exc}")
 
-                self.last_results = {
-                    "persons": person_dets,
-                    "plates": plate_dets,
-                }
+                has_detections = bool(person_dets or plate_dets)
+                if has_detections or now - self.last_results_time >= RESULT_HOLD_SECONDS:
+                    self.last_results = {
+                        "persons": person_dets,
+                        "plates": plate_dets,
+                    }
+                    self.last_results_time = now
 
                 self._save_person_events(
                     frame,
