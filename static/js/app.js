@@ -10,6 +10,75 @@ const esc = value => String(value ?? '')
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;');
 
+function getDateRange(period) {
+    if (period === 'all') return { start_date: '', end_date: '' };
+
+    const end = new Date();
+    const start = new Date(end);
+    const days = { today: 1, '2d': 2, '7d': 7, '30d': 30 }[period] || 1;
+    start.setDate(start.getDate() - days + 1);
+    const formatDate = date => {
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+    };
+
+    return { start_date: formatDate(start), end_date: formatDate(end) };
+}
+
+function getStateDateRange(state) {
+    if (state.start_date || state.end_date) {
+        return { start_date: state.start_date, end_date: state.end_date };
+    }
+    return getDateRange(state.period);
+}
+
+function applyCustomDateRange(state, startInputId, endInputId) {
+    const startDate = document.getElementById(startInputId)?.value || '';
+    const endDate = document.getElementById(endInputId)?.value || '';
+    const today = new Date();
+    const todayValue = [
+        today.getFullYear(),
+        String(today.getMonth() + 1).padStart(2, '0'),
+        String(today.getDate()).padStart(2, '0')
+    ].join('-');
+
+    if (!startDate && !endDate) {
+        state.start_date = '';
+        state.end_date = '';
+        state.period = 'today';
+        return true;
+    }
+    if ((startDate && endDate) && startDate > endDate) {
+        alert('Tanggal mulai tidak boleh lebih besar dari tanggal akhir.');
+        return false;
+    }
+    if (startDate > todayValue || endDate > todayValue) {
+        alert('Tanggal tidak boleh melebihi tanggal hari ini.');
+        return false;
+    }
+
+    state.start_date = startDate;
+    state.end_date = endDate;
+    state.period = 'custom';
+    return true;
+}
+
+function setDateFilterLimits() {
+    const today = new Date();
+    const todayValue = [
+        today.getFullYear(),
+        String(today.getMonth() + 1).padStart(2, '0'),
+        String(today.getDate()).padStart(2, '0')
+    ].join('-');
+
+    ['detStartDate', 'detEndDate', 'plateStartDate', 'plateEndDate'].forEach(id => {
+        const input = document.getElementById(id);
+        if (input) input.max = todayValue;
+    });
+}
+
 // Fetch JSON helper
 async function json(url, options = {}) {
     const response = await fetch(url, options);
@@ -478,7 +547,10 @@ let detState = {
     type: 'all',
     status: 'all',
     camera_id: '',
-    search: ''
+    search: '',
+    period: 'today',
+    start_date: '',
+    end_date: ''
 };
 
 async function loadDetections() {
@@ -494,7 +566,8 @@ async function loadDetections() {
             type: detState.type,
             status: detState.status,
             camera_id: detState.camera_id,
-            search: detState.search
+            search: detState.search,
+            ...getStateDateRange(detState)
         });
 
         const res = await json(`/api/detections?${queryParams.toString()}`);
@@ -592,6 +665,8 @@ async function deleteDetection(detectionId) {
 window.deleteDetection = deleteDetection;
 
 async function initDetectionsPage() {
+    setDateFilterLimits();
+
     try {
         const camRes = await json('/api/cameras');
         const cams = camRes.data || [];
@@ -641,6 +716,26 @@ async function initDetectionsPage() {
         });
     }
 
+    const periodSelect = document.getElementById('detPeriodFilter');
+    if (periodSelect) {
+        periodSelect.addEventListener('change', () => {
+            detState.period = periodSelect.value;
+            detState.start_date = '';
+            detState.end_date = '';
+            document.getElementById('detStartDate').value = '';
+            document.getElementById('detEndDate').value = '';
+            detState.page = 1;
+            loadDetections();
+        });
+    }
+
+    document.getElementById('detDateApply')?.addEventListener('click', () => {
+        if (applyCustomDateRange(detState, 'detStartDate', 'detEndDate')) {
+            detState.page = 1;
+            loadDetections();
+        }
+    });
+
     document.getElementById('detPrevBtn')?.addEventListener('click', () => {
         if (detState.page > 1) {
             detState.page--;
@@ -657,7 +752,8 @@ async function initDetectionsPage() {
 }
 
 function exportDetections() {
-    window.location.href = '/api/export/detections';
+    const params = new URLSearchParams(getStateDateRange(detState));
+    window.location.href = `/api/export/detections?${params.toString()}`;
 }
 window.exportDetections = exportDetections;
 
@@ -671,7 +767,10 @@ let plateState = {
     limit: 15,
     search: '',
     camera_id: '',
-    status: 'all'
+    status: 'all',
+    period: 'today',
+    start_date: '',
+    end_date: ''
 };
 
 async function loadPlateHistory() {
@@ -686,7 +785,8 @@ async function loadPlateHistory() {
             limit: plateState.limit,
             search: plateState.search,
             camera_id: plateState.camera_id,
-            status: plateState.status
+            status: plateState.status,
+            ...getStateDateRange(plateState)
         });
 
         const res = await json(`/api/plate/history?${queryParams.toString()}`);
@@ -770,6 +870,8 @@ async function deletePlateHistory(plateId) {
 window.deletePlateHistory = deletePlateHistory;
 
 async function initHistoryPage() {
+    setDateFilterLimits();
+
     try {
         const camRes = await json('/api/cameras');
         const cams = camRes.data || [];
@@ -806,6 +908,26 @@ async function initHistoryPage() {
         });
     }
 
+    const periodSelect = document.getElementById('platePeriodFilter');
+    if (periodSelect) {
+        periodSelect.addEventListener('change', () => {
+            plateState.period = periodSelect.value;
+            plateState.start_date = '';
+            plateState.end_date = '';
+            document.getElementById('plateStartDate').value = '';
+            document.getElementById('plateEndDate').value = '';
+            plateState.page = 1;
+            loadPlateHistory();
+        });
+    }
+
+    document.getElementById('plateDateApply')?.addEventListener('click', () => {
+        if (applyCustomDateRange(plateState, 'plateStartDate', 'plateEndDate')) {
+            plateState.page = 1;
+            loadPlateHistory();
+        }
+    });
+
     document.getElementById('platePrevBtn')?.addEventListener('click', () => {
         if (plateState.page > 1) {
             plateState.page--;
@@ -822,7 +944,8 @@ async function initHistoryPage() {
 }
 
 function exportPlates() {
-    window.location.href = '/api/export/plates';
+    const params = new URLSearchParams(getStateDateRange(plateState));
+    window.location.href = `/api/export/plates?${params.toString()}`;
 }
 window.exportPlates = exportPlates;
 

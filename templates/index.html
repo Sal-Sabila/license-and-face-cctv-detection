@@ -227,6 +227,10 @@
                         <p>Data gabungan plat kendaraan dan wajah/pejalan kaki dari seluruh kamera CCTV.</p>
                     </div>
                     <div class="d-flex gap-2 align-items-center flex-wrap">
+                        <div class="input-group input-group-sm" style="width: 240px;">
+                            <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
+                            <input id="detectionSearch" class="form-control" placeholder="Cari plat atau lokasi...">
+                        </div>
                         <button type="button" class="btn-action-outline" onclick="exportDetections()">
                             <i class="bi bi-file-earmark-spreadsheet"></i>
                             <span>Ekspor CSV</span>
@@ -253,10 +257,23 @@
                         <option value="0">Gagal / Buram</option>
                     </select>
 
-                    <div class="input-group input-group-sm ms-auto" style="max-width: 240px;">
-                        <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
-                        <input id="detectionSearch" class="form-control" placeholder="Cari plat atau lokasi...">
+                    <div class="date-filter-group d-flex align-items-center gap-2 flex-nowrap">
+                        <select id="detPeriodFilter" class="form-select form-select-sm" title="Filter periode deteksi">
+                            <option value="today">Hari Ini</option>
+                            <option value="2d">2 Hari</option>
+                            <option value="7d">7 Hari</option>
+                            <option value="30d">1 Bulan</option>
+                            <option value="all">Semua</option>
+                        </select>
+
+                        <input id="detStartDate" type="date" class="form-control form-control-sm" title="Tanggal mulai" aria-label="Tanggal mulai deteksi">
+                        <span class="small text-muted text-nowrap">sampai</span>
+                        <input id="detEndDate" type="date" class="form-control form-control-sm" title="Tanggal akhir" aria-label="Tanggal akhir deteksi">
+                        <button id="detDateApply" type="button" class="btn btn-primary btn-sm text-nowrap" title="Terapkan rentang tanggal">
+                            <i class="bi bi-funnel"></i> Terapkan
+                        </button>
                     </div>
+
                 </div>
 
                 <div class="table-responsive">
@@ -327,6 +344,23 @@
                         <option value="2">Perlu Cek</option>
                         <option value="0">Gagal</option>
                     </select>
+
+                    <div class="date-filter-group d-flex align-items-center gap-2 flex-nowrap">
+                        <select id="platePeriodFilter" class="form-select form-select-sm" title="Filter periode riwayat">
+                            <option value="today">Hari Ini</option>
+                            <option value="2d">2 Hari</option>
+                            <option value="7d">7 Hari</option>
+                            <option value="30d">1 Bulan</option>
+                            <option value="all">Semua</option>
+                        </select>
+
+                        <input id="plateStartDate" type="date" class="form-control form-control-sm" title="Tanggal mulai" aria-label="Tanggal mulai riwayat">
+                        <span class="small text-muted text-nowrap">sampai</span>
+                        <input id="plateEndDate" type="date" class="form-control form-control-sm" title="Tanggal akhir" aria-label="Tanggal akhir riwayat">
+                        <button id="plateDateApply" type="button" class="btn btn-primary btn-sm text-nowrap" title="Terapkan rentang tanggal">
+                            <i class="bi bi-funnel"></i> Terapkan
+                        </button>
+                    </div>
                 </div>
 
                 <div class="table-responsive">
