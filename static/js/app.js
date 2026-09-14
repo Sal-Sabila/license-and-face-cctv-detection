@@ -10,6 +10,75 @@ const esc = value => String(value ?? '')
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;');
 
+function getDateRange(period) {
+    if (period === 'all') return { start_date: '', end_date: '' };
+
+    const end = new Date();
+    const start = new Date(end);
+    const days = { today: 1, '2d': 2, '7d': 7, '30d': 30 }[period] || 1;
+    start.setDate(start.getDate() - days + 1);
+    const formatDate = date => {
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+    };
+
+    return { start_date: formatDate(start), end_date: formatDate(end) };
+}
+
+function getStateDateRange(state) {
+    if (state.start_date || state.end_date) {
+        return { start_date: state.start_date, end_date: state.end_date };
+    }
+    return getDateRange(state.period);
+}
+
+function applyCustomDateRange(state, startInputId, endInputId) {
+    const startDate = document.getElementById(startInputId)?.value || '';
+    const endDate = document.getElementById(endInputId)?.value || '';
+    const today = new Date();
+    const todayValue = [
+        today.getFullYear(),
+        String(today.getMonth() + 1).padStart(2, '0'),
+        String(today.getDate()).padStart(2, '0')
+    ].join('-');
+
+    if (!startDate && !endDate) {
+        state.start_date = '';
+        state.end_date = '';
+        state.period = 'today';
+        return true;
+    }
+    if ((startDate && endDate) && startDate > endDate) {
+        alert('Tanggal mulai tidak boleh lebih besar dari tanggal akhir.');
+        return false;
+    }
+    if (startDate > todayValue || endDate > todayValue) {
+        alert('Tanggal tidak boleh melebihi tanggal hari ini.');
+        return false;
+    }
+
+    state.start_date = startDate;
+    state.end_date = endDate;
+    state.period = 'custom';
+    return true;
+}
+
+function setDateFilterLimits() {
+    const today = new Date();
+    const todayValue = [
+        today.getFullYear(),
+        String(today.getMonth() + 1).padStart(2, '0'),
+        String(today.getDate()).padStart(2, '0')
+    ].join('-');
+
+    ['detStartDate', 'detEndDate', 'plateStartDate', 'plateEndDate'].forEach(id => {
+        const input = document.getElementById(id);
+        if (input) input.max = todayValue;
+    });
+}
+
 // Fetch JSON helper
 async function json(url, options = {}) {
     const response = await fetch(url, options);
@@ -248,6 +317,11 @@ async function initDashboard() {
     const startBtn = document.getElementById('startStreamBtn');
     const stopBtn = document.getElementById('stopStreamBtn');
     const bboxToggle = document.getElementById('bboxToggle');
+    const detectionMode = document.getElementById('detectionMode');
+    const videoFileLabel = document.getElementById('videoFileLabel');
+    const videoFileInput = document.getElementById('videoFileInput');
+    const processedVideo = document.getElementById('processedVideo');
+    let videoJobPoller = null;
 
     function getStreamUrl(camId) {
         const showBbox = bboxToggle ? (bboxToggle.checked ? 1 : 0) : 1;
@@ -258,6 +332,12 @@ async function initDashboard() {
         if (!streamImg) return;
         const cam = cameras.find(c => String(c.id) === String(camId));
         if (cam) {
+            if (videoJobPoller) clearInterval(videoJobPoller);
+            if (processedVideo) {
+                processedVideo.pause();
+                processedVideo.removeAttribute('src');
+                processedVideo.style.display = 'none';
+            }
             streamImg.src = getStreamUrl(cam.id);
             streamImg.style.display = 'block';
             if (placeholder) placeholder.style.display = 'none';
@@ -269,13 +349,103 @@ async function initDashboard() {
         if (!streamImg) return;
         streamImg.src = '';
         streamImg.style.display = 'none';
+        if (videoJobPoller) clearInterval(videoJobPoller);
+        if (processedVideo) {
+            processedVideo.pause();
+            processedVideo.removeAttribute('src');
+            processedVideo.style.display = 'none';
+        }
         if (placeholder) placeholder.style.display = 'flex';
         if (cameraNameEl) cameraNameEl.textContent = 'Stream Dihentikan';
     }
 
-    const activeCam = cameras.find(item => item.active) || cameras[0];
-    if (activeCam && activeCam.active) {
-        if (select) select.value = activeCam.id;
+    function updateDetectionMode() {
+        const videoMode = detectionMode?.value === 'video';
+        if (videoFileLabel) videoFileLabel.style.display = videoMode ? 'inline-flex' : 'none';
+        if (streamImg) streamImg.style.display = videoMode ? (videoJobPoller ? 'block' : 'none') : streamImg.src ? 'block' : 'none';
+        if (processedVideo && !videoMode) processedVideo.style.display = 'none';
+    }
+
+    async function startVideoJob(file, camId) {
+        if (!file || !camId) return;
+        stopCameraStream();
+        if (cameraNameEl) cameraNameEl.textContent = `Memproses ${file.name}`;
+
+        const formData = new FormData();
+        formData.append('video', file);
+        formData.append('camera_id', camId);
+
+        try {
+            const response = await fetch('/api/video_jobs', { method: 'POST', body: formData });
+            const result = await response.json();
+            if (!response.ok || !result.success) throw new Error(result.message || 'Upload video gagal');
+            localStorage.setItem('platevision.videoJobId', result.job_id);
+            monitorVideoJob(result.job_id);
+        } catch (error) {
+            if (cameraNameEl) cameraNameEl.textContent = error.message;
+            if (placeholder) placeholder.style.display = 'flex';
+        }
+    }
+
+    function monitorVideoJob(jobId) {
+        if (!jobId) return;
+        if (videoJobPoller) clearInterval(videoJobPoller);
+        if (streamImg) {
+            streamImg.src = `/api/video_jobs/${jobId}/feed`;
+            streamImg.style.display = 'block';
+        }
+        if (placeholder) placeholder.style.display = 'none';
+        if (processedVideo) processedVideo.style.display = 'none';
+
+        const checkJob = async () => {
+            try {
+                const statusResult = await json(`/api/video_jobs/${jobId}`);
+                const job = statusResult.data;
+                if (job.status === 'completed') {
+                    clearInterval(videoJobPoller);
+                    if (streamImg) {
+                        streamImg.src = '';
+                        streamImg.style.display = 'none';
+                    }
+                    if (processedVideo) {
+                        processedVideo.src = `${job.output_url}?t=${Date.now()}`;
+                        processedVideo.style.display = 'block';
+                        processedVideo.load();
+                        processedVideo.play().catch(() => {});
+                    }
+                    if (placeholder) placeholder.style.display = 'none';
+                    if (cameraNameEl) cameraNameEl.textContent = 'Hasil Deteksi Video';
+                } else if (job.status === 'failed') {
+                    clearInterval(videoJobPoller);
+                    localStorage.removeItem('platevision.videoJobId');
+                    if (cameraNameEl) cameraNameEl.textContent = `Gagal: ${job.error || 'proses video'}`;
+                } else if (cameraNameEl) {
+                    cameraNameEl.textContent = `Memproses video (${job.progress || 0}%)`;
+                }
+            } catch (error) {
+                clearInterval(videoJobPoller);
+                console.error('Status video error:', error);
+            }
+        };
+
+        checkJob();
+        videoJobPoller = setInterval(checkJob, 1000);
+    }
+
+    const savedMode = localStorage.getItem('platevision.mode') || 'stream';
+    const savedCameraId = localStorage.getItem('platevision.cameraId');
+    const savedVideoJobId = localStorage.getItem('platevision.videoJobId');
+    if (detectionMode) detectionMode.value = savedMode;
+    if (savedCameraId && cameras.some(camera => String(camera.id) === savedCameraId)) {
+        select.value = savedCameraId;
+    }
+
+    const activeCam = cameras.find(item => String(item.id) === String(select?.value)) || cameras.find(item => item.active) || cameras[0];
+    if (activeCam && select) select.value = activeCam.id;
+
+    if (savedMode === 'video' && savedVideoJobId) {
+        monitorVideoJob(savedVideoJobId);
+    } else if (activeCam && activeCam.active) {
         startCameraStream(activeCam.id);
     } else {
         stopCameraStream();
@@ -283,14 +453,28 @@ async function initDashboard() {
 
     if (select) {
         select.addEventListener('change', () => {
+            localStorage.setItem('platevision.cameraId', select.value);
+            if (detectionMode?.value === 'video') return;
             if (select.value) startCameraStream(select.value);
         });
     }
 
+    detectionMode?.addEventListener('change', () => {
+        localStorage.setItem('platevision.mode', detectionMode.value);
+        if (detectionMode.value === 'video') stopCameraStream();
+        updateDetectionMode();
+    });
+
+    videoFileInput?.addEventListener('change', () => {
+        const selectedId = select?.value || activeCam?.id;
+        const file = videoFileInput.files?.[0];
+        if (file && selectedId) startVideoJob(file, selectedId);
+    });
+
     if (bboxToggle) {
         bboxToggle.addEventListener('change', () => {
             const selectedId = select?.value || activeCam?.id;
-            if (selectedId && streamImg && streamImg.style.display !== 'none') {
+            if (selectedId && detectionMode?.value !== 'video' && streamImg && streamImg.style.display !== 'none') {
                 startCameraStream(selectedId);
             }
         });
@@ -299,15 +483,23 @@ async function initDashboard() {
     if (startBtn) {
         startBtn.addEventListener('click', () => {
             const selectedId = select?.value || activeCam?.id;
-            if (selectedId) startCameraStream(selectedId);
+            if (!selectedId) return;
+            if (detectionMode?.value === 'video') {
+                startVideoJob(videoFileInput?.files?.[0], selectedId);
+            } else {
+                startCameraStream(selectedId);
+            }
         });
     }
 
     if (stopBtn) {
         stopBtn.addEventListener('click', () => {
+            localStorage.removeItem('platevision.videoJobId');
             stopCameraStream();
         });
     }
+
+    updateDetectionMode();
 
     async function refreshRecentList() {
         try {
@@ -377,7 +569,10 @@ let detState = {
     type: 'all',
     status: 'all',
     camera_id: '',
-    search: ''
+    search: '',
+    period: 'today',
+    start_date: '',
+    end_date: ''
 };
 
 async function loadDetections() {
@@ -393,7 +588,8 @@ async function loadDetections() {
             type: detState.type,
             status: detState.status,
             camera_id: detState.camera_id,
-            search: detState.search
+            search: detState.search,
+            ...getStateDateRange(detState)
         });
 
         const res = await json(`/api/detections?${queryParams.toString()}`);
@@ -495,6 +691,8 @@ async function deleteDetection(detectionId) {
 window.deleteDetection = deleteDetection;
 
 async function initDetectionsPage() {
+    setDateFilterLimits();
+
     try {
         const camRes = await json('/api/cameras');
         const cams = camRes.data || [];
@@ -544,6 +742,26 @@ async function initDetectionsPage() {
         });
     }
 
+    const periodSelect = document.getElementById('detPeriodFilter');
+    if (periodSelect) {
+        periodSelect.addEventListener('change', () => {
+            detState.period = periodSelect.value;
+            detState.start_date = '';
+            detState.end_date = '';
+            document.getElementById('detStartDate').value = '';
+            document.getElementById('detEndDate').value = '';
+            detState.page = 1;
+            loadDetections();
+        });
+    }
+
+    document.getElementById('detDateApply')?.addEventListener('click', () => {
+        if (applyCustomDateRange(detState, 'detStartDate', 'detEndDate')) {
+            detState.page = 1;
+            loadDetections();
+        }
+    });
+
     document.getElementById('detPrevBtn')?.addEventListener('click', () => {
         if (detState.page > 1) {
             detState.page--;
@@ -560,7 +778,8 @@ async function initDetectionsPage() {
 }
 
 function exportDetections() {
-    window.location.href = '/api/export/detections';
+    const params = new URLSearchParams(getStateDateRange(detState));
+    window.location.href = `/api/export/detections?${params.toString()}`;
 }
 window.exportDetections = exportDetections;
 
@@ -574,7 +793,10 @@ let plateState = {
     limit: 15,
     search: '',
     camera_id: '',
-    status: 'all'
+    status: 'all',
+    period: 'today',
+    start_date: '',
+    end_date: ''
 };
 
 async function loadPlateHistory() {
@@ -589,7 +811,8 @@ async function loadPlateHistory() {
             limit: plateState.limit,
             search: plateState.search,
             camera_id: plateState.camera_id,
-            status: plateState.status
+            status: plateState.status,
+            ...getStateDateRange(plateState)
         });
 
         const res = await json(`/api/plate/history?${queryParams.toString()}`);
@@ -673,6 +896,8 @@ async function deletePlateHistory(plateId) {
 window.deletePlateHistory = deletePlateHistory;
 
 async function initHistoryPage() {
+    setDateFilterLimits();
+
     try {
         const camRes = await json('/api/cameras');
         const cams = camRes.data || [];
@@ -709,6 +934,26 @@ async function initHistoryPage() {
         });
     }
 
+    const periodSelect = document.getElementById('platePeriodFilter');
+    if (periodSelect) {
+        periodSelect.addEventListener('change', () => {
+            plateState.period = periodSelect.value;
+            plateState.start_date = '';
+            plateState.end_date = '';
+            document.getElementById('plateStartDate').value = '';
+            document.getElementById('plateEndDate').value = '';
+            plateState.page = 1;
+            loadPlateHistory();
+        });
+    }
+
+    document.getElementById('plateDateApply')?.addEventListener('click', () => {
+        if (applyCustomDateRange(plateState, 'plateStartDate', 'plateEndDate')) {
+            plateState.page = 1;
+            loadPlateHistory();
+        }
+    });
+
     document.getElementById('platePrevBtn')?.addEventListener('click', () => {
         if (plateState.page > 1) {
             plateState.page--;
@@ -725,7 +970,8 @@ async function initHistoryPage() {
 }
 
 function exportPlates() {
-    window.location.href = '/api/export/plates';
+    const params = new URLSearchParams(getStateDateRange(plateState));
+    window.location.href = `/api/export/plates?${params.toString()}`;
 }
 window.exportPlates = exportPlates;
 

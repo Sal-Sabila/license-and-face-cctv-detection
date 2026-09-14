@@ -1,3 +1,5 @@
+import cv2
+
 from ultralytics import YOLO
 
 
@@ -6,15 +8,16 @@ class PlateDetector:
     def __init__(
         self,
         model_path="models/plate/license-plate-finetune-v2n.pt",
-        confidence=0.50,
+        confidence=0.25,
         imgsz=640,
         device="cpu",
         max_det=10,
         iou=0.45,
-        min_width=30,
+        min_width=25,
         min_height=10,
-        min_aspect_ratio=1.5,
-        max_aspect_ratio=6.5
+        min_aspect_ratio=1.1,
+        max_aspect_ratio=6.5,
+        small_roi_scale=2.0,
     ):
 
         self.model = YOLO(model_path)
@@ -30,6 +33,7 @@ class PlateDetector:
 
         self.min_aspect_ratio = min_aspect_ratio
         self.max_aspect_ratio = max_aspect_ratio
+        self.small_roi_scale = max(1.0, float(small_roi_scale))
 
         print("=" * 60)
         print("[PLATE] Detector siap")
@@ -50,8 +54,25 @@ class PlateDetector:
 
         try:
 
+            original_height, original_width = frame.shape[:2]
+            inference_frame = frame
+            scale = 1.0
+            # Small vehicle ROIs lose plate characters when YOLO resizes them
+            # directly to imgsz. Upscale only those ROIs to keep CPU bounded.
+            if max(original_height, original_width) < 640:
+                scale = min(
+                    self.small_roi_scale,
+                    640.0 / max(1, max(original_height, original_width)),
+                )
+                if scale > 1.05:
+                    inference_frame = cv2.resize(
+                        frame,
+                        (int(original_width * scale), int(original_height * scale)),
+                        interpolation=cv2.INTER_CUBIC,
+                    )
+
             results = self.model.predict(
-                source=frame,
+                source=inference_frame,
                 conf=self.confidence,
                 imgsz=self.imgsz,
                 device=self.device,
@@ -85,7 +106,7 @@ class PlateDetector:
                     if class_id != 0:
                         continue
 
-                    x1, y1, x2, y2 = box.xyxy[0].tolist()
+                    x1, y1, x2, y2 = [value / scale for value in box.xyxy[0].tolist()]
 
                 except Exception:
                     continue
@@ -118,8 +139,14 @@ class PlateDetector:
                 if aspect_ratio > self.max_aspect_ratio:
                     continue
 
-                # Crop
-                crop = frame[y1:y2, x1:x2]
+                # Crop dengan padding kontekstual agar huruf di tepi plat tidak terpotong
+                pad_w = max(2, int(width * 0.08))
+                pad_h = max(2, int(height * 0.08))
+                cy1 = max(0, y1 - pad_h)
+                cy2 = min(frame_height, y2 + pad_h)
+                cx1 = max(0, x1 - pad_w)
+                cx2 = min(frame_width, x2 + pad_w)
+                crop = frame[cy1:cy2, cx1:cx2]
 
                 if crop is None or crop.size == 0:
                     continue

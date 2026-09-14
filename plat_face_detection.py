@@ -1,45 +1,52 @@
 import os
 import sys
 import time
-import threading
+import subprocess
 import warnings
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import cv2
 import numpy as np
 from ultralytics import YOLO
 import supervision as sv
 
-from ffmpeg_stream_reader import FFmpegStreamReader
+# Pastikan project root ada di sys.path
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
 from ai.plate.detector import PlateDetector
 from ai.plate.ocr import PlateOCR
 from tracker import PlateTracker
-
 warnings.filterwarnings("ignore", category=FutureWarning)
 
+import torch
+torch.set_num_threads(2)
+cv2.setNumThreads(2)
+
 
 # ============================================================
-# CCTV
+# VIDEO INPUT / OUTPUT
 # ============================================================
 
-CAMERA_STREAMS = [
-    {
-        "id": 1,
-        "name": "Jogokariyan",
-        "url": "rtmp://103.255.15.222:1935/atcs-kota/JogokariyanUtara.stream",
-    },
-]
+# Ganti dengan lokasi video Anda.
+VIDEO_PATH = "samples/GSMasukViewLuar.stream.mp4"
 
-STREAM_WIDTH = 1920
-STREAM_HEIGHT = 1080
+# Video hasil deteksi akan disimpan di sini.
+OUTPUT_VIDEO_PATH = os.path.join(
+    BASE_DIR,
+    "videos",
+    "hasil_deteksi.mp4",
+)
 
-# Tampilan 1 CCTV besar + panel informasi di kanan
+CAMERA_ID = 1
+CAMERA_NAME = "Video CCTV"
+
+# Ukuran tampilan/output.
 TILE_WIDTH = 960
 TILE_HEIGHT = 540
-
 PANEL_WIDTH = 400
 PANEL_HEIGHT = TILE_HEIGHT
-
 GRID_WIDTH = TILE_WIDTH + PANEL_WIDTH
 GRID_HEIGHT = TILE_HEIGHT
 HEADER_HEIGHT = 52
@@ -49,24 +56,12 @@ HEADER_HEIGHT = 52
 # PERSON
 # ============================================================
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PERSON_MODEL_PATH = os.path.join(BASE_DIR, "yolov8n.pt")
 
-PERSON_MODEL_PATH = os.path.join(
-    BASE_DIR,
-    "yolov8n.pt",
-)
+CAPTURE_DIR = os.path.join(BASE_DIR, "captures")
+PLATE_CAPTURE_DIR = os.path.join(CAPTURE_DIR, "plates")
 
-CAPTURE_DIR = os.path.join(
-    BASE_DIR,
-    "captures",
-)
-
-PLATE_CAPTURE_DIR = os.path.join(
-    CAPTURE_DIR,
-    "plates",
-)
-
-PERSON_CONFIDENCE = 0.40
+PERSON_CONFIDENCE = 0.30
 PERSON_CLASS_ID = 0
 PERSON_MIN_BBOX_AREA = 1200
 PERSON_INFERENCE_IMGSZ = 416
@@ -78,9 +73,6 @@ CAPTURE_ONCE_ONLY = True
 CAPTURE_INTERVAL = 5.0
 MIN_PERSON_CROP_WIDTH = 25
 MIN_PERSON_CROP_HEIGHT = 45
-
-MAX_RECONNECT_ATTEMPTS = 5
-RECONNECT_DELAY = 3
 
 
 # ============================================================
@@ -95,11 +87,8 @@ PLATE_MODEL_PATH = os.path.join(
 )
 
 PLATE_IMGSZ = 640
-PLATE_CONFIDENCE = 0.40
-
-# Satu kamera diproses per cycle.
+PLATE_CONFIDENCE = 0.25
 AI_INTERVAL = 0.20
-
 OCR_MIN_CONFIDENCE = 0.55
 
 PLATE_TRACKER_IOU = 0.30
@@ -109,144 +98,170 @@ PLATE_TRACKER_MAX_HISTORY = 5
 
 
 # ============================================================
-# STREAM READER
+# FFMPEG VIDEO READER
 # ============================================================
 
-class FrameGrabber:
-    """Membaca stream di thread dan hanya menyimpan frame terbaru."""
+class FFmpegVideoReader:
+    """
+    Membaca file video menggunakan FFmpeg dan mengeluarkan frame BGR.
+    Ini lebih aman untuk video H.265/HEVC dibanding cv2.VideoCapture
+    pada beberapa instalasi Windows/OpenCV.
+    """
 
-    def __init__(self, source, width=1280, height=720, name="Camera"):
+    def __init__(self, source, width=None, height=None):
         self.source = source
         self.width = width
         self.height = height
-        self.name = name
 
-        self.cap = self._open_stream()
-        self.frame = None
-        self.running = (
-            self.cap is not None
-            and self.cap.isOpened()
-        )
+        self.cap = None
+        self.process = None
+        self.fps = 25.0
+        self.frame_count = 0
+        self.duration = 0.0
+        self.frame_size = None
+        self.eof = False
 
-        self.lock = threading.Lock()
-        self.fail_count = 0
-        self.is_connected = self.running
+        self._probe()
+        self._start()
 
-        self._thread = threading.Thread(
-            target=self._reader,
-            daemon=True,
-        )
-
-    def _open_stream(self):
-        if isinstance(self.source, str) and (
-            self.source.startswith("rtmp://")
-            or self.source.startswith("rtsp://")
-            or self.source.startswith("http://")
-            or self.source.startswith("https://")
-            or self.source.endswith(".stream")
-            or self.source.endswith(".m3u8")
-        ):
-            return FFmpegStreamReader(
-                self.source,
-                width=self.width,
-                height=self.height,
+    def _probe(self):
+        if not os.path.isfile(self.source):
+            raise FileNotFoundError(
+                f"Video tidak ditemukan: {self.source}"
             )
 
-        cap = cv2.VideoCapture(self.source)
+        # Ambil width, height, fps, duration dari ffprobe.
+        cmd = [
+            "ffprobe",
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries",
+            "stream=width,height,r_frame_rate,nb_frames,duration",
+            "-of", "default=noprint_wrappers=1",
+            self.source,
+        ]
 
-        if cap.isOpened():
-            cap.set(
-                cv2.CAP_PROP_BUFFERSIZE,
-                1,
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=True,
+            )
+        except FileNotFoundError:
+            raise RuntimeError(
+                "ffprobe tidak ditemukan. Pastikan FFmpeg sudah masuk PATH Windows."
+            )
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                "ffprobe gagal membaca video:\n"
+                + (exc.stderr or "")
             )
 
-        return cap
+        info = {}
+        for line in result.stdout.splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                info[k.strip()] = v.strip()
 
-    def start(self):
-        self._thread.start()
-        return self
+        src_w = int(info.get("width") or 1920)
+        src_h = int(info.get("height") or 1080)
 
-    def _reconnect(self):
-        for attempt in range(
-            1,
-            MAX_RECONNECT_ATTEMPTS + 1,
-        ):
-            if self.cap is not None:
-                self.cap.release()
+        if self.width is None:
+            self.width = src_w
+        if self.height is None:
+            self.height = src_h
 
-            time.sleep(RECONNECT_DELAY)
+        fps_text = info.get("r_frame_rate", "25/1")
+        try:
+            num, den = fps_text.split("/")
+            self.fps = float(num) / float(den)
+        except Exception:
+            self.fps = 25.0
 
-            self.cap = self._open_stream()
+        try:
+            self.duration = float(info.get("duration") or 0.0)
+        except Exception:
+            self.duration = 0.0
 
-            if (
-                self.cap is not None
-                and self.cap.isOpened()
-            ):
-                self.fail_count = 0
-                self.is_connected = True
+        try:
+            self.frame_count = int(info.get("nb_frames") or 0)
+        except Exception:
+            self.frame_count = 0
 
-                print(
-                    f"[CAMERA] {self.name} "
-                    f"reconnect berhasil "
-                    f"(attempt {attempt})"
-                )
+        self.frame_size = self.width * self.height * 3
 
-                return True
+    def _start(self):
+        # FFmpeg decode -> raw BGR24 -> Python.
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel", "error",
+            "-i", self.source,
+            "-f", "rawvideo",
+            "-pix_fmt", "bgr24",
+            "-vf", f"scale={self.width}:{self.height}",
+            "-an",
+            "pipe:1",
+        ]
 
-        self.is_connected = False
-        return False
+        try:
+            self.process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=self.frame_size * 2,
+            )
+        except FileNotFoundError:
+            raise RuntimeError(
+                "ffmpeg tidak ditemukan. Jalankan 'ffmpeg -version' di terminal."
+            )
 
-    def _reader(self):
-        while self.running:
-
-            if (
-                self.cap is None
-                or not self.cap.isOpened()
-            ):
-                if not self._reconnect():
-                    self.running = False
-                    break
-
-                continue
-
-            ret, frame = self.cap.read()
-
-            if not ret or frame is None:
-
-                self.fail_count += 1
-
-                if self.fail_count > 90:
-
-                    self.is_connected = False
-
-                    if not self._reconnect():
-                        self.running = False
-                        break
-
-                time.sleep(0.02)
-                continue
-
-            self.fail_count = 0
-            self.is_connected = True
-
-            with self.lock:
-                self.frame = frame
+    @property
+    def is_connected(self):
+        return self.process is not None and not self.eof
 
     def read(self):
-        with self.lock:
-            if self.frame is None:
-                return None
+        if self.process is None or self.process.stdout is None:
+            return False, None
 
-            return self.frame.copy()
+        raw = self.process.stdout.read(self.frame_size)
 
-    def stop(self):
-        self.running = False
+        if len(raw) != self.frame_size:
+            self.eof = True
+            return False, None
 
-        if self._thread.is_alive():
-            self._thread.join(timeout=2)
+        frame = np.frombuffer(raw, dtype=np.uint8).reshape(
+            (self.height, self.width, 3)
+        )
+        return True, frame.copy()
 
-        if self.cap is not None:
-            self.cap.release()
+    def release(self):
+        if self.process is not None:
+            try:
+                if self.process.stdout:
+                    self.process.stdout.close()
+            except Exception:
+                pass
+
+            try:
+                self.process.terminate()
+                self.process.wait(timeout=2)
+            except Exception:
+                try:
+                    self.process.kill()
+                except Exception:
+                    pass
+
+            self.process = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.release()
 
 
 # ============================================================
@@ -999,7 +1014,6 @@ def draw_side_panel(camera):
         "CAPTURE PLAT TERBARU",
         40,
         0.52,
- main
     )
 
     latest = camera.get("plate_latest_capture")
@@ -1397,47 +1411,31 @@ def draw_master_header(
 
 
 # ============================================================
-# MAIN
+# MAIN - VIDEO FILE
 # ============================================================
 
 def main():
-    global running
-
-    running = True
-
-    os.makedirs(
-        CAPTURE_DIR,
-        exist_ok=True,
-    )
-
-    os.makedirs(
-        PLATE_CAPTURE_DIR,
-        exist_ok=True,
-    )
+    os.makedirs(CAPTURE_DIR, exist_ok=True)
+    os.makedirs(PLATE_CAPTURE_DIR, exist_ok=True)
+    os.makedirs(os.path.dirname(OUTPUT_VIDEO_PATH), exist_ok=True)
 
     print("=" * 75)
-    print("MULTI-CCTV PERSON + PLATE DETECTION")
-    print("1 CCTV | Person YOLO + ByteTrack | Plate YOLO + OCR")
+    print("VIDEO AI DETECTION - PERSON + PLATE")
+    print("Input : VIDEO FILE")
+    print("Person: YOLO + ByteTrack")
+    print("Plate : YOLO + OCR + PlateTracker")
     print("=" * 75)
+    print(f"[VIDEO] Input  : {VIDEO_PATH}")
+    print(f"[VIDEO] Output : {OUTPUT_VIDEO_PATH}")
 
     # --------------------------------------------------------
     # Person model
     # --------------------------------------------------------
-
-    print(
-        f"[PERSON] Loading model: "
-        f"{PERSON_MODEL_PATH}"
-    )
-
+    print(f"[PERSON] Loading model: {PERSON_MODEL_PATH}")
     try:
-        person_model = YOLO(
-            PERSON_MODEL_PATH
-        )
+        person_model = YOLO(PERSON_MODEL_PATH)
     except Exception as exc:
-        print(
-            f"[PERSON ERROR] "
-            f"Gagal memuat model: {exc}"
-        )
+        print(f"[PERSON ERROR] Gagal memuat model: {exc}")
         return
 
     print("[PERSON] Model siap.")
@@ -1445,191 +1443,140 @@ def main():
     # --------------------------------------------------------
     # Plate detector + OCR
     # --------------------------------------------------------
-
-    print(
-        f"[PLATE] Loading model: "
-        f"{PLATE_MODEL_PATH}"
-    )
-
+    print(f"[PLATE] Loading model: {PLATE_MODEL_PATH}")
     try:
-
         plate_detector = PlateDetector(
             model_path=PLATE_MODEL_PATH,
             confidence=PLATE_CONFIDENCE,
             imgsz=PLATE_IMGSZ,
         )
-
         plate_ocr = PlateOCR(
             min_confidence=OCR_MIN_CONFIDENCE
         )
-
     except Exception as exc:
+        print(f"[PLATE ERROR] Gagal memuat detector/OCR: {exc}")
+        return
 
-        print(
-            f"[PLATE ERROR] "
-            f"Gagal memuat detector/OCR: {exc}"
-        )
+    print("[PLATE] Detector + OCR siap.")
+
+    # --------------------------------------------------------
+    # Open video with FFmpeg
+    # --------------------------------------------------------
+    try:
+        grabber = FFmpegVideoReader(VIDEO_PATH)
+    except Exception as exc:
+        print(f"[VIDEO ERROR] {exc}")
         return
 
     print(
-        "[PLATE] Detector + OCR siap."
+        f"[VIDEO] Resolusi : {grabber.width}x{grabber.height}"
+    )
+    print(f"[VIDEO] FPS      : {grabber.fps:.2f}")
+    if grabber.duration:
+        print(f"[VIDEO] Durasi   : {grabber.duration:.2f} detik")
+    if grabber.frame_count:
+        print(f"[VIDEO] Frames   : {grabber.frame_count}")
+
+    person_tracker = sv.ByteTrack(
+        lost_track_buffer=LOST_TRACK_BUFFER,
+        frame_rate=max(1, int(round(grabber.fps))),
     )
 
-    # --------------------------------------------------------
-    # Cameras
-    # --------------------------------------------------------
-
-    active_streams = []
-    if len(sys.argv) > 1 and sys.argv[1].strip():
-        active_streams = [{
-            "id": 1,
-            "name": "CustomStream",
-            "url": sys.argv[1].strip(),
-        }]
-    else:
-        try:
-            import db
-            db_cams = db.get_all_cameras()
-            active_from_db = [c for c in db_cams if c.get("status") == 1]
-            if not active_from_db and db_cams:
-                active_from_db = db_cams[:1]
-            if active_from_db:
-                active_streams = [{
-                    "id": c["camera_id"],
-                    "name": c.get("location") or f"CAM {c['camera_id']}",
-                    "url": c["stream_url"],
-                } for c in active_from_db]
-        except Exception:
-            pass
-
-    if not active_streams:
-        active_streams = CAMERA_STREAMS
-
-    cameras = []
-
-    print(
-        f"[CAMERA] Membuka {len(active_streams)} stream CCTV..."
+    plate_tracker = PlateTracker(
+        iou_threshold=PLATE_TRACKER_IOU,
+        max_frame_gap=PLATE_TRACKER_FRAME_GAP,
+        ocr_every_n_matches=PLATE_TRACKER_OCR_EVERY,
+        min_final_confidence=OCR_MIN_CONFIDENCE,
+        max_history=PLATE_TRACKER_MAX_HISTORY,
     )
 
-    for info in active_streams:
-
-        print(
-            f"  -> CAM {info['id']}: "
-            f"{info['name']} "
-            f"({info['url']})"
-        )
-
-        grabber = FrameGrabber(
-            info["url"],
-            width=STREAM_WIDTH,
-            height=STREAM_HEIGHT,
-            name=info["name"],
-        ).start()
-
-        person_tracker = sv.ByteTrack(
-            lost_track_buffer=LOST_TRACK_BUFFER,
-            frame_rate=FRAME_RATE,
-        )
-
-        plate_tracker = PlateTracker(
-            iou_threshold=PLATE_TRACKER_IOU,
-            max_frame_gap=PLATE_TRACKER_FRAME_GAP,
-            ocr_every_n_matches=PLATE_TRACKER_OCR_EVERY,
-            min_final_confidence=OCR_MIN_CONFIDENCE,
-            max_history=PLATE_TRACKER_MAX_HISTORY,
-        )
-
-        cameras.append({
-            "info": info,
-            "grabber": grabber,
-
-            "person_tracker": person_tracker,
-            "person_tracked": sv.Detections.empty(),
-            "person_capture_state": {},
-            "person_total_captured": 0,
-            "person_latest_capture": None,
-            "plate_tracker": plate_tracker,
-            "plate_active_tracks": [],
-            "plate_history": [],
-            "plate_latest_capture": None,
-            "plate_total_detected": 0,
-        })
+    camera = {
+        "info": {
+            "id": CAMERA_ID,
+            "name": CAMERA_NAME,
+        },
+        "grabber": grabber,
+        "person_tracker": person_tracker,
+        "person_tracked": sv.Detections.empty(),
+        "person_capture_state": {},
+        "person_total_captured": 0,
+        "person_latest_capture": None,
+        "plate_tracker": plate_tracker,
+        "plate_active_tracks": [],
+        "plate_history": [],
+        "plate_latest_capture": None,
+        "plate_total_detected": 0,
+    }
 
     # --------------------------------------------------------
-    # Window
+    # Output video
     # --------------------------------------------------------
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(
+        OUTPUT_VIDEO_PATH,
+        fourcc,
+        grabber.fps if grabber.fps > 0 else 25.0,
+        (GRID_WIDTH, GRID_HEIGHT + HEADER_HEIGHT),
+    )
+
+    if not writer.isOpened():
+        print("[VIDEO ERROR] Tidak bisa membuat output video.")
+        grabber.release()
+        return
 
     window_name = (
-        "CCTV AI Monitoring - Person + Plate "
-        "(1 CCTV) - Q untuk keluar"
+        "VIDEO AI Detection - Person + Plate - Q untuk keluar"
     )
 
-    cv2.namedWindow(
-        window_name,
-        cv2.WINDOW_NORMAL,
-    )
-
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(
         window_name,
         GRID_WIDTH,
         GRID_HEIGHT + HEADER_HEIGHT,
     )
 
-    print(
-        "\n[INFO] Menunggu frame..."
-    )
+    print("\n[INFO] Memulai pemrosesan video...")
+    print("[INFO] Tekan Q untuk menghentikan proses.")
+    print("[INFO] Output video akan disimpan setelah frame diproses.")
 
-    time.sleep(1.0)
-
-    total_loop_frames = 0
+    frame_number = 0
+    processed_frames = 0
     start_time = time.time()
-
-    # Satu CCTV saja.
-    active_cam_idx = 0
+    last_ai_time = 0.0
 
     try:
+        while True:
+            ret, target_frame = grabber.read()
 
-        while running:
+            if not ret or target_frame is None:
+                print("\n[INFO] Video selesai.")
+                break
 
-            total_loop_frames += 1
+            frame_number += 1
             now = datetime.now()
+            current_video_time = (
+                frame_number / grabber.fps
+                if grabber.fps > 0
+                else 0.0
+            )
 
-            # ------------------------------------------------
-            # Baca frame terbaru dari semua kamera
-            # ------------------------------------------------
+            # AI tidak harus dipaksa setiap frame.
+            # Untuk video offline, tetap proses frame secara berurutan.
+            current_time = time.time()
+            run_ai = (
+                last_ai_time == 0.0
+                or current_time - last_ai_time >= AI_INTERVAL
+            )
 
-            current_frames = []
+            if run_ai:
+                last_ai_time = current_time
 
-            for cam in cameras:
-                current_frames.append(
-                    cam["grabber"].read()
-                )
+                original_h, original_w = target_frame.shape[:2]
 
-            # ------------------------------------------------
-            # AI round-robin
-            # Person + plate pada kamera yang sama
-            # ------------------------------------------------
-
-            target_cam = cameras[
-                active_cam_idx
-            ]
-
-            target_frame = current_frames[
-                active_cam_idx
-            ]
-
-            if target_frame is not None:
-
-                original_h, original_w = (
-                    target_frame.shape[:2]
-                )
-
-                # ============================================
+                # ==================================================
                 # PERSON YOLO
-                # ============================================
-
+                # ==================================================
                 try:
-
                     results = person_model(
                         target_frame,
                         imgsz=PERSON_INFERENCE_IMGSZ,
@@ -1641,177 +1588,114 @@ def main():
                     boxes = results.boxes
 
                     if len(boxes) > 0:
-
                         xyxy = (
-                            boxes.xyxy
-                            .cpu()
-                            .numpy()
+                            boxes.xyxy.cpu().numpy()
                         )
-
                         confs = (
-                            boxes.conf
-                            .cpu()
-                            .numpy()
+                            boxes.conf.cpu().numpy()
                         )
-
                         class_ids = (
-                            boxes.cls
-                            .cpu()
+                            boxes.cls.cpu()
                             .numpy()
                             .astype(int)
                         )
 
                         areas = (
-                            xyxy[:, 2]
-                            - xyxy[:, 0]
+                            xyxy[:, 2] - xyxy[:, 0]
                         ) * (
-                            xyxy[:, 3]
-                            - xyxy[:, 1]
+                            xyxy[:, 3] - xyxy[:, 1]
                         )
 
-                        valid = (
-                            areas
-                            >= PERSON_MIN_BBOX_AREA
-                        )
+                        valid = areas >= PERSON_MIN_BBOX_AREA
 
                         xyxy = xyxy[valid]
                         confs = confs[valid]
                         class_ids = class_ids[valid]
 
                         detections = sv.Detections(
-                            xyxy=xyxy.astype(
-                                np.float32
-                            ),
-                            confidence=confs.astype(
-                                np.float32
-                            ),
+                            xyxy=xyxy.astype(np.float32),
+                            confidence=confs.astype(np.float32),
                             class_id=class_ids,
                         )
-
                     else:
-
-                        detections = (
-                            sv.Detections.empty()
-                        )
+                        detections = sv.Detections.empty()
 
                     if len(detections) > 0:
-
-                        tracked = (
-                            target_cam[
-                                "person_tracker"
-                            ].update_with_detections(
-                                detections
-                            )
+                        tracked = person_tracker.update_with_detections(
+                            detections
                         )
-
                     else:
+                        tracked = sv.Detections.empty()
 
-                        tracked = (
-                            sv.Detections.empty()
-                        )
+                    camera["person_tracked"] = tracked
 
-                    target_cam[
-                        "person_tracked"
-                    ] = tracked
-
-                    # ========================================
-                    # Person capture
-                    # ========================================
-
-                    for i in range(
-                        len(tracked)
-                    ):
-
+                    # ==============================================
+                    # PERSON CAPTURE
+                    # ==============================================
+                    for i in range(len(tracked)):
                         track_id = (
-                            int(
-                                tracked.tracker_id[i]
-                            )
-                            if tracked.tracker_id
-                            is not None
+                            int(tracked.tracker_id[i])
+                            if tracked.tracker_id is not None
                             else -1
                         )
 
                         if track_id < 0:
                             continue
 
-                        bbox = (
-                            tracked.xyxy[i]
-                        )
+                        bbox = tracked.xyxy[i]
 
                         conf = (
-                            float(
-                                tracked.confidence[i]
-                            )
-                            if tracked.confidence
-                            is not None
+                            float(tracked.confidence[i])
+                            if tracked.confidence is not None
                             else 0.0
                         )
 
-                        state = (
-                            target_cam[
-                                "person_capture_state"
-                            ].get(track_id)
-                        )
+                        state = camera[
+                            "person_capture_state"
+                        ].get(track_id)
 
                         now_ts = time.time()
 
                         if CAPTURE_ONCE_ONLY:
-
-                            should_capture = (
-                                state is None
-                            )
-
+                            should_capture = state is None
                         else:
-
                             should_capture = (
                                 state is None
                                 or (
                                     now_ts
-                                    - state[
-                                        "last_capture_time"
-                                    ]
+                                    - state["last_capture_time"]
                                     >= CAPTURE_INTERVAL
                                 )
                             )
 
                         if should_capture:
-
-                            saved_path = (
-                                save_person_crop(
-                                    target_frame,
-                                    bbox,
-                                    track_id,
-                                    now,
-                                    target_cam[
-                                        "info"
-                                    ]["name"],
-                                )
+                            saved_path = save_person_crop(
+                                target_frame,
+                                bbox,
+                                track_id,
+                                now,
+                                CAMERA_NAME,
                             )
 
                             if saved_path:
-
-                                target_cam[
+                                camera[
                                     "person_total_captured"
                                 ] += 1
 
                                 count = (
-                                    state[
-                                        "capture_count"
-                                    ] + 1
+                                    state["capture_count"] + 1
                                     if state
                                     else 1
                                 )
 
-                                target_cam[
+                                camera[
                                     "person_capture_state"
                                 ][track_id] = {
-                                    "last_capture_time":
-                                        now_ts,
-                                    "capture_count":
-                                        count,
+                                    "last_capture_time": now_ts,
+                                    "capture_count": count,
                                 }
 
-                                target_cam[
+                                camera[
                                     "person_latest_capture"
                                 ] = {
                                     "image_path": saved_path,
@@ -1823,83 +1707,52 @@ def main():
 
                                 print(
                                     f"[PERSON CAPTURE] "
-                                    f"[{target_cam['info']['name']}] "
                                     f"ID={track_id} "
                                     f"conf={conf:.0%} -> "
                                     f"{os.path.basename(saved_path)}"
                                 )
 
                 except Exception as exc:
+                    print(f"[PERSON ERROR] Frame {frame_number}: {exc}")
 
-                    print(
-                        f"[PERSON ERROR] "
-                        f"CAM {target_cam['info']['id']}: "
-                        f"{exc}"
-                    )
-
-                # ============================================
+                # ==================================================
                 # PLATE YOLO + OCR
-                # ============================================
-
+                # ==================================================
                 try:
-
                     plate_detections = (
-                        plate_detector.detect(
-                            target_frame
-                        )
-                        or []
+                        plate_detector.detect(target_frame) or []
                     )
 
-                    active_plate_tracks = (
-                        target_cam[
-                            "plate_tracker"
-                        ].update(
-                            plate_detections,
-                            target_frame,
-                            plate_ocr,
-                        )
+                    active_plate_tracks = plate_tracker.update(
+                        plate_detections,
+                        target_frame,
+                        plate_ocr,
                     )
 
-                    target_cam[
-                        "plate_active_tracks"
-                    ] = list(
+                    camera["plate_active_tracks"] = list(
                         active_plate_tracks
                     )
 
                     finished_capture = (
-                        target_cam[
-                            "plate_tracker"
-                        ].consume_latest_finished_capture()
+                        plate_tracker.consume_latest_finished_capture()
                     )
 
                     if finished_capture is not None:
-
-                        target_cam[
+                        camera[
                             "plate_latest_capture"
                         ] = finished_capture
 
-                        # Counter kumulatif hasil plat yang lolos
-                        # finalisasi tracker/OCR.
-                        target_cam[
+                        camera[
                             "plate_total_detected"
                         ] += 1
 
-                        target_cam[
+                        camera[
                             "plate_history"
-                        ] = list(
-                            target_cam[
-                                "plate_tracker"
-                            ].history
-                        )
+                        ] = list(plate_tracker.history)
 
-                        plate_text = (
-                            finished_capture.get(
-                                "formatted",
-                                finished_capture.get(
-                                    "text",
-                                    "",
-                                ),
-                            )
+                        plate_text = finished_capture.get(
+                            "formatted",
+                            finished_capture.get("text", ""),
                         )
 
                         plate_track_id = _get_capture_value(
@@ -1918,7 +1771,7 @@ def main():
                             plate_bbox,
                             plate_track_id,
                             now,
-                            target_cam["info"]["name"],
+                            CAMERA_NAME,
                             plate_text,
                         )
 
@@ -1929,108 +1782,44 @@ def main():
 
                             print(
                                 f"[PLATE CAPTURE] "
-                                f"[{target_cam['info']['name']}] "
                                 f"Track={plate_track_id} -> "
                                 f"{os.path.basename(saved_plate_path)}"
                             )
                         else:
                             print(
                                 f"[PLATE CAPTURE] "
-                                f"[{target_cam['info']['name']}] "
                                 f"Track={plate_track_id} "
-                                f"gagal menyimpan crop "
-                                f"(bbox tidak tersedia)."
+                                f"gagal menyimpan crop."
                             )
 
                         print(
-                            f"[PLATE RESULT] "
-                            f"[{target_cam['info']['name']}] "
-                            f"{plate_text}"
+                            f"[PLATE RESULT] {plate_text}"
                         )
 
                 except Exception as exc:
-
                     print(
-                        f"[PLATE ERROR] "
-                        f"CAM {target_cam['info']['id']}: "
-                        f"{exc}"
+                        f"[PLATE ERROR] Frame {frame_number}: {exc}"
                     )
 
-            # ------------------------------------------------
-            # Kamera berikutnya
-            # ------------------------------------------------
-
-            active_cam_idx = (
-                active_cam_idx + 1
-            ) % len(cameras)
-
-            # ------------------------------------------------
-            # Render 1 CCTV + panel informasi
-            # ------------------------------------------------
-
-            cam = cameras[0]
-            frame_i = current_frames[0]
-
-            if frame_i is None:
-                live = create_placeholder_tile(
-                    cam["info"],
-                    "Menunggu frame CCTV..."
-                )
-                panel = draw_side_panel(cam)
-                grid = np.hstack([live, panel])
-            else:
-                grid = draw_combined_display(
-                    frame_i,
-                    cam,
-                )
-            # ------------------------------------------------
-            # Statistik
-            # ------------------------------------------------
-
-            elapsed = (
-                time.time()
-                - start_time
+            # ======================================================
+            # RENDER HASIL
+            # ======================================================
+            grid = draw_combined_display(
+                target_frame,
+                camera,
             )
 
+            elapsed = time.time() - start_time
             fps = (
-                total_loop_frames
-                / elapsed
+                (frame_number / elapsed)
                 if elapsed > 0
-                else 0
+                else 0.0
             )
 
-            total_people = sum(
-                len(
-                    cam["person_tracked"]
-                )
-                for cam in cameras
-            )
-
-            total_plates = sum(
-                len(
-                    cam["plate_active_tracks"]
-                )
-                for cam in cameras
-            )
-
-            total_captures = sum(
-                cam["person_total_captured"]
-                for cam in cameras
-            )
-
-            # Total plat yang sudah selesai diproses oleh tracker/OCR.
-            # Ini kumulatif sejak program dijalankan, bukan jumlah plat
-            # yang sedang terlihat pada frame saat ini.
-            total_plate_captures = sum(
-                cam["plate_total_detected"]
-                for cam in cameras
-            )
-
-            active_camera_name = (
-                cameras[
-                    active_cam_idx
-                ]["info"]["name"]
-            )
+            total_people = len(camera["person_tracked"])
+            total_plates = len(camera["plate_active_tracks"])
+            total_captures = camera["person_total_captured"]
+            total_plate_captures = camera["plate_total_detected"]
 
             header = draw_master_header(
                 total_people,
@@ -2038,7 +1827,7 @@ def main():
                 total_captures,
                 total_plate_captures,
                 fps,
-                active_camera_name,
+                f"{CAMERA_NAME} | frame {frame_number}",
             )
 
             final_display = np.vstack([
@@ -2046,93 +1835,71 @@ def main():
                 grid,
             ])
 
-            cv2.imshow(
-                window_name,
-                final_display,
-            )
+            # Simpan hasil dengan bounding box + panel.
+            writer.write(final_display)
+            processed_frames += 1
 
-            key = (
-                cv2.waitKey(1)
-                & 0xFF
-            )
+            # Tampilkan preview.
+            cv2.imshow(window_name, final_display)
+
+            # Q = keluar.
+            key = cv2.waitKey(1) & 0xFF
 
             if key == ord("q"):
-
-                print(
-                    "\n[INFO] "
-                    "Dihentikan pengguna."
-                )
-
-                running = False
+                print("\n[INFO] Dihentikan pengguna.")
                 break
 
             try:
-
                 if (
                     cv2.getWindowProperty(
                         window_name,
                         cv2.WND_PROP_VISIBLE,
-                    )
-                    < 1
+                    ) < 1
                 ):
-                    running = False
                     break
-
             except cv2.error:
-
-                running = False
                 break
 
-    except KeyboardInterrupt:
+            # Progress setiap 100 frame.
+            if frame_number % 100 == 0:
+                if grabber.duration > 0:
+                    percent = (
+                        current_video_time
+                        / grabber.duration
+                        * 100
+                    )
+                    print(
+                        f"[PROGRESS] "
+                        f"{current_video_time:.1f}s / "
+                        f"{grabber.duration:.1f}s "
+                        f"({percent:.1f}%) | "
+                        f"frame={frame_number}"
+                    )
+                else:
+                    print(
+                        f"[PROGRESS] frame={frame_number}"
+                    )
 
-        print(
-            "\n[INFO] Ctrl+C."
-        )
+    except KeyboardInterrupt:
+        print("\n[INFO] Ctrl+C.")
 
     finally:
-
-        running = False
-
-        print(
-            "\n[INFO] Menghentikan stream..."
-        )
-
-        for cam in cameras:
-            cam["grabber"].stop()
-
+        grabber.release()
+        writer.release()
         cv2.destroyAllWindows()
 
+        elapsed = time.time() - start_time
+
+        print("\n" + "=" * 75)
+        print("PEMROSESAN VIDEO SELESAI")
         print("=" * 75)
-        print("RINGKASAN PERSON CAPTURE")
-        print("=" * 75)
-
-        total = 0
-
-        for cam in cameras:
-
-            count = cam[
-                "person_total_captured"
-            ]
-
-            total += count
-
-            print(
-                f"CAM {cam['info']['id']} "
-                f"{cam['info']['name']}: "
-                f"{count}"
-            )
-
-        total_plate = 0
-
-        for cam in cameras:
-            total_plate += cam["plate_total_detected"]
-
-        print(
-            f"TOTAL PERSON CAPTURE: {total}"
-        )
-        print(
-            f"TOTAL PLATE TERDETEKSI: {total_plate}"
-        )
+        print(f"Frame diproses       : {processed_frames}")
+        print(f"Person capture       : {camera['person_total_captured']}")
+        print(f"Plate terdeteksi     : {camera['plate_total_detected']}")
+        print(f"Output video         : {OUTPUT_VIDEO_PATH}")
+        print(f"Capture person       : {CAPTURE_DIR}")
+        print(f"Capture plate        : {PLATE_CAPTURE_DIR}")
+        print(f"Waktu proses         : {elapsed:.1f} detik")
         print("=" * 75)
 
 

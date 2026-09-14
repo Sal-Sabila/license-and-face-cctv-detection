@@ -146,6 +146,10 @@
                                 <p>Satu frame untuk deteksi wajah dan plat nomor.</p>
                             </div>
                             <div class="d-flex gap-2 align-items-center flex-wrap">
+                                <select id="detectionMode" class="form-select form-select-sm" title="Pilih sumber deteksi">
+                                    <option value="stream">Stream CCTV</option>
+                                    <option value="video">File Video</option>
+                                </select>
                                 <div class="form-check form-switch mb-0 d-flex align-items-center gap-2 me-1 bbox-switch-container" title="Aktifkan / Nonaktifkan Bounding Box AI">
                                     <input class="form-check-input" type="checkbox" id="bboxToggle" checked>
                                     <label class="form-check-label small fw-semibold text-nowrap" for="bboxToggle">
@@ -153,12 +157,18 @@
                                     </label>
                                 </div>
                                 <select id="cameraSelect" class="form-select form-select-sm"></select>
+                                <label id="videoFileLabel" class="btn btn-outline-secondary btn-sm mb-0" style="display: none;" title="Pilih file video">
+                                    <i class="bi bi-file-earmark-play"></i>
+                                    <span>Pilih Video</span>
+                                    <input id="videoFileInput" type="file" accept="video/*" hidden>
+                                </label>
                                 <button id="startStreamBtn" class="btn btn-primary btn-sm" title="Mulai Stream"><i class="bi bi-play-fill"></i></button>
                                 <button id="stopStreamBtn" class="btn btn-outline-danger btn-sm" title="Hentikan Stream"><i class="bi bi-stop-fill"></i></button>
                             </div>
                         </div>
                         <div class="video-stage">
                             <img id="liveStreamImg" class="live-stream-feed" alt="Live CCTV Feed" style="display: none;" />
+                            <video id="processedVideo" class="live-stream-feed" controls playsinline style="display: none;" aria-label="Hasil deteksi video"></video>
                             <div class="video-placeholder" id="videoPlaceholder">
                                 <div class="camera-icon"><i class="bi bi-camera-video"></i></div>
                                 <strong id="cameraName">Tidak Ada Kamera</strong>
@@ -234,6 +244,10 @@
                         <p>Data gabungan plat kendaraan dan wajah/pejalan kaki dari seluruh kamera CCTV.</p>
                     </div>
                     <div class="d-flex gap-2 align-items-center flex-wrap">
+                        <div class="input-group input-group-sm" style="width: 240px;">
+                            <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
+                            <input id="detectionSearch" class="form-control" placeholder="Cari plat atau lokasi...">
+                        </div>
                         <button type="button" class="btn-action-outline" onclick="exportDetections()">
                             <i class="bi bi-file-earmark-spreadsheet"></i>
                             <span>Ekspor CSV</span>
@@ -260,10 +274,23 @@
                         <option value="0">Gagal / Buram</option>
                     </select>
 
-                    <div class="input-group input-group-sm ms-auto" style="max-width: 240px;">
-                        <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
-                        <input id="detectionSearch" class="form-control" placeholder="Cari plat atau lokasi...">
+                    <div class="date-filter-group d-flex align-items-center gap-2 flex-nowrap">
+                        <select id="detPeriodFilter" class="form-select form-select-sm" title="Filter periode deteksi">
+                            <option value="today">Hari Ini</option>
+                            <option value="2d">2 Hari</option>
+                            <option value="7d">7 Hari</option>
+                            <option value="30d">1 Bulan</option>
+                            <option value="all">Semua</option>
+                        </select>
+
+                        <input id="detStartDate" type="date" class="form-control form-control-sm" title="Tanggal mulai" aria-label="Tanggal mulai deteksi">
+                        <span class="small text-muted text-nowrap">sampai</span>
+                        <input id="detEndDate" type="date" class="form-control form-control-sm" title="Tanggal akhir" aria-label="Tanggal akhir deteksi">
+                        <button id="detDateApply" type="button" class="btn btn-primary btn-sm text-nowrap" title="Terapkan rentang tanggal">
+                            <i class="bi bi-funnel"></i> Terapkan
+                        </button>
                     </div>
+
                 </div>
 
                 <div class="table-responsive">
@@ -334,6 +361,23 @@
                         <option value="2">Perlu Cek</option>
                         <option value="0">Gagal</option>
                     </select>
+
+                    <div class="date-filter-group d-flex align-items-center gap-2 flex-nowrap">
+                        <select id="platePeriodFilter" class="form-select form-select-sm" title="Filter periode riwayat">
+                            <option value="today">Hari Ini</option>
+                            <option value="2d">2 Hari</option>
+                            <option value="7d">7 Hari</option>
+                            <option value="30d">1 Bulan</option>
+                            <option value="all">Semua</option>
+                        </select>
+
+                        <input id="plateStartDate" type="date" class="form-control form-control-sm" title="Tanggal mulai" aria-label="Tanggal mulai riwayat">
+                        <span class="small text-muted text-nowrap">sampai</span>
+                        <input id="plateEndDate" type="date" class="form-control form-control-sm" title="Tanggal akhir" aria-label="Tanggal akhir riwayat">
+                        <button id="plateDateApply" type="button" class="btn btn-primary btn-sm text-nowrap" title="Terapkan rentang tanggal">
+                            <i class="bi bi-funnel"></i> Terapkan
+                        </button>
+                    </div>
                 </div>
 
                 <div class="table-responsive">
