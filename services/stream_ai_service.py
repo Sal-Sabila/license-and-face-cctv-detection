@@ -89,13 +89,23 @@ PLATE_MIN_HEIGHT = 7
 
 # Stream tetap hemat CPU: AI dijalankan berbasis waktu nyata.
 AI_INTERVAL = 0.35
+VEHICLE_TYPES = {
+    2: "car",
+    3: "motorcycle",
+    5: "bus",
+    7: "truck",
+}
 
+# Plate detector
+# Nilai aktual juga dikontrol oleh PlateDetector.
+PLATE_CONFIDENCE = 0.50
 # PlateTracker melakukan OCR setiap N match.
 PLATE_TRACKER_IOU = 0.40
 PLATE_TRACKER_FRAME_GAP = 30
 PLATE_TRACKER_OCR_EVERY = 3
 PLATE_TRACKER_MIN_CONFIDENCE = 0.42
 PLATE_TRACKER_MAX_HISTORY = 5
+
 
 PLATE_REVIEW_CONFIDENCE = 0.60
 PLATE_COOLDOWN = 30.0
@@ -488,7 +498,13 @@ class StreamAIService:
         try:
             result = self.yolo_person(
                 frame,
-                classes=VEHICLE_CLASSES,
+                classes=[
+                    0,  # person
+                    2,  # car
+                    3,  # motorcycle
+                    5,  # bus
+                    7   # truck
+                ],
                 imgsz=VEHICLE_IMGSZ,
                 conf=VEHICLE_CONFIDENCE,
                 verbose=False,
@@ -525,6 +541,8 @@ class StreamAIService:
                     "track_id": track_id,
                     "conf": conf,
                     "cls": cls_id,
+                    "object_type": "vehicle" if cls_id in VEHICLE_TYPES else "person",
+                    "vehicle_type": VEHICLE_TYPES.get(cls_id, "unknown")
                 })
 
         except Exception as exc:
@@ -754,7 +772,7 @@ class StreamAIService:
             if crop.size == 0:
                 continue
 
-            path = save_person_capture(
+            self._save_consistent_events(
                 frame,
                 [x1, y1, x2, y2],
                 track_id,
@@ -763,7 +781,204 @@ class StreamAIService:
             if not path:
                 continue
 
-            self.captured_tracks[key] = current_time
+            return output_frame
+
+        return frame
+
+    # ========================================================
+    # SAVE EVENTS
+    # ========================================================
+
+    @staticmethod
+    def _intersection_ratio(inner_box, outer_box):
+        ix1 = max(inner_box[0], outer_box[0])
+        iy1 = max(inner_box[1], outer_box[1])
+        ix2 = min(inner_box[2], outer_box[2])
+        iy2 = min(inner_box[3], outer_box[3])
+        intersection = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+        area = max(1, (inner_box[2] - inner_box[0]) * (inner_box[3] - inner_box[1]))
+        return intersection / area
+
+    def _save_consistent_events(self, frame, person_dets, plate_dets, camera_id, current_time):
+        """Persist one explicit event per tracked vehicle or unassociated person."""
+        direction = db.get_camera_direction(camera_id)
+        vehicles = [item for item in person_dets if item.get("cls") in VEHICLE_TYPES]
+        people = [item for item in person_dets if item.get("cls") == 0]
+        associated_people = set()
+
+        for vehicle in vehicles:
+            vehicle_box = vehicle.get("box", [0, 0, 0, 0])
+            vehicle_id = int(vehicle.get("track_id", -1))
+            vehicle_type = vehicle.get("vehicle_type") or VEHICLE_TYPES.get(vehicle.get("cls"), "unknown")
+
+            matching_plates = []
+            for plate in plate_dets:
+                plate_box = plate.get("bbox") or plate.get("box") or [0, 0, 0, 0]
+                center = plate.get("center") or [(plate_box[0] + plate_box[2]) / 2, (plate_box[1] + plate_box[3]) / 2]
+                if vehicle_box[0] <= center[0] <= vehicle_box[2] and vehicle_box[1] <= center[1] <= vehicle_box[3]:
+                    matching_plates.append(plate)
+            plate = max(matching_plates, key=lambda item: float(item.get("conf", item.get("confidence", 0)) or 0), default=None)
+
+            driver = None
+            for index, person in enumerate(people):
+                if index in associated_people:
+                    continue
+                person_box = person.get("box", [0, 0, 0, 0])
+                if self._intersection_ratio(person_box, vehicle_box) >= 0.25:
+                    driver = person
+                    associated_people.add(index)
+                    break
+
+            center = ((vehicle_box[0] + vehicle_box[2]) // 2, (vehicle_box[1] + vehicle_box[3]) // 2)
+            stable_id = vehicle_id if vehicle_id >= 0 else f"{center[0]}_{center[1]}"
+            event_key = f"vehicle:{camera_id}:{stable_id}:{direction}"
+            if event_key in self.captured_tracks and current_time - self.captured_tracks[event_key] <= PLATE_COOLDOWN:
+                continue
+            self.captured_tracks[event_key] = current_time
+
+            try:
+                result = db.save_detection_event(
+                    camera_id=camera_id,
+                    plate_number=(plate or {}).get("text") or None,
+                    raw_ocr_text=(plate or {}).get("raw_text") or None,
+                    plate_crop=(plate or {}).get("crop"),
+                    plate_conf=float((plate or {}).get("conf", (plate or {}).get("confidence", 0.0)) or 0),
+                    ocr_conf=float((plate or {}).get("ocr_conf", 0.0) or 0),
+                    track_id=vehicle_id if vehicle_id >= 0 else None,
+                    object_type="vehicle",
+                    vehicle_type=vehicle_type,
+                    vehicle_confidence=float(vehicle.get("conf", 0.0) or 0),
+                    has_driver=driver is not None,
+                    driver_track_id=(driver or {}).get("track_id"),
+                    direction=direction,
+                    event_key=event_key
+                )
+                print(
+                    f"[DETECTION] camera={camera_id} track_id={vehicle_id} object_type=vehicle "
+                    f"vehicle_type={vehicle_type} vehicle_confidence={float(vehicle.get('conf', 0) or 0):.3f} "
+                    f"plate_detected={bool(plate)} plate={(plate or {}).get('text') or '-'} "
+                    f"plate_confidence={float((plate or {}).get('conf', 0) or 0):.3f} "
+                    f"ocr_confidence={float((plate or {}).get('ocr_conf', 0) or 0):.3f} "
+                    f"driver_detected={driver is not None} direction={direction} result={result.get('duplicate', False)}"
+                )
+            except Exception as exc:
+                print(f"[AI STREAM ERROR] Save vehicle event failed: {exc}")
+
+        for index, person in enumerate(people):
+            if index in associated_people:
+                continue
+            track_id = int(person.get("track_id", -1))
+            if track_id < 0:
+                continue
+            event_key = f"person:{camera_id}:{track_id}:{direction}"
+            if event_key in self.captured_tracks and current_time - self.captured_tracks[event_key] <= PERSON_COOLDOWN:
+                continue
+            self.captured_tracks[event_key] = current_time
+            bx1, by1, bx2, by2 = person.get("box", [0, 0, 0, 0])
+            crop = frame[max(0, int(by1)):min(frame.shape[0], int(by2)), max(0, int(bx1)):min(frame.shape[1], int(bx2))]
+            if crop is None or crop.size == 0:
+                continue
+            try:
+                db.save_detection_event(
+                    camera_id=camera_id,
+                    face_crop=crop,
+                    face_conf=float(person.get("conf", 0.0) or 0),
+                    track_id=track_id,
+                    object_type="person",
+                    vehicle_type="unknown",
+                    direction=direction,
+                    event_key=event_key
+                )
+                print(f"[DETECTION] camera={camera_id} track_id={track_id} object_type=person person_confidence={float(person.get('conf', 0) or 0):.3f} direction={direction}")
+            except Exception as exc:
+                print(f"[AI STREAM ERROR] Save person event failed: {exc}")
+
+    def _save_new_events(
+        self,
+        frame,
+        person_dets,
+        plate_dets,
+        camera_id,
+        current_time
+    ):
+        """Backward-compatible entry point routed to the explicit event writer."""
+        return self._save_consistent_events(frame, person_dets, plate_dets, camera_id, current_time)
+
+        h, w = frame.shape[:2]
+
+        # ====================================================
+        # A. PLAT
+        # ====================================================
+
+        for p in plate_dets:
+
+            p_text = (
+                p.get("text")
+                or ""
+            )
+
+            p_crop = p.get(
+                "crop"
+            )
+
+            p_conf = float(
+                p.get(
+                    "conf",
+                    0.0
+                )
+            )
+
+            ocr_conf = float(
+                p.get(
+                    "ocr_conf",
+                    0.0
+                )
+            )
+
+            valid_plate = bool(
+                p.get(
+                    "valid",
+                    False
+                )
+            )
+
+            # ------------------------------------------------
+            # JANGAN langsung anggap OCR sebagai plat
+            # ------------------------------------------------
+
+            if not valid_plate:
+
+                # Tetap tampilkan di layar,
+                # tetapi jangan simpan sebagai
+                # nomor plat yang valid.
+                #
+                # Jika confidence YOLO cukup tinggi,
+                # crop masih bisa disimpan untuk review.
+                if p_conf < 0.60:
+                    continue
+
+                p_text_to_db = None
+
+            else:
+
+                p_text_to_db = p_text
+
+            # ------------------------------------------------
+            # CACHE KEY
+            # ------------------------------------------------
+
+            if p_text_to_db:
+
+                cache_key = (
+                    f"plate_{p_text_to_db}"
+                )
+
+            else:
+
+                bx = p.get(
+                    "box",
+                    [0, 0, 0, 0]
+                )
 
             try:
                 db.save_detection_event(
@@ -855,8 +1070,71 @@ class StreamAIService:
                 base_light = _lighting_metrics(frame, base_box)
                 ai_frame = _enhance_for_lighting(frame, base_light)
 
-                person_dets = self._detect_vehicles(ai_frame)
-                plate_dets = []
+                for vehicle in person_dets:
+
+                    cls_id = vehicle.get(
+                        "cls",
+                        0
+                    )
+
+                    if cls_id not in (
+                        2,
+                        3,
+                        5,
+                        7
+                    ):
+                        continue
+
+                    vx1, vy1, vx2, vy2 = (
+                        vehicle["box"]
+                    )
+
+                    # Cek intersection
+                    intersects = (
+                        vx1 <= bx2
+                        and
+                        vx2 >= bx1
+                        and
+                        vy1 <= by2
+                        and
+                        vy2 >= by1
+                    )
+
+                    if not intersects:
+                        continue
+
+                    p_x1 = max(
+                        0,
+                        int(vx1)
+                    )
+
+                    p_y1 = max(
+                        0,
+                        int(vy1)
+                    )
+
+                    p_x2 = min(
+                        w,
+                        int(vx2)
+                    )
+
+                    p_y2 = min(
+                        h,
+                        int(vy2)
+                    )
+
+                    if (
+                        p_x2 > p_x1
+                        and
+                        p_y2 > p_y1
+                    ):
+
+                        associated_person_crop = (
+                            frame[
+                                p_y1:p_y2,
+                                p_x1:p_x2
+                            ]
+                        )
 
                 # PlateTracker melakukan OCR multi-frame.
                 if self.plate_ocr is not None:
