@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 import supervision as sv
+import collections
 
 from ai.plate.detector import PlateDetector
 from ai.plate.ocr import PlateOCR
@@ -560,32 +561,58 @@ class StreamAIService:
         self.last_ai_time = 0.0
 
         # Track lifecycle: (camera_id, track_id) -> {generation, last_seen}
-        # This prevents a reused ByteTrack ID from being blocked forever by
-        # the database event_key.
         self.track_lifecycle = {}
 
         # Adaptive scheduler: never stops AI, only changes its cadence.
         self.adaptive_ai = AdaptiveAIController()
 
-        # Display throttling. process_frame() can be called faster than
-        # the desired browser FPS; callers still receive the latest frame.
-        self.last_display_time = {}
-        self.last_results = {"persons": [], "plates": []}
+        # Frame queue for decoupling AI inference from the CCTV display path.
+        # The queue stores only the newest few frames so AI can never build
+        # an unbounded backlog and increase latency.
+        self.frame_queue = collections.deque(maxlen=2)
+        self.frame_queue_lock = threading.Lock()
+        self.ai_wakeup = threading.Event()
+        self.ai_thread = threading.Thread(
+            target=self._ai_loop,
+            name="PlateVision-AI",
+            daemon=True,
+        )
+
+        # Shared AI results accessed by display path
+        self.latest_results = {"persons": [], "plates": []}
         self.last_results_time = 0.0
         self.last_plate_history = []
         self.last_plate_capture = None
+
+        # Locks and thread control
         self.processing_lock = threading.Lock()
+        self.ai_lock = threading.Lock()
+        self.running = True
+
+        # Performance counters
+        self.display_counter = 0
+        self.last_display_fps_calc = time.time()
+        self.display_fps = 0.0
+        self.ai_cycle_counter = 0
+        self.last_perf_log = time.time()
+
+        # Runtime state must be initialized before the worker starts.
         self.focus_track_id = None
         self.focus_last_seen = 0.0
         self.focus_plate_last_seen = 0.0
-        self.focus_info = {"type":"AREA", "box":None, "track_id":None, "lighting":None}
+        self.focus_info = {"type":"AREA","box":None,"track_id":None,"lighting":None}
         self.latest_raw_plate_detections = []
         self.camera_states = {}
+        self.last_display_time = {}
         # Caches for CPU-friendly optimization
-        self.plate_detection_cache = {}  # vehicle track_id -> timestamp of last plate detection
-        self.ocr_cache = {}  # plate track_id -> {"result": ..., "time": timestamp}
+        self.plate_detection_cache = {}
+        self.ocr_cache = {}
+        self.saved_event_meta = {}
 
-        print("[AI STREAM] Vehicle classes : person/car/motorcycle/bus")
+        # Start background AI thread only after every runtime field exists.
+        self.ai_thread.start()
+
+        print("[AI STREAM] Vehicle classes : person/car/motorcycle/bus/truck")
         print("[AI STREAM] Plate ROI       : kendaraan")
         print("[AI STREAM] PlateTracker    : multi-frame voting")
         print("[AI STREAM] OCR variants    : original/clahe/sharpen/threshold")
@@ -956,7 +983,22 @@ class StreamAIService:
             )
 
             # One database event per physical track lifecycle.
-            if event_key in self.captured_tracks:
+            # A second DB write is allowed only when a plate/driver becomes
+            # available later for the same vehicle. This avoids repeated
+            # database writes while still allowing OCR to enrich an event.
+            plate_text_now = _normalize_text((plate or {}).get("text") or "")
+            has_driver_now = driver is not None
+            previous_meta = self.saved_event_meta.get(event_key)
+            is_new_event = event_key not in self.captured_tracks
+            needs_enrichment = (
+                not is_new_event
+                and previous_meta is not None
+                and (
+                    (plate_text_now and not previous_meta.get("plate_text"))
+                    or (has_driver_now and not previous_meta.get("has_driver"))
+                )
+            )
+            if not is_new_event and not needs_enrichment:
                 continue
             self.captured_tracks[event_key] = current_time
 
@@ -978,6 +1020,10 @@ class StreamAIService:
                     direction=direction,
                     event_key=event_key
                 )
+                self.saved_event_meta[event_key] = {
+                    "plate_text": plate_text_now,
+                    "has_driver": has_driver_now,
+                }
                 print(
                     f"[DETECTION] camera={camera_id} track_id={vehicle_id} object_type=vehicle "
                     f"vehicle_type={vehicle_type} vehicle_confidence={float(vehicle.get('conf', 0) or 0):.3f} "
@@ -1096,204 +1142,262 @@ class StreamAIService:
     # PROCESS FRAME
     # ------------------------------------------------------------
 
+    def _run_ai_pipeline(self, frame, camera_id):
+        """Run one complete AI cycle in the background thread.
+
+        This function deliberately never runs from Flask's CCTV frame
+        generator. That is the key point that keeps the live CCTV responsive:
+        the web request only receives/draws frames while this worker performs
+        YOLO, plate detection, OCR and DB writes in the background.
+        """
+        camera_state = self._camera_state(camera_id)
+        now = time.time()
+        ai_pipeline_start = time.perf_counter()
+
+        try:
+            # ==============================================================
+            # 1. LIGHTWEIGHT LIGHTING CHECK
+            # ============================================================== 
+            h0, w0 = frame.shape[:2]
+            base_box = (
+                self.focus_info.get("box")
+                or [
+                    int(w0 * 0.20),
+                    int(h0 * 0.42),
+                    int(w0 * 0.88),
+                    int(h0 * 0.96),
+                ]
+            )
+            base_light = _lighting_metrics(frame, base_box)
+
+            # Enhancement is ONLY for AI inference. Never replace the
+            # original frame used for CCTV display or captures.
+            ai_frame = _enhance_for_lighting(frame, base_light)
+
+            # ==============================================================
+            # 2. YOLO + BYTETRACK
+            # ============================================================== 
+            person_dets = self._detect_vehicles(ai_frame, camera_id) or []
+
+            if DEBUG_PERFORMANCE:
+                print(
+                    f"[AI RUN] camera={camera_id} "
+                    f"objects={len(person_dets)} "
+                    f"interval={self.adaptive_ai.get_interval():.2f}s"
+                )
+
+            # ==============================================================
+            # 3. PLATE DETECTION -> PLATE TRACKER -> OCR
+            # ============================================================== 
+            plate_dets = []
+            plate_raw = []
+
+            try:
+                # Plate detection is restricted to vehicle ROIs. This is much
+                # cheaper than running the plate model on the full 1080p/1520p
+                # CCTV frame.
+                plate_raw = self._detect_plates_in_vehicles(
+                    ai_frame,
+                    person_dets,
+                ) or []
+                self.latest_raw_plate_detections = plate_raw
+
+                # Focus follows the largest/stable vehicle and then its plate.
+                self._select_dynamic_focus(
+                    frame,
+                    person_dets,
+                    plate_raw,
+                    now,
+                )
+
+                plate_tracker = camera_state["plate_tracker"]
+
+                if self.plate_ocr is not None:
+                    try:
+                        active_tracks = plate_tracker.update(
+                            plate_raw,
+                            ai_frame,
+                            self.plate_ocr,
+                        ) or []
+                    except Exception as exc:
+                        print(f"[AI STREAM WARNING] PlateTracker/OCR failed: {exc}")
+                        active_tracks = []
+
+                    for track in active_tracks:
+                        result = _track_to_result(track)
+                        if result is not None:
+                            plate_dets.append(result)
+
+                    # A finished vote becomes the persisted plate capture.
+                    finished = self._consume_finished_plate(
+                        frame,
+                        person_dets,
+                        camera_id,
+                    )
+                    if finished is not None:
+                        plate_dets.append(finished)
+                else:
+                    # Keep raw plate detections visible even if OCR failed to
+                    # initialize. This prevents the entire plate pipeline from
+                    # disappearing merely because OCR is unavailable.
+                    for item in plate_raw:
+                        bbox = item.get("bbox") or item.get("box")
+                        if not bbox or len(bbox) != 4:
+                            continue
+                        conf = _safe_float(
+                            item.get("confidence", item.get("conf", 0.0))
+                        )
+                        plate_dets.append({
+                            **item,
+                            "id": int(item.get("vehicle_track_id", -1)),
+                            "track_id": int(item.get("vehicle_track_id", -1)),
+                            "box": bbox,
+                            "bbox": bbox,
+                            "conf": conf,
+                            "detection_confidence": conf,
+                            "text": "",
+                            "formatted": "",
+                            "raw_text": "",
+                            "ocr_conf": 0.0,
+                            "confidence": 0.0,
+                            "valid": False,
+                            "votes": 0,
+                            "total_reads": 0,
+                        })
+
+            except Exception as exc:
+                # Plate failures must not erase valid YOLO vehicle/person
+                # detections or interrupt the CCTV.
+                print(f"[AI STREAM ERROR] Plate pipeline failed: {exc}")
+
+            # ==============================================================
+            # 4. STORE LATEST RESULTS
+            # ============================================================== 
+            camera_state["last_results"] = {
+                "persons": person_dets,
+                "plates": plate_dets,
+            }
+            camera_state["last_results_time"] = now
+
+            # ==============================================================
+            # 5. SAVE DATABASE EVENTS
+            # ============================================================== 
+            self._save_consistent_events(
+                frame,
+                person_dets,
+                plate_dets,
+                camera_id,
+                now,
+            )
+
+        except Exception as exc:
+            # Never allow an AI exception to terminate the worker thread.
+            print(f"[AI STREAM ERROR] Background AI cycle failed: {exc}")
+
+        finally:
+            elapsed = time.perf_counter() - ai_pipeline_start
+            self.last_ai_time = elapsed
+            self.adaptive_ai.update(elapsed)
+
+            if DEBUG_PERFORMANCE:
+                print(
+                    f"[AI PERF] camera={camera_id} "
+                    f"elapsed={elapsed * 1000:.0f}ms "
+                    f"next_interval={self.adaptive_ai.get_interval():.2f}s"
+                )
+
+    def _ai_loop(self):
+        """Background worker that processes only the newest CCTV frame.
+
+        Important performance rules:
+        - Never block the Flask response thread.
+        - Never accumulate old frames.
+        - Never run AI faster than AdaptiveAIController allows.
+        - Prefer a fresh frame over a stale backlog.
+        """
+        print("[AI THREAD] Background AI worker started")
+
+        while self.running:
+            item = None
+
+            # Wait briefly when there is no incoming frame. The event is set
+            # by process_frame() whenever a fresh frame enters the queue.
+            self.ai_wakeup.wait(timeout=0.05)
+            self.ai_wakeup.clear()
+
+            if not self.running:
+                break
+
+            with self.frame_queue_lock:
+                if self.frame_queue:
+                    # Keep the newest frame and discard stale queued frames.
+                    item = self.frame_queue.pop()
+                    self.frame_queue.clear()
+
+            if item is None:
+                continue
+
+            frame, camera_id = item
+            camera_state = self._camera_state(camera_id)
+            now = time.time()
+            interval = self.adaptive_ai.get_interval()
+
+            # Respect the adaptive cadence. We intentionally do NOT sleep for
+            # a full interval if another frame has not arrived yet.
+            remaining = interval - (now - camera_state["last_ai_time"])
+            if remaining > 0:
+                # Put the newest frame back only when the queue is empty; this
+                # allows the next incoming CCTV frame to replace it naturally.
+                time.sleep(min(remaining, 0.05))
+                with self.frame_queue_lock:
+                    self.frame_queue.append((frame, camera_id))
+                self.ai_wakeup.set()
+                continue
+
+            camera_state["last_ai_time"] = now
+            self._run_ai_pipeline(frame, camera_id)
+
+        print("[AI THREAD] Background AI worker stopped")
+
     def process_frame(self, frame, draw_bbox=True, camera_id=1):
-        """Process one CCTV frame through the AI pipeline.
+        """Return CCTV immediately while AI runs asynchronously.
 
-        Pipeline:
-            frame -> lighting enhancement -> YOLO + ByteTrack
-                   -> plate detection -> PlateTracker/OCR
-                   -> event persistence -> draw last results
-
-        AI inference is throttled by the adaptive controller. Frames between
-        inference cycles continue displaying the latest valid result.
+        The previous implementation accidentally removed the background AI
+        worker. This version restores it while keeping the CCTV path cheap:
+        only a frame copy, queue operation and drawing of cached results occur
+        here. YOLO/PlateDetector/OCR/DB work is performed by _ai_loop().
         """
         if frame is None or not hasattr(frame, "size") or frame.size == 0:
             return frame
 
-        now = time.time()
+        try:
+            with self.frame_queue_lock:
+                self.frame_queue.append((frame.copy(), camera_id))
+            self.ai_wakeup.set()
+        except Exception as exc:
+            # Queue problems must never stop CCTV display.
+            if DEBUG_PERFORMANCE:
+                print(f"[AI QUEUE WARNING] {exc}")
 
-        # Prevent concurrent Flask requests from running the models
-        # at the same time.
-        with self.processing_lock:
-            camera_state = self._camera_state(camera_id)
+        camera_state = self._camera_state(camera_id)
 
-            adaptive_interval = self.adaptive_ai.get_interval()
-            should_run = (
-                now - camera_state["last_ai_time"]
-            ) >= adaptive_interval
-
-            if should_run:
-                ai_pipeline_start = time.perf_counter()
-                camera_state["last_ai_time"] = now
-
-                try:
-                    # ==================================================
-                    # 1. PREPARE FRAME FOR AI INFERENCE
-                    # ==================================================
-                    h0, w0 = frame.shape[:2]
-
-                    base_box = (
-                        self.focus_info.get("box")
-                        or [
-                            int(w0 * 0.20),
-                            int(h0 * 0.42),
-                            int(w0 * 0.88),
-                            int(h0 * 0.96),
-                        ]
-                    )
-
-                    base_light = _lighting_metrics(
-                        frame,
-                        base_box,
-                    )
-
-                    # Enhancement is used only for inference.
-                    # The original frame is retained for display/capture.
-                    ai_frame = _enhance_for_lighting(
-                        frame,
-                        base_light,
-                    )
-
-                    # ==================================================
-                    # 2. YOLO + BYTETRACK
-                    # IMPORTANT: person_dets MUST be assigned here
-                    # before it is used anywhere else.
-                    # ==================================================
-                    person_dets = self._detect_vehicles(
-                        ai_frame,
-                        camera_id,
-                    )
-
-                    if DEBUG_PERFORMANCE:
-                        print(
-                            f"[AI RUN] camera={camera_id} "
-                            f"detections={len(person_dets or [])} "
-                            f"interval={self.adaptive_ai.get_interval():.2f}s"
-                        )
-
-                    if person_dets is None:
-                        person_dets = []
-
-                    # ==================================================
-                    # 3. PLATE DETECTION + PLATE TRACKER + OCR
-                    # ==================================================
-                    plate_dets = []
-
-                    if self.plate_ocr is not None:
-                        try:
-                            plate_detections = (
-                                self._detect_plates_in_vehicles(
-                                    ai_frame,
-                                    person_dets,
-                                )
-                            )
-
-                            if plate_detections is None:
-                                plate_detections = []
-
-                            self.latest_raw_plate_detections = (
-                                plate_detections
-                            )
-
-                            # Dynamic focus follows the detected vehicle/plate.
-                            self._select_dynamic_focus(
-                                frame,
-                                person_dets,
-                                plate_detections,
-                                now,
-                            )
-
-                            plate_tracker = (
-                                self._camera_state(camera_id)["plate_tracker"]
-                            )
-
-                            active_tracks = plate_tracker.update(
-                                plate_detections,
-                                ai_frame,
-                                self.plate_ocr,
-                            )
-
-                            if active_tracks is None:
-                                active_tracks = []
-
-                            for track in active_tracks:
-                                result = _track_to_result(track)
-                                if result is not None:
-                                    plate_dets.append(result)
-
-                            # A finalized tracker result becomes a saved plate event.
-                            finished = self._consume_finished_plate(
-                                frame,
-                                person_dets,
-                                camera_id,
-                            )
-
-                            if finished is not None:
-                                plate_dets.append(finished)
-
-                        except Exception as exc:
-                            print(
-                                "[AI STREAM ERROR] "
-                                f"Plate pipeline failed: {exc}"
-                            )
-
-                    # ==================================================
-                    # 4. STORE LATEST RESULTS PER CAMERA
-                    # ==================================================
-                    has_detections = bool(
-                        person_dets or plate_dets
-                    )
-
-                    if (
-                        has_detections
-                        or
-                        now - camera_state["last_results_time"]
-                        >= RESULT_HOLD_SECONDS
-                    ):
-                        camera_state["last_results"] = {
-                            "persons": person_dets,
-                            "plates": plate_dets,
-                        }
-                        camera_state["last_results_time"] = now
-
-                    # ==================================================
-                    # 5. SAVE EVENTS
-                    # ==================================================
-                    self._save_consistent_events(
-                        frame,
-                        person_dets,
-                        plate_dets,
-                        camera_id,
-                        now,
-                    )
-
-                except Exception as exc:
-                    # AI failure must not kill the CCTV stream.
-                    # The last valid detections remain on screen.
-                    print(
-                        "[AI STREAM ERROR] "
-                        f"Frame processing failed: {exc}"
-                    )
-                finally:
-                    ai_elapsed = time.perf_counter() - ai_pipeline_start
-                    self.adaptive_ai.update(ai_elapsed)
-
-        # ==========================================================
-        # 6. RETURN FRAME + LAST AI RESULTS
-        # ==========================================================
         if not draw_bbox:
-            return frame
+            return self._display_frame(frame, camera_id)
 
+        # Display uses the latest completed AI result. It never waits for AI.
         output = frame.copy()
-
-        self._draw_clean_bboxes(
-            output,
-            camera_state["last_results"],
-        )
-
+        self._draw_clean_bboxes(output, camera_state["last_results"])
         self._draw_dynamic_focus(output)
 
         return self._display_frame(output, camera_id)
+
+    def stop(self):
+        """Stop the background AI worker cleanly."""
+        self.running = False
+        self.ai_wakeup.set()
+        thread = getattr(self, "ai_thread", None)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
 
     def _display_frame(self, frame, camera_id):
         """Return frame while reporting desired display cadence.
