@@ -68,9 +68,9 @@
                 <div class="nav-section mt-4">Sistem</div>
                 <nav class="nav flex-column gap-1">
                     <a class="nav-link {% if page == 'settings' %}active{% endif %}"
-                        href="{{ url_for('settings_page.settings') }}" title="Pengaturan">
-                        <i class="bi bi-gear-fill"></i>
-                        <span>Pengaturan</span>
+                        href="{{ url_for('settings_page.settings') }}" title="Profil">
+                        <i class="bi bi-person-circle"></i>
+                        <span>Profil</span>
                     </a>
                 </nav>
             </div>
@@ -92,8 +92,8 @@
                     
                     <button class="icon-btn" aria-label="Notifikasi"><i class="bi bi-bell"></i></button>
                     <div class="user-pill">
-                        <div class="avatar">A</div>
-                        <div><strong>Administrator</strong><span>Operator</span></div>
+                        <div id="topbarAvatar" class="avatar">A</div>
+                        <div><strong id="topbarName">Administrator</strong><span id="topbarRole">Operator</span></div>
                     </div>
                 </div>
             </div>
@@ -473,7 +473,7 @@
                     </div>
                 </div>
 
-                <!-- 6 Executive KPI Metric Cards -->
+                <!-- Executive KPI Metric Cards -->
                 <div class="row g-3 mb-4">
                     <div class="col-xl-2 col-md-4 col-sm-6 col-12">
                         <div class="stat-card p-3 h-100 shadow-sm">
@@ -507,26 +507,6 @@
                     </div>
                     <div class="col-xl-2 col-md-4 col-sm-6 col-12">
                         <div class="stat-card p-3 h-100 shadow-sm">
-                            <div class="stat-icon blue"><i class="bi bi-shield-check"></i></div>
-                            <div class="w-100">
-                                <span class="text-muted small">Akurasi Rata-rata AI</span>
-                                <strong id="kpiAvgConf" class="fs-4 d-block my-1">0%</strong>
-                                <small class="text-info">Model SLA Score</small>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="col-xl-2 col-md-4 col-sm-6 col-12">
-                        <div class="stat-card p-3 h-100 shadow-sm">
-                            <div class="stat-icon orange"><i class="bi bi-exclamation-triangle-fill"></i></div>
-                            <div class="w-100">
-                                <span class="text-muted small">Perlu Verifikasi</span>
-                                <strong id="kpiNeedCheck" class="fs-4 d-block my-1 text-warning">0</strong>
-                                <small class="text-warning">Confidence &lt; 70%</small>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="col-xl-2 col-md-4 col-sm-6 col-12">
-                        <div class="stat-card p-3 h-100 shadow-sm">
                             <div class="stat-icon green"><i class="bi bi-camera-video-fill"></i></div>
                             <div class="w-100">
                                 <span class="text-muted small">Ketersediaan CCTV</span>
@@ -537,53 +517,7 @@
                     </div>
                 </div>
 
-                <!-- Row 1: Tren Waktu Nyata & Donut SLA -->
-                <div class="row g-4 mb-4">
-                    <div class="col-xl-8 col-lg-7">
-                        <div class="panel p-4 shadow-sm h-100">
-                            <div class="d-flex justify-content-between align-items-center mb-3">
-                                <div>
-                                    <h4 class="fw-bold mb-1">Tren Volume Deteksi Waktu Nyata</h4>
-                                    <p class="text-muted small mb-0">Analisis perbandingan deteksi plat kendaraan vs wajah/orang sepanjang waktu.</p>
-                                </div>
-                                <span class="badge bg-light text-dark border">Chart.js Analytics</span>
-                            </div>
-                            <div style="position: relative; height: 320px; width: 100%;">
-                                <canvas id="trendChartCanvas"></canvas>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="col-xl-4 col-lg-5">
-                        <div class="panel p-4 shadow-sm h-100">
-                            <div class="d-flex justify-content-between align-items-center mb-3">
-                                <div>
-                                    <h4 class="fw-bold mb-1">Kualitas Deteksi AI (SLA)</h4>
-                                    <p class="text-muted small mb-0">Distribusi tingkat kepercayaan klasifikasi.</p>
-                                </div>
-                            </div>
-                            <div style="position: relative; height: 230px; width: 100%;">
-                                <canvas id="qualityDonutCanvas"></canvas>
-                            </div>
-                            <div class="d-flex justify-content-around text-center mt-3 pt-2 border-top">
-                                <div>
-                                    <span class="badge rounded-pill bg-success-subtle text-success border border-success-subtle px-2 py-1">Valid (Jelas)</span>
-                                    <h6 id="donutValValid" class="fw-bold mt-1 mb-0">0</h6>
-                                </div>
-                                <div>
-                                    <span class="badge rounded-pill bg-warning-subtle text-warning border border-warning-subtle px-2 py-1">Perlu Cek</span>
-                                    <h6 id="donutValWarning" class="fw-bold mt-1 mb-0">0</h6>
-                                </div>
-                                <div>
-                                    <span class="badge rounded-pill bg-danger-subtle text-danger border border-danger-subtle px-2 py-1">Gagal</span>
-                                    <h6 id="donutValFailed" class="fw-bold mt-1 mb-0">0</h6>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Row 2: Distribusi CCTV & Analisis Jam Sibuk -->
+                <!-- Distribusi CCTV & Analisis Jam Sibuk -->
                 <div class="row g-4 mb-4">
                     <div class="col-xl-7 col-lg-6">
                         <div class="panel p-4 shadow-sm h-100">
@@ -615,7 +549,7 @@
                     </div>
                 </div>
 
-                <!-- Row 3: Top 10 Plat Paling Sering Terdeteksi -->
+                <!-- Top 10 Plat Paling Sering Terdeteksi -->
                 <div class="panel shadow-sm p-4">
                     <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
                         <div>
@@ -647,96 +581,41 @@
             </div>
             {% elif page == 'settings' %}
             <div class="row g-4">
-                <!-- System Diagnostics Card -->
                 <div class="col-xl-4 col-lg-5">
-                    <div class="panel shadow-sm p-4 h-100">
-                        <div class="d-flex align-items-center gap-2 mb-3">
-                            <div class="stat-icon blue"><i class="bi bi-cpu-fill"></i></div>
-                            <div>
-                                <h4 class="fw-bold mb-0">Status Sistem</h4>
-                                <small class="text-muted">Kesehatan & Diagnostik</small>
-                            </div>
-                        </div>
-
-                        <ul class="list-group list-group-flush small mb-4">
-                            <li class="list-group-item d-flex justify-content-between align-items-center px-0">
-                                <span>Koneksi MySQL (Laragon)</span>
-                                <span id="diagDbStatus" class="badge bg-success-subtle text-success border border-success-subtle">Terhubung</span>
-                            </li>
-                            <li class="list-group-item d-flex justify-content-between align-items-center px-0">
-                                <span>Database Aktif</span>
-                                <strong id="diagDbName" class="text-dark">real_cctv</strong>
-                            </li>
-                            <li class="list-group-item d-flex justify-content-between align-items-center px-0">
-                                <span>Total Deteksi Tersimpan</span>
-                                <strong id="diagTotalDets" class="text-dark">0</strong>
-                            </li>
-                            <li class="list-group-item d-flex justify-content-between align-items-center px-0">
-                                <span>Total Plat di Database</span>
-                                <strong id="diagTotalPlates" class="text-dark">0</strong>
-                            </li>
-                            <li class="list-group-item d-flex justify-content-between align-items-center px-0">
-                                <span>Penyimpanan Foto Capture</span>
-                                <strong id="diagStorage" class="text-dark">0 MB (0 files)</strong>
-                            </li>
-                            <li class="list-group-item d-flex justify-content-between align-items-center px-0">
-                                <span>Waktu Server</span>
-                                <strong id="diagServerTime" class="text-muted">-</strong>
-                            </li>
-                        </ul>
-
-                        <div class="p-3 bg-light rounded border">
-                            <strong class="d-block mb-1 text-dark"><i class="bi bi-magic"></i> Simulasi Data Korporat</strong>
-                            <p class="text-muted small mb-2">Isi database dengan data simulasi realistis untuk keperluan pengujian atau presentasi analitik.</p>
-                            <button type="button" class="btn btn-outline-primary btn-sm w-100" id="btnSeedDemoData" onclick="seedDemoData()">
-                                <i class="bi bi-database-fill-add"></i> Generate Data Simulasi (+35 data)
-                            </button>
+                    <div class="panel shadow-sm p-4 h-100 text-center">
+                        <div class="avatar profile-avatar mx-auto mb-3">A</div>
+                        <h3 id="profileDisplayName" class="fw-bold mb-1">Administrator</h3>
+                        <p id="profileDisplayRole" class="text-muted mb-4">Operator</p>
+                        <div class="text-start small border-top pt-3">
+                            <div class="d-flex justify-content-between mb-2"><span class="text-muted">Status</span><span class="text-success fw-semibold">Aktif</span></div>
+                            <div class="d-flex justify-content-between"><span class="text-muted">Akses</span><span>Monitoring CCTV</span></div>
                         </div>
                     </div>
                 </div>
-
-                <!-- Settings Form -->
                 <div class="col-xl-8 col-lg-7">
                     <div class="panel shadow-sm p-4 h-100">
-                        <h4 class="fw-bold mb-1">Pengaturan Operasional Sistem</h4>
-                        <p class="text-muted small mb-4">Pengaturan ini tersimpan permanen di database MySQL (tabel <code>system_settings</code>).</p>
-
+                        <h4 class="fw-bold mb-1">Profil Saya</h4>
+                        <p class="text-muted small mb-4">Kelola informasi profil operator yang tampil di aplikasi.</p>
                         <form id="settingsForm" class="row g-3">
                             <div class="col-md-6">
-                                <label class="form-label small fw-semibold">Nama Operator / Petugas</label>
+                                <label class="form-label small fw-semibold">Nama Lengkap</label>
                                 <input id="operatorName" class="form-control" placeholder="Administrator">
                             </div>
                             <div class="col-md-6">
-                                <label class="form-label small fw-semibold">Nama Perusahaan / Institusi</label>
-                                <input id="companyName" class="form-control" placeholder="PT CCTV Security Solusindo">
-                            </div>
-
-                            <div class="col-md-6">
-                                <label class="form-label small fw-semibold">Interval Refresh Dashboard (detik)</label>
-                                <input id="refreshInterval" class="form-control" type="number" min="1" max="60" value="2">
+                                <label class="form-label small fw-semibold">Email</label>
+                                <input id="profileEmail" class="form-control" type="email" placeholder="operator@perusahaan.com">
                             </div>
                             <div class="col-md-6">
-                                <label class="form-label small fw-semibold">Judul Sistem</label>
-                                <input id="systemTitle" class="form-control" placeholder="PlateVision Enterprise Monitoring">
-                            </div>
-
-                            <div class="col-md-6">
-                                <label class="form-label small fw-semibold">Batas Minimum Akurasi Plat (%)</label>
-                                <input id="minConfPlate" class="form-control" type="number" min="10" max="99" value="70">
+                                <label class="form-label small fw-semibold">Nomor Telepon</label>
+                                <input id="profilePhone" class="form-control" placeholder="08xxxxxxxxxx">
                             </div>
                             <div class="col-md-6">
-                                <label class="form-label small fw-semibold">Batas Minimum Akurasi Wajah (%)</label>
-                                <input id="minConfFace" class="form-control" type="number" min="10" max="99" value="65">
+                                <label class="form-label small fw-semibold">Jabatan</label>
+                                <input id="profileRole" class="form-control" placeholder="Operator">
                             </div>
-
-                            <div class="col-12">
-                                <label class="form-label small fw-semibold">URL Default CCTV Stream</label>
-                                <input id="streamUrl" class="form-control" placeholder="http://.../playlist.m3u8 atau rtmp://...">
-                            </div>
-
                             <div class="col-12 mt-4 d-flex align-items-center gap-3">
                                 <button type="submit" class="btn btn-primary">
-                                    <i class="bi bi-check2-circle"></i> Simpan Pengaturan ke Database
+                                    <i class="bi bi-check2-circle"></i> Simpan Profil
                                 </button>
                                 <span id="settingsMessage" class="small fw-semibold text-success"></span>
                             </div>
