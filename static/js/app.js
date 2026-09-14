@@ -10,6 +10,21 @@ const esc = value => String(value ?? '')
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;');
 
+// Helper: normalize image URL paths from DB to browser-friendly URLs
+function buildCaptureUrl(path) {
+    if (!path) return null;
+    // Convert backslashes to forward slashes and trim spaces
+    let clean = String(path).trim().replace(/\\/g, '/');
+    // Remove leading slashes
+    clean = clean.replace(/^\/+/, '');
+    // Ensure it starts with "static/"
+    if (!clean.startsWith('static/')) {
+        clean = 'static/' + clean;
+    }
+    // Return as absolute URL path
+    return '/' + clean;
+}
+
 function getDateRange(period) {
     if (period === 'all') return { start_date: '', end_date: '' };
 
@@ -147,7 +162,7 @@ window.askConfirmation = askConfirmation;
 // MODAL GLOBAL: PRATINJAU GAMBAR & DETAIL DETEKSI
 // ============================================================
 
-function openImageModal(imgSrc, title = 'Detail Foto Tangkapan CCTV', meta = '', details = '') {
+function openImageModal(imgSrc, title = 'Detail Foto Tangkapan CCTV', meta = '', details = '', objType = null) {
     const modalEl = document.getElementById('imagePreviewModal');
     if (!modalEl) return;
 
@@ -156,18 +171,36 @@ function openImageModal(imgSrc, title = 'Detail Foto Tangkapan CCTV', meta = '',
     const srcEl = document.getElementById('imagePreviewSrc');
     const detailsEl = document.getElementById('imagePreviewDetails');
 
+    // Determine dynamic title based on object type
+    if (objType) {
+        title = objType === 'vehicle' ? 'Foto Kendaraan' : 'Foto Orang';
+    }
+
     if (titleEl) titleEl.textContent = title;
     if (metaEl) metaEl.textContent = meta;
     if (detailsEl) detailsEl.innerHTML = details;
 
+// Compute image URL from the provided path (already prioritized)
+    const imageUrl = buildCaptureUrl(imgSrc);
+    console.log('[IMAGE SRC]', imgSrc);
+    console.log('[OBJECT TYPE]', objType);
+    console.log('[IMAGE URL]', imageUrl);
+
     if (srcEl) {
-        if (imgSrc && imgSrc !== 'null' && imgSrc !== 'undefined') {
-            srcEl.src = '/' + imgSrc.replace(/^\/+/, '');
+        if (imageUrl) {
+            srcEl.src = imageUrl;
             srcEl.style.display = 'block';
         } else {
             srcEl.src = 'https://placehold.co/600x400/1e293b/94a3b8?text=Foto+Tidak+Tersedia';
             srcEl.style.display = 'block';
+            if (detailsEl) detailsEl.innerHTML = 'Foto Tidak Tersedia';
         }
+        // Error handling for load failure
+        srcEl.onerror = function () {
+            srcEl.style.display = 'none';
+            if (detailsEl) detailsEl.innerHTML = 'Foto tidak dapat dimuat.';
+            console.error('Failed to load image:', imageUrl);
+        };
     }
 
     bootstrap.Modal.getOrCreateInstance(modalEl).show();
@@ -572,14 +605,19 @@ async function initDashboard() {
                 recent.innerHTML = items.map(item => {
                     const isVehicle = item.object_type === 'vehicle' || item.type === 'vehicle' || item.type === 'vehicle_with_plate' || item.type === 'plate';
                     const isPlate = item.type === 'vehicle_with_plate' || Boolean(item.plate && item.plate !== '-');
-                    const label = isVehicle ? (isPlate ? esc(item.plate) : 'Kendaraan') : 'Orang / Pejalan Kaki';
+                    const label = isVehicle ? (isPlate ? esc(item.plate) : 'Kendaraan') : 'Orang';
                     const icon = isVehicle ? 'K' : '<i class="bi bi-person-fill"></i>';
-                    const photoPath = item.plate_image_path || item.face_image_path || '';
+                    let photoPath = '';
+                    if (isVehicle) {
+                        photoPath = item.vehicle_image_path || item.vehicleImagePath || item.plate_image_path || item.plateImagePath || '';
+                    } else {
+                        photoPath = item.face_image_path || item.faceImagePath || '';
+                    }
 
                     return `
                         <div class="recent d-flex align-items-center justify-content-between p-2 rounded mb-2" 
                              style="cursor: pointer; transition: background 0.2s;" 
-                             onclick="openImageModal('${photoPath}', '${label}', '${esc(item.camera)} · ${esc(item.timestamp)}', 'Akurasi AI: <b>${item.confidence_percent}%</b> · Status: <b>${esc(item.status)}</b>')">
+                             onclick="openImageModal('${photoPath}', '${label}', '${esc(item.camera)} · ${esc(item.timestamp)}', 'Akurasi AI: <b>${item.confidence_percent}%</b> · Status: <b>${esc(item.status)}</b>', '${item.object_type}')">
                             <div class="d-flex align-items-center gap-3">
                                 <div class="plate-icon ${isPlate ? '' : 'bg-primary text-white'}">${icon}</div>
                                 <div class="recent-info">
@@ -672,15 +710,14 @@ async function loadDetections() {
         tableBody.innerHTML = items.map(item => {
             const isVehicle = item.object_type === 'vehicle' || item.type === 'vehicle' || item.type === 'vehicle_with_plate' || item.type === 'plate';
             const isPlate = item.type === 'vehicle_with_plate' || (isVehicle && item.has_plate);
-            const targetLabel = isVehicle ? `<strong>${esc(isPlate ? item.plate : 'Kendaraan')}</strong>` : `<span class="text-muted fst-italic">Orang / Pejalan Kaki</span>`;
-            
+            const targetLabel = isVehicle ? `<strong class=\"d-block\">${esc(isPlate ? item.plate : 'Kendaraan')}</strong>` : `<span class=\"text-muted fst-italic\">Orang</span>`;
             let typeBadge = '';
             if (isPlate) {
-                typeBadge = `<span class="badge bg-info-subtle text-info border border-info-subtle"><i class="bi bi-car-front"></i> Kendaraan / Plat Nomor</span>`;
+                typeBadge = `<span class=\"badge bg-info-subtle text-info border border-info-subtle\"><i class=\"bi bi-car-front\"></i> Kendaraan / Plat Nomor</span>`;
             } else if (isVehicle) {
-                typeBadge = `<span class="badge bg-primary-subtle text-primary border border-primary-subtle"><i class="bi bi-car-front"></i> Kendaraan</span>`;
+                typeBadge = `<span class=\"badge bg-primary-subtle text-primary border border-primary-subtle\"><i class=\"bi bi-car-front\"></i> Kendaraan</span>`;
             } else {
-                typeBadge = `<span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle"><i class="bi bi-person"></i> Orang / Pejalan Kaki</span>`;
+                typeBadge = `<span class=\"badge bg-secondary-subtle text-secondary border border-secondary-subtle\"><i class=\"bi bi-person\"></i> Orang</span>`;
             }
 
             let statusBadge = '';
@@ -692,7 +729,12 @@ async function loadDetections() {
                 statusBadge = `<span class="badge bg-danger-subtle text-danger border border-danger-subtle">Gagal</span>`;
             }
 
-            const photo = item.plate_image_path || (isVehicle ? '' : item.face_image_path) || '';
+            let photo = '';
+        if (isVehicle) {
+            photo = item.vehicle_image_path || item.vehicleImagePath || item.plate_image_path || item.plateImagePath || '';
+        } else {
+            photo = item.face_image_path || item.faceImagePath || '';
+        }
             const confidenceText = isPlate
                 ? `Kendaraan ${item.vehicle_confidence_percent || 0}% · Plat ${item.plate_confidence_percent || 0}% · OCR ${item.ocr_confidence_percent || 0}%`
                 : (isVehicle ? `Kendaraan ${item.vehicle_confidence_percent || item.confidence_percent || 0}%` : `Orang ${item.person_confidence_percent || item.confidence_percent || 0}%`);
