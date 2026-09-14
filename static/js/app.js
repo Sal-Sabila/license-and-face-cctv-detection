@@ -73,7 +73,7 @@ function setDateFilterLimits() {
         String(today.getDate()).padStart(2, '0')
     ].join('-');
 
-    ['detStartDate', 'detEndDate', 'plateStartDate', 'plateEndDate'].forEach(id => {
+    ['detStartDate', 'detEndDate', 'plateStartDate', 'plateEndDate', 'recapStart', 'recapEnd'].forEach(id => {
         const input = document.getElementById(id);
         if (input) input.max = todayValue;
     });
@@ -980,8 +980,8 @@ window.exportPlates = exportPlates;
 // MODUL: STATISTIK STANDAR PERUSAHAAN (ENTERPRISE ANALYTICS)
 // ============================================================
 
-function analyticsParams(prefix) {
-    const period = document.getElementById(`${prefix}Period`)?.value || 'today';
+function analyticsParams(prefix, periodOverride = '') {
+    const period = periodOverride || document.getElementById(`${prefix}Period`)?.value || 'today';
     const params = new URLSearchParams({ period });
     const start = document.getElementById(`${prefix}Start`)?.value;
     const end = document.getElementById(`${prefix}End`)?.value;
@@ -1008,19 +1008,41 @@ async function populateAnalyticsCameraSelect(id) {
 }
 
 async function loadRecap() {
-    const res = await json(`/api/analytics?${analyticsParams('recap').toString()}`);
-    const data = res.data || {};
-    const s = data.summary || {};
-    const cards = [
-        ['Kendaraan masuk', s.vehicle_entry], ['Kendaraan keluar', s.vehicle_exit], ['Total kendaraan', s.vehicles],
-        ['Orang masuk', s.people_entry], ['Orang keluar', s.people_exit], ['Total orang', s.people]
-    ];
-    const totals = document.getElementById('recapTotals');
-    if (totals) totals.innerHTML = cards.map(([label, value]) => `<div class="col-xl-2 col-md-4 col-6"><div class="stat-card recap-stat"><div><span>${label}</span><strong>${value || 0}</strong></div></div></div>`).join('');
+    const start = document.getElementById('recapStart')?.value || '';
+    const end = document.getElementById('recapEnd')?.value || '';
+    if (start && end && start > end) {
+        throw new Error('Tanggal mulai tidak boleh lebih besar dari tanggal akhir.');
+    }
+
+    const applyButton = document.getElementById('recapApply');
     const cameraTable = document.getElementById('recapCameraTable');
-    if (cameraTable) cameraTable.innerHTML = (data.cameras || []).map(c => `<tr><td><strong>${esc(c.camera)}</strong></td><td>${esc(c.direction)}</td><td>${c.vehicles}</td><td>${c.people}</td><td>${c.unique_plates}</td><td><span class="status ${c.status === 'Aktif' ? 'success' : 'warning'}">${c.status}</span></td></tr>`).join('') || '<tr><td colspan="6" class="text-center text-muted py-4">Belum ada event pada filter ini.</td></tr>';
     const dailyTable = document.getElementById('recapDailyTable');
-    if (dailyTable) dailyTable.innerHTML = (data.daily || []).map(d => `<tr><td>${esc(d.date)}</td><td>${d.vehicles}</td><td>${d.unique_plates}</td><td>${d.entry}</td><td>${d.exit}</td><td>${d.people}</td></tr>`).join('') || '<tr><td colspan="6" class="text-center text-muted py-4">Belum ada data harian.</td></tr>';
+    if (applyButton) applyButton.disabled = true;
+    if (cameraTable) cameraTable.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">Memuat data sesuai filter...</td></tr>';
+    if (dailyTable) dailyTable.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">Memuat data sesuai filter...</td></tr>';
+
+    try {
+        const res = await json(`/api/analytics?${analyticsParams('recap').toString()}`);
+        if (!res.success) throw new Error(res.message || 'Data rekap tidak dapat dimuat.');
+
+        const data = res.data || {};
+        const s = data.summary || {};
+        const cards = [
+            ['Kendaraan masuk', s.vehicle_entry], ['Kendaraan keluar', s.vehicle_exit], ['Total kendaraan', s.vehicles],
+            ['Orang masuk', s.people_entry], ['Orang keluar', s.people_exit], ['Total orang', s.people]
+        ];
+        const totals = document.getElementById('recapTotals');
+        if (totals) totals.innerHTML = cards.map(([label, value]) => `<div class="col-xl-2 col-md-4 col-6"><div class="stat-card recap-stat"><div><span>${label}</span><strong>${value || 0}</strong></div></div></div>`).join('');
+        if (cameraTable) cameraTable.innerHTML = (data.cameras || []).map(c => `<tr><td><strong>${esc(c.camera)}</strong></td><td>${esc(c.direction)}</td><td>${c.vehicles}</td><td>${c.people}</td><td>${c.unique_plates}</td><td><span class="status ${c.status === 'Aktif' ? 'success' : 'warning'}">${c.status}</span></td></tr>`).join('') || '<tr><td colspan="6" class="text-center text-muted py-4">Belum ada event pada filter ini.</td></tr>';
+        if (dailyTable) dailyTable.innerHTML = (data.daily || []).map(d => `<tr><td>${esc(d.date)}</td><td>${d.vehicles}</td><td>${d.unique_plates}</td><td>${d.entry}</td><td>${d.exit}</td><td>${d.people}</td></tr>`).join('') || '<tr><td colspan="6" class="text-center text-muted py-4">Belum ada data harian.</td></tr>';
+    } catch (error) {
+        const message = esc(error.message || 'Gagal memuat data rekapitulasi.');
+        if (cameraTable) cameraTable.innerHTML = `<tr><td colspan="6" class="text-center text-danger py-4">${message}</td></tr>`;
+        if (dailyTable) dailyTable.innerHTML = `<tr><td colspan="6" class="text-center text-danger py-4">${message}</td></tr>`;
+        throw error;
+    } finally {
+        if (applyButton) applyButton.disabled = false;
+    }
 }
 
 function exportRecap() {
@@ -1028,9 +1050,14 @@ function exportRecap() {
 }
 window.loadRecap = loadRecap;
 
-function initRecap() {
-    populateAnalyticsCameraSelect('recapCamera');
-    document.getElementById('recapApply')?.addEventListener('click', loadRecap);
+async function initRecap() {
+    setDateFilterLimits();
+    await populateAnalyticsCameraSelect('recapCamera');
+    document.getElementById('recapApply')?.addEventListener('click', () => {
+        loadRecap().catch(err => {
+            if (err.message) alert(err.message);
+        });
+    });
     document.getElementById('recapExport')?.addEventListener('click', exportRecap);
     loadRecap().catch(err => console.error('Error loadRecap:', err));
 }
@@ -1043,8 +1070,18 @@ window._cameraChart = null;
 async function loadEnterpriseStatistics(period = 'today') {
     window._currentStatsPeriod = period;
 
-    const analyticsRes = await json(`/api/analytics?${analyticsParams('stats').toString()}`).catch(() => null);
-    if (analyticsRes?.data) {
+    const periodSelect = document.getElementById('statsPeriod');
+    if (periodSelect) periodSelect.value = period;
+    const start = document.getElementById('statsStart')?.value || '';
+    const end = document.getElementById('statsEnd')?.value || '';
+    if (start && end && start > end) {
+        throw new Error('Tanggal mulai tidak boleh lebih besar dari tanggal akhir.');
+    }
+
+    const applyButton = document.getElementById('statsApply');
+    if (applyButton) applyButton.disabled = true;
+    const analyticsRes = await json(`/api/analytics?${analyticsParams('stats', period).toString()}`).catch(() => null);
+    if (analyticsRes?.success && analyticsRes.data) {
         const data = analyticsRes.data;
         const s = data.summary || {};
         const kpiValues = {
@@ -1072,6 +1109,9 @@ async function loadEnterpriseStatistics(period = 'today') {
         if (peakContainer) peakContainer.innerHTML = peak ? `<div class="p-3 bg-light rounded border"><strong>${peak.label} - ${String((peak.hour + 1) % 24).padStart(2, '0')}:00</strong><span class="d-block text-primary mt-1">${peak.vehicles} kendaraan · ${peak.people} orang</span></div>` : '<div class="text-muted">Belum ada data.</div>';
         const topBody = document.getElementById('topPlatesTable');
         if (topBody) topBody.innerHTML = (data.top_plates || []).map((p, i) => `<tr><td>${i + 1}</td><td><strong>${esc(p.plate)}</strong></td><td>${p.count} kali</td><td>${esc(p.camera)}</td><td>${esc(p.last_seen)}</td><td>${p.confidence}%</td><td><span class="badge bg-success-subtle text-success">Aktual</span></td></tr>`).join('') || '<tr><td colspan="7" class="text-center text-muted py-4">Belum ada data plat.</td></tr>';
+        const badgeEl = document.getElementById('statsPeriodBadge');
+        if (badgeEl) badgeEl.textContent = { today: 'Hari Ini', '7d': '7 Hari Terakhir', '30d': '30 Hari', all: 'Semua Waktu' }[period] || period;
+        if (applyButton) applyButton.disabled = false;
         return;
     }
 
@@ -1310,19 +1350,24 @@ async function loadEnterpriseStatistics(period = 'today') {
         }
     } catch (e) {
         console.error('Error loadEnterpriseStatistics:', e);
+    } finally {
+        if (applyButton) applyButton.disabled = false;
     }
 }
 window.loadEnterpriseStatistics = loadEnterpriseStatistics;
 
 function exportStatsReport() {
-    const period = window._currentStatsPeriod || 'today';
-    window.location.href = `/api/export/statistics?period=${period}`;
+    const period = window._currentStatsPeriod || document.getElementById('statsPeriod')?.value || 'today';
+    window.location.href = `/api/export/statistics?${analyticsParams('stats', period).toString()}`;
 }
 window.exportStatsReport = exportStatsReport;
 
-function initStatistics() {
-    populateAnalyticsCameraSelect('statsCamera');
-    document.getElementById('statsApply')?.addEventListener('click', () => loadEnterpriseStatistics(document.getElementById('statsPeriod')?.value || 'today'));
+async function initStatistics() {
+    setDateFilterLimits();
+    await populateAnalyticsCameraSelect('statsCamera');
+    document.getElementById('statsApply')?.addEventListener('click', () => {
+        loadEnterpriseStatistics(document.getElementById('statsPeriod')?.value || 'today').catch(err => alert(err.message));
+    });
     const periodGroup = document.getElementById('statsPeriodGroup');
     if (periodGroup) {
         periodGroup.addEventListener('click', e => {
@@ -1331,11 +1376,13 @@ function initStatistics() {
             periodGroup.querySelectorAll('button').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
             const period = btn.dataset.period || 'today';
-            loadEnterpriseStatistics(period);
+            const periodSelect = document.getElementById('statsPeriod');
+            if (periodSelect) periodSelect.value = period;
+            loadEnterpriseStatistics(period).catch(err => console.error('Error loadEnterpriseStatistics:', err));
         });
     }
 
-    loadEnterpriseStatistics('today');
+    await loadEnterpriseStatistics(document.getElementById('statsPeriod')?.value || 'today');
 }
 
 
@@ -1351,20 +1398,25 @@ async function loadSettingsFromDb() {
 
         // 1. Isi form
         const opName = document.getElementById('operatorName');
-        const compName = document.getElementById('companyName');
-        const refInt = document.getElementById('refreshInterval');
-        const sysTitle = document.getElementById('systemTitle');
-        const confPlate = document.getElementById('minConfPlate');
-        const confFace = document.getElementById('minConfFace');
-        const streamUrl = document.getElementById('streamUrl');
-
-        if (opName && settings.operator_name) opName.value = settings.operator_name;
-        if (compName && settings.company_name) compName.value = settings.company_name;
-        if (refInt && settings.refresh_interval) refInt.value = settings.refresh_interval;
-        if (sysTitle && settings.system_title) sysTitle.value = settings.system_title;
-        if (confPlate && settings.min_confidence_plate) confPlate.value = settings.min_confidence_plate;
-        if (confFace && settings.min_confidence_face) confFace.value = settings.min_confidence_face;
-        if (streamUrl && settings.stream_url) streamUrl.value = settings.stream_url;
+        const email = document.getElementById('profileEmail');
+        const phone = document.getElementById('profilePhone');
+        const role = document.getElementById('profileRole');
+        if (opName) opName.value = settings.operator_name || 'Administrator';
+        if (email) email.value = settings.profile_email || '';
+        if (phone) phone.value = settings.profile_phone || '';
+        if (role) role.value = settings.profile_role || 'Operator';
+        const displayName = document.getElementById('profileDisplayName');
+        const displayRole = document.getElementById('profileDisplayRole');
+        const topbarName = document.getElementById('topbarName');
+        const topbarRole = document.getElementById('topbarRole');
+        const avatar = document.getElementById('topbarAvatar');
+        const name = settings.operator_name || 'Administrator';
+        const profileRole = settings.profile_role || 'Operator';
+        if (displayName) displayName.textContent = name;
+        if (displayRole) displayRole.textContent = profileRole;
+        if (topbarName) topbarName.textContent = name;
+        if (topbarRole) topbarRole.textContent = profileRole;
+        if (avatar) avatar.textContent = name.charAt(0).toUpperCase();
 
         // 2. Isi diagnostik sistem
         const diagStatus = document.getElementById('diagDbStatus');
@@ -1428,12 +1480,9 @@ function initSettings() {
 
         const payload = {
             operator_name: document.getElementById('operatorName')?.value,
-            company_name: document.getElementById('companyName')?.value,
-            refresh_interval: document.getElementById('refreshInterval')?.value,
-            system_title: document.getElementById('systemTitle')?.value,
-            min_confidence_plate: document.getElementById('minConfPlate')?.value,
-            min_confidence_face: document.getElementById('minConfFace')?.value,
-            stream_url: document.getElementById('streamUrl')?.value
+            profile_email: document.getElementById('profileEmail')?.value,
+            profile_phone: document.getElementById('profilePhone')?.value,
+            profile_role: document.getElementById('profileRole')?.value
         };
 
         try {
@@ -1539,7 +1588,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (document.getElementById('recapPage')) {
         initRecap();
     }
-    if (document.getElementById('trendChartCanvas')) {
+    if (document.getElementById('statsApply')) {
         initStatistics();
     }
     if (document.getElementById('settingsForm')) {

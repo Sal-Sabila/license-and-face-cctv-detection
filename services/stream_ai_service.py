@@ -1045,6 +1045,72 @@ class StreamAIService:
                 base_light = _lighting_metrics(frame, base_box)
                 ai_frame = _enhance_for_lighting(frame, base_light)
 
+                for vehicle in person_dets:
+
+                    cls_id = vehicle.get(
+                        "cls",
+                        0
+                    )
+
+                    if cls_id not in (
+                        2,
+                        3,
+                        5,
+                        7
+                    ):
+                        continue
+
+                    vx1, vy1, vx2, vy2 = (
+                        vehicle["box"]
+                    )
+
+                    # Cek intersection
+                    intersects = (
+                        vx1 <= bx2
+                        and
+                        vx2 >= bx1
+                        and
+                        vy1 <= by2
+                        and
+                        vy2 >= by1
+                    )
+
+                    if not intersects:
+                        continue
+
+                    p_x1 = max(
+                        0,
+                        int(vx1)
+                    )
+
+                    p_y1 = max(
+                        0,
+                        int(vy1)
+                    )
+
+                    p_x2 = min(
+                        w,
+                        int(vx2)
+                    )
+
+                    p_y2 = min(
+                        h,
+                        int(vy2)
+                    )
+
+                    if (
+                        p_x2 > p_x1
+                        and
+                        p_y2 > p_y1
+                    ):
+
+                        associated_person_crop = (
+                            frame[
+                                p_y1:p_y2,
+                                p_x1:p_x2
+                            ]
+                        )
+
                 # PlateTracker melakukan OCR multi-frame.
                 person_dets = self._detect_vehicles(ai_frame, camera_id)
                 plate_dets = []
