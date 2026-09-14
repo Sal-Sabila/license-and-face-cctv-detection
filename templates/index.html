@@ -54,6 +54,11 @@
                         <i class="bi bi-clock-history"></i>
                         <span>Riwayat Plat</span>
                     </a>
+                    <a class="nav-link {% if page == 'recap' %}active{% endif %}"
+                        href="{{ url_for('recap_page.recap') }}" title="Rekapitulasi">
+                        <i class="bi bi-table"></i>
+                        <span>Rekapitulasi</span>
+                    </a>
                     <a class="nav-link {% if page == 'statistics' %}active{% endif %}"
                         href="{{ url_for('statistics_page.statistics') }}" title="Statistik">
                         <i class="bi bi-bar-chart-line-fill"></i>
@@ -97,28 +102,40 @@
             <section class="row g-3 stats-row">
                 <div class="col-xl-3 col-md-6 col-sm-6 col-12">
                     <div class="stat-card">
-                        <div class="stat-icon blue"><i class="bi bi-person-fill"></i></div>
-                        <div><span>Orang Terdeteksi</span><strong id="totalVehicle">0</strong><small>Data realtime</small></div>
+                        <div class="stat-icon blue"><i class="bi bi-car-front-fill"></i></div>
+                        <div><span>Total Kendaraan</span><strong id="totalVehicle">0</strong><small id="vehicleFlowLabel">Masuk 0 · Keluar 0</small></div>
                     </div>
                 </div>
                 <div class="col-xl-3 col-md-6 col-sm-6 col-12">
                     <div class="stat-card">
                         <div class="stat-icon green"><i class="bi bi-check-circle-fill"></i></div>
-                        <div><span>Plat Berhasil Dibaca</span><strong id="plateRead">0</strong><small>Confidence &gt;= 80%</small></div>
+                        <div><span>Total Plat Terdeteksi</span><strong id="plateRead">0</strong><small>Plat unik: <b id="uniquePlateCount">0</b></small></div>
                     </div>
                 </div>
                 <div class="col-xl-3 col-md-6 col-sm-6 col-12">
                     <div class="stat-card">
                         <div class="stat-icon orange"><i class="bi bi-exclamation-circle-fill"></i></div>
-                        <div><span>Perlu Pemeriksaan</span><strong id="needCheck">0</strong><small>Confidence &lt; 80%</small></div>
+                        <div><span>Total Orang</span><strong id="peopleTotal">0</strong><small id="peopleFlowLabel">Masuk 0 · Keluar 0</small></div>
                     </div>
                 </div>
                 <div class="col-xl-3 col-md-6 col-sm-6 col-12">
                     <div class="stat-card">
                         <div class="stat-icon purple"><i class="bi bi-camera-video-fill"></i></div>
-                        <div><span>CCTV Aktif</span><strong id="cameraStatus">0 / 0</strong><small>Status sistem</small></div>
+                        <div><span>CCTV Aktif</span><strong id="cameraStatus">0 / 0</strong><small>Online dari total CCTV</small></div>
                     </div>
                 </div>
+            </section>
+            <section class="row g-4 mt-1">
+                <div class="col-xl-7">
+                    <div class="panel shadow-sm p-4">
+                        <div class="panel-header p-0 mb-3"><div><h3>Ringkasan Arus</h3><p>Perbandingan kendaraan dan orang berdasarkan arah kamera.</p></div></div>
+                        <div class="row g-3">
+                            <div class="col-md-6"><div class="flow-summary vehicle-flow"><span>Kendaraan</span><strong id="vehicleFlowTotal">0</strong><small id="vehicleFlowDetail">Masuk 0 · Keluar 0</small></div></div>
+                            <div class="col-md-6"><div class="flow-summary people-flow"><span>Orang</span><strong id="peopleFlowTotal">0</strong><small id="peopleFlowDetail">Masuk 0 · Keluar 0</small></div></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-xl-5"><div class="panel shadow-sm p-4 h-100"><div class="panel-header p-0 mb-2"><div><h3>Insight Terkini</h3><p>Berbasis data tersaring hari ini.</p></div></div><ul id="dashboardInsights" class="insight-list mb-0"><li>Memuat insight...</li></ul></div></div>
             </section>
             <section class="row g-4 mt-1">
                 <div class="col-xl-8 col-lg-7">
@@ -354,8 +371,39 @@
                     </div>
                 </div>
             </section>
+            {% elif page == 'recap' %}
+            <div class="analytics-page" id="recapPage">
+                <div class="panel shadow-sm p-3 mb-4 analytics-filters">
+                    <div class="d-flex flex-wrap gap-2 align-items-end">
+                        <div><label class="form-label small">Periode</label><select id="recapPeriod" class="form-select form-select-sm"><option value="today">Hari ini</option><option value="7d">7 hari terakhir</option><option value="30d">30 hari terakhir</option><option value="all">Semua waktu</option></select></div>
+                        <div><label class="form-label small">Tanggal mulai</label><input id="recapStart" type="date" class="form-control form-control-sm"></div>
+                        <div><label class="form-label small">Tanggal akhir</label><input id="recapEnd" type="date" class="form-control form-control-sm"></div>
+                        <div><label class="form-label small">CCTV</label><select id="recapCamera" class="form-select form-select-sm"><option value="">Semua CCTV</option></select></div>
+                        <div><label class="form-label small">Wilayah</label><input id="recapRegion" class="form-control form-control-sm" placeholder="Cari wilayah"></div>
+                        <div><label class="form-label small">Gerbang</label><input id="recapGate" class="form-control form-control-sm" placeholder="Cari gerbang"></div>
+                        <div><label class="form-label small">Arah</label><select id="recapDirection" class="form-select form-select-sm"><option value="">Semua arah</option><option value="entry">Masuk</option><option value="exit">Keluar</option></select></div>
+                        <button id="recapApply" class="btn btn-primary btn-sm"><i class="bi bi-funnel"></i> Terapkan</button>
+                        <button id="recapExport" class="btn btn-outline-success btn-sm"><i class="bi bi-download"></i> CSV</button>
+                    </div>
+                </div>
+                <div class="row g-3 mb-4" id="recapTotals"></div>
+                <div class="panel shadow-sm mb-4"><div class="panel-header"><div><h3>Rekap per CCTV / Gerbang</h3><p>Agregasi berasal dari event deteksi database dan tidak menghitung frame mentah.</p></div></div><div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th>CCTV / Gerbang</th><th>Arah</th><th>Kendaraan</th><th>Orang</th><th>Plat unik</th><th>Status</th></tr></thead><tbody id="recapCameraTable"><tr><td colspan="6" class="text-center text-muted py-4">Memuat data...</td></tr></tbody></table></div></div>
+                <div class="panel shadow-sm"><div class="panel-header"><div><h3>Total per Hari</h3><p>Jumlah kendaraan, plat unik, arah, dan orang pada periode terpilih.</p></div></div><div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th>Tanggal</th><th>Kendaraan</th><th>Plat unik</th><th>Masuk</th><th>Keluar</th><th>Orang</th></tr></thead><tbody id="recapDailyTable"><tr><td colspan="6" class="text-center text-muted py-4">Memuat data...</td></tr></tbody></table></div></div>
+            </div>
             {% elif page == 'statistics' %}
             <div class="statistics-enterprise-container">
+                <div class="panel shadow-sm p-3 mb-4 analytics-filters">
+                    <div class="d-flex flex-wrap gap-2 align-items-end">
+                        <div><label class="form-label small">Periode</label><select id="statsPeriod" class="form-select form-select-sm"><option value="today">Hari ini</option><option value="7d">7 hari terakhir</option><option value="30d">30 hari terakhir</option><option value="all">Semua waktu</option></select></div>
+                        <div><label class="form-label small">Tanggal mulai</label><input id="statsStart" type="date" class="form-control form-control-sm"></div>
+                        <div><label class="form-label small">Tanggal akhir</label><input id="statsEnd" type="date" class="form-control form-control-sm"></div>
+                        <div><label class="form-label small">CCTV</label><select id="statsCamera" class="form-select form-select-sm"><option value="">Semua CCTV</option></select></div>
+                        <div><label class="form-label small">Wilayah</label><input id="statsRegion" class="form-control form-control-sm" placeholder="Cari wilayah"></div>
+                        <div><label class="form-label small">Gerbang</label><input id="statsGate" class="form-control form-control-sm" placeholder="Cari gerbang"></div>
+                        <div><label class="form-label small">Jenis</label><select id="statsObjectType" class="form-select form-select-sm"><option value="">Semua</option><option value="vehicle">Kendaraan</option><option value="person">Orang</option></select></div>
+                        <button id="statsApply" class="btn btn-primary btn-sm"><i class="bi bi-funnel"></i> Terapkan</button>
+                    </div>
+                </div>
                 <!-- Enterprise Toolbar & Period Switcher -->
                 <div class="panel shadow-sm p-3 mb-4 d-flex justify-content-between align-items-center flex-wrap gap-3">
                     <div class="d-flex align-items-center gap-3">

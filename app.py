@@ -5,6 +5,7 @@ from routes.monitoring import monitoring_bp
 from routes.detections import detections_bp
 from routes.history import history_bp
 from routes.statistics import statistics_bp
+from routes.recap import recap_bp
 from routes.settings import settings_bp
 
 
@@ -24,6 +25,7 @@ app.register_blueprint(monitoring_bp)
 app.register_blueprint(detections_bp)
 app.register_blueprint(history_bp)
 app.register_blueprint(statistics_bp)
+app.register_blueprint(recap_bp)
 app.register_blueprint(settings_bp)
 
 

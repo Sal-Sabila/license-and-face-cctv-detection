@@ -39,6 +39,23 @@ body {
     overflow-x: hidden;
 }
 
+.flow-summary {
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--primary);
+    border-radius: 10px;
+    padding: 14px 16px;
+    background: #fff;
+}
+
+.flow-summary.people-flow { border-left-color: var(--warning); }
+.flow-summary span, .flow-summary small { display: block; color: var(--muted); font-size: .75rem; }
+.flow-summary strong { display: block; margin: 4px 0; font-size: 1.65rem; }
+.insight-list { padding-left: 1.1rem; color: var(--muted); font-size: .82rem; }
+.insight-list li { margin-bottom: .65rem; }
+.analytics-filters .form-label { margin-bottom: 4px; color: var(--muted); }
+.analytics-filters .form-select, .analytics-filters .form-control { min-width: 130px; }
+.recap-stat { min-height: 92px; padding: 13px; }
+
 img {
     max-width: 100%;
     display: block;
