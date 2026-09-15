@@ -100,15 +100,125 @@ DEFAULT_NEAR_ZONE = [
     (0.10, 1.00),
 ]
 
-# Per-camera override. Add camera IDs when their perspective differs.
-# Example:
-# CAMERA_ZONE_CONFIG = {
-#     1: {
-#         "mid": [(0.20,0.40), (0.80,0.40), (0.98,1.0), (0.02,1.0)],
-#         "near": [(0.28,0.56), (0.72,0.56), (0.90,1.0), (0.10,1.0)],
-#     }
-# }
-CAMERA_ZONE_CONFIG = {}
+# ============================================================
+# PER-CAMERA DISTANCE ZONES
+# ============================================================
+# IMPORTANT:
+# Coordinates are normalized to the ACTUAL CCTV frame:
+#   x=0.0 left, x=1.0 right
+#   y=0.0 top,  y=1.0 bottom
+#
+# Based on the 4 CCTV views supplied:
+#   1 = GSMasukViewDalam
+#   2 = GSMasukViewLuar
+#   3 = GSKeluarViewLuar
+#   4 = GSKeluarViewDalam
+#
+# MID  : person + vehicle detection/tracking
+# NEAR : plate detection + OCR
+#
+# These are perspective zones, NOT physical meters.
+# The bottom-center of the bbox must be inside the polygon.
+#
+# The zones are intentionally different for each camera because the
+# camera perspective / road position is different.
+CAMERA_ZONE_CONFIG = {
+    # ============================================================
+    # 1. GSMasukViewDalam
+    # ============================================================
+    1: {
+        "name": "GSMasukViewDalam",
+        "mid": [
+            (0.10, 0.38),
+            (0.90, 0.38),
+            (0.99, 1.00),
+            (0.01, 1.00),
+        ],
+        "near": [
+            (0.15, 0.53),
+            (0.85, 0.53),
+            (0.96, 1.00),
+            (0.04, 1.00),
+        ],
+    },
+
+    # ============================================================
+    # 2. GSMasukViewLuar
+    # ============================================================
+    2: {
+        "name": "GSMasukViewLuar",
+        "mid": [
+            (0.10, 0.39),
+            (0.90, 0.39),
+            (0.99, 1.00),
+            (0.01, 1.00),
+        ],
+        "near": [
+            (0.14, 0.54),
+            (0.86, 0.54),
+            (0.96, 1.00),
+            (0.04, 1.00),
+        ],
+    },
+
+    # ============================================================
+    # 3. GSKeluarViewLuar
+    # ============================================================
+    3: {
+        "name": "GSKeluarViewLuar",
+        "mid": [
+            (0.08, 0.37),
+            (0.92, 0.37),
+            (0.99, 1.00),
+            (0.01, 1.00),
+        ],
+        "near": [
+            (0.14, 0.52),
+            (0.86, 0.52),
+            (0.96, 1.00),
+            (0.04, 1.00),
+        ],
+    },
+
+    # ============================================================
+    # 4. GSKeluarViewDalam
+    # ============================================================
+    4: {
+        "name": "GSKeluarViewDalam",
+        "mid": [
+            (0.10, 0.37),
+            (0.92, 0.37),
+            (0.99, 1.00),
+            (0.03, 1.00),
+        ],
+        "near": [
+            (0.15, 0.51),
+            (0.87, 0.51),
+            (0.96, 1.00),
+            (0.04, 1.00),
+        ],
+    },
+
+    # ============================================================
+    # ALIAS BERDASARKAN NAMA STREAM CCTV
+    # ============================================================
+    "GSMasukViewDalam": {
+        "mid": [(0.10, 0.38), (0.90, 0.38), (0.99, 1.00), (0.01, 1.00)],
+        "near": [(0.15, 0.53), (0.85, 0.53), (0.96, 1.00), (0.04, 1.00)],
+    },
+    "GSMasukViewLuar": {
+        "mid": [(0.10, 0.39), (0.90, 0.39), (0.99, 1.00), (0.01, 1.00)],
+        "near": [(0.14, 0.54), (0.86, 0.54), (0.96, 1.00), (0.04, 1.00)],
+    },
+    "GSKeluarViewLuar": {
+        "mid": [(0.08, 0.37), (0.92, 0.37), (0.99, 1.00), (0.01, 1.00)],
+        "near": [(0.14, 0.52), (0.86, 0.52), (0.96, 1.00), (0.04, 1.00)],
+    },
+    "GSKeluarViewDalam": {
+        "mid": [(0.10, 0.37), (0.92, 0.37), (0.99, 1.00), (0.03, 1.00)],
+        "near": [(0.15, 0.51), (0.87, 0.51), (0.96, 1.00), (0.04, 1.00)],
+    },
+}
 
 # Minimum object size after it enters the detection zone.
 # These are NOT meter measurements; they are image-pixel quality gates.
@@ -483,11 +593,37 @@ def _normalized_polygon_to_pixels(points, width, height):
 
 
 def _camera_zone_points(camera_id, zone_name):
-    """Return normalized zone points for a camera."""
+    """Return normalized zone points for a camera.
+
+    Supports both numeric camera IDs and the CCTV stream names shown
+    in the dashboard.
+    """
     config = CAMERA_ZONE_CONFIG.get(camera_id, {})
+
+    # Some callers may pass "1" instead of 1.
+    if not config and isinstance(camera_id, str):
+        stripped = camera_id.strip()
+        try:
+            config = CAMERA_ZONE_CONFIG.get(int(stripped), {})
+        except (TypeError, ValueError):
+            pass
+
     if zone_name == "near":
         return config.get("near", DEFAULT_NEAR_ZONE)
     return config.get("mid", DEFAULT_MID_ZONE)
+
+
+def _camera_zone_name(camera_id):
+    """Return a readable camera name for debug/status output."""
+    config = CAMERA_ZONE_CONFIG.get(camera_id, {})
+
+    if not config and isinstance(camera_id, str):
+        try:
+            config = CAMERA_ZONE_CONFIG.get(int(camera_id.strip()), {})
+        except (TypeError, ValueError):
+            pass
+
+    return config.get("name", str(camera_id))
 
 
 def _point_in_zone(box, zone_points, width, height):
@@ -783,6 +919,7 @@ class StreamAIService:
         status["display_fps"] = DISPLAY_FPS
         status["max_plate_roi"] = MAX_PLATE_ROI
         status["distance_zone_enabled"] = ENABLE_DISTANCE_ZONE
+        status["camera_zone_count"] = len(CAMERA_ZONE_CONFIG)
         status["ocr_min_plate_width"] = OCR_MIN_PLATE_WIDTH
         status["ocr_min_plate_height"] = OCR_MIN_PLATE_HEIGHT
         return status
@@ -1825,6 +1962,20 @@ class StreamAIService:
             [near],
             True,
             (0, 255, 120),
+            2,
+            cv2.LINE_AA,
+        )
+
+        # Camera-specific label makes it immediately visible which
+        # calibration is active on the dashboard.
+        camera_label = f"CAM: {_camera_zone_name(camera_id)}"
+        cv2.putText(
+            frame,
+            camera_label,
+            (10, max(24, int(h * 0.07))),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.52,
+            (255, 255, 255),
             2,
             cv2.LINE_AA,
         )
