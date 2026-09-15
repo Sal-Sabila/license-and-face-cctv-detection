@@ -66,9 +66,61 @@ VEHICLE_CLASSES = [0, 2, 3, 5, 7]
 VEHICLE_CONFIDENCE = 0.35
 VEHICLE_IMGSZ = 416
 
-# Vehicle ROI size thresholds for plate detection (CPU-friendly)
-MIN_VEHICLE_WIDTH = 80
-MIN_VEHICLE_HEIGHT = 50
+# ============================================================
+# DISTANCE / DETECTION ZONES
+# ============================================================
+# The system does not estimate physical meters from a normal CCTV
+# image. Instead it uses perspective zones. The bottom-center of an
+# object's bounding box is used as its ground/contact position.
+#
+# Coordinates are NORMALIZED (0.0 - 1.0), so they work with different
+# CCTV resolutions.
+#
+# MID_ZONE:
+#   Person/vehicle detection + tracking is allowed here.
+#
+# NEAR_ZONE:
+#   Plate detection + OCR is allowed here.
+#
+# IMPORTANT:
+#   Tune these polygons to the actual road/entrance in each camera.
+ENABLE_DISTANCE_ZONE = True
+
+DEFAULT_MID_ZONE = [
+    (0.20, 0.40),
+    (0.80, 0.40),
+    (0.98, 1.00),
+    (0.02, 1.00),
+]
+
+DEFAULT_NEAR_ZONE = [
+    (0.28, 0.56),
+    (0.72, 0.56),
+    (0.90, 1.00),
+    (0.10, 1.00),
+]
+
+# Per-camera override. Add camera IDs when their perspective differs.
+# Example:
+# CAMERA_ZONE_CONFIG = {
+#     1: {
+#         "mid": [(0.20,0.40), (0.80,0.40), (0.98,1.0), (0.02,1.0)],
+#         "near": [(0.28,0.56), (0.72,0.56), (0.90,1.0), (0.10,1.0)],
+#     }
+# }
+CAMERA_ZONE_CONFIG = {}
+
+# Minimum object size after it enters the detection zone.
+# These are NOT meter measurements; they are image-pixel quality gates.
+MIN_PERSON_WIDTH = 30
+MIN_PERSON_HEIGHT = 70
+
+MIN_VEHICLE_WIDTH = 120
+MIN_VEHICLE_HEIGHT = 60
+
+# Extra minimum size specifically for plate processing.
+PLATE_VEHICLE_MIN_WIDTH = 120
+PLATE_VEHICLE_MIN_HEIGHT = 60
 
 # Adaptive AI interval for Intel i7-8665U CPU-only
 BASE_AI_INTERVAL = 0.40
@@ -87,15 +139,22 @@ VEHICLE_TYPES = {
 }
 
 # Plate detector
-PLATE_CONFIDENCE = 0.50
+PLATE_CONFIDENCE = 0.55
 PLATE_IMGSZ = 512
 PLATE_MAX_DET = 3
 PLATE_IOU = 0.45
-PLATE_MIN_WIDTH = 20
-PLATE_MIN_HEIGHT = 7
+PLATE_MIN_WIDTH = 35
+PLATE_MIN_HEIGHT = 10
+
+# OCR only starts when the plate is physically/visually close enough
+# in the image to provide useful character pixels.
+OCR_MIN_PLATE_WIDTH = 45
+OCR_MIN_PLATE_HEIGHT = 12
+OCR_MIN_PLATE_CONFIDENCE = 0.55
 
 # Limits for processing plates per AI cycle
-MAX_PLATE_ROI = 2
+# One near vehicle is preferred on a CPU-only laptop.
+MAX_PLATE_ROI = 1
 
 # Cooldown intervals (seconds) per vehicle/plate track
 PLATE_DETECT_INTERVAL = 0.60
@@ -303,6 +362,7 @@ def _track_to_result(track):
         "votes": votes,
         "total_reads": total_reads,
         "crop": getattr(track, "best_crop", None),
+        "distance_zone": "NEAR",
     }
 
 
@@ -397,6 +457,101 @@ def _enhance_for_lighting(frame, metrics):
 
 def _center(box):
     return (int((box[0]+box[2])/2), int((box[1]+box[3])/2))
+
+
+def _bottom_center(box):
+    """Return the object's ground/contact point for perspective-zone tests."""
+    x1, y1, x2, y2 = [float(v) for v in box]
+    return (
+        int((x1 + x2) / 2.0),
+        int(y2),
+    )
+
+
+def _normalized_polygon_to_pixels(points, width, height):
+    """Convert normalized polygon coordinates to image pixels."""
+    return np.array(
+        [
+            [
+                int(max(0.0, min(1.0, float(x))) * width),
+                int(max(0.0, min(1.0, float(y))) * height),
+            ]
+            for x, y in points
+        ],
+        dtype=np.int32,
+    )
+
+
+def _camera_zone_points(camera_id, zone_name):
+    """Return normalized zone points for a camera."""
+    config = CAMERA_ZONE_CONFIG.get(camera_id, {})
+    if zone_name == "near":
+        return config.get("near", DEFAULT_NEAR_ZONE)
+    return config.get("mid", DEFAULT_MID_ZONE)
+
+
+def _point_in_zone(box, zone_points, width, height):
+    """Test bbox bottom-center against a normalized polygon."""
+    if not ENABLE_DISTANCE_ZONE:
+        return True
+
+    if not zone_points or len(zone_points) < 3:
+        return True
+
+    point = _bottom_center(box)
+    polygon = _normalized_polygon_to_pixels(zone_points, width, height)
+
+    return cv2.pointPolygonTest(
+        polygon.reshape((-1, 1, 2)),
+        (float(point[0]), float(point[1])),
+        False,
+    ) >= 0
+
+
+def _get_distance_zone(box, camera_id, width, height):
+    """Return FAR/MID/NEAR based on the bbox bottom-center."""
+    if not ENABLE_DISTANCE_ZONE:
+        return "DISABLED"
+
+    near = _point_in_zone(
+        box,
+        _camera_zone_points(camera_id, "near"),
+        width,
+        height,
+    )
+    if near:
+        return "NEAR"
+
+    mid = _point_in_zone(
+        box,
+        _camera_zone_points(camera_id, "mid"),
+        width,
+        height,
+    )
+    if mid:
+        return "MID"
+
+    return "FAR"
+
+
+def _plate_ready_for_ocr(plate):
+    """Gate OCR by plate pixel size and detector confidence."""
+    bbox = plate.get("bbox") or plate.get("box") or []
+    if len(bbox) != 4:
+        return False
+
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    width = x2 - x1
+    height = y2 - y1
+    confidence = _safe_float(
+        plate.get("confidence", plate.get("conf", 0.0))
+    )
+
+    return (
+        width >= OCR_MIN_PLATE_WIDTH
+        and height >= OCR_MIN_PLATE_HEIGHT
+        and confidence >= OCR_MIN_PLATE_CONFIDENCE
+    )
 
 
 class AdaptiveAIController:
@@ -613,7 +768,11 @@ class StreamAIService:
         self.ai_thread.start()
 
         print("[AI STREAM] Vehicle classes : person/car/motorcycle/bus/truck")
-        print("[AI STREAM] Plate ROI       : kendaraan")
+        print(
+            f"[AI STREAM] Distance zone  : "
+            f"{'ON' if ENABLE_DISTANCE_ZONE else 'OFF'}"
+        )
+        print("[AI STREAM] Plate ROI       : NEAR zone vehicle")
         print("[AI STREAM] PlateTracker    : multi-frame voting")
         print("[AI STREAM] OCR variants    : original/clahe/sharpen/threshold")
         print("=" * 75)
@@ -623,6 +782,9 @@ class StreamAIService:
         status = self.adaptive_ai.get_status()
         status["display_fps"] = DISPLAY_FPS
         status["max_plate_roi"] = MAX_PLATE_ROI
+        status["distance_zone_enabled"] = ENABLE_DISTANCE_ZONE
+        status["ocr_min_plate_width"] = OCR_MIN_PLATE_WIDTH
+        status["ocr_min_plate_height"] = OCR_MIN_PLATE_HEIGHT
         return status
 
     # ------------------------------------------------------------
@@ -657,96 +819,187 @@ class StreamAIService:
         return state
 
     def _detect_vehicles(self, frame, camera_id=1):
+        """Detect and track only objects inside the configured MID_ZONE.
+
+        Filtering happens BEFORE ByteTrack. This prevents far-away objects
+        from consuming tracker slots and prevents them from reaching the
+        plate/OCR pipeline.
+        """
         detections = []
 
         try:
+            h, w = frame.shape[:2]
+
             result = self.yolo_person(
                 frame,
-                classes=[
-                    0,  # person
-                    2,  # car
-                    3,  # motorcycle
-                    5,  # bus
-                    7   # truck
-                ],
+                classes=VEHICLE_CLASSES,
                 imgsz=VEHICLE_IMGSZ,
                 conf=VEHICLE_CONFIDENCE,
                 verbose=False,
             )[0]
 
             boxes = result.boxes
+
             if boxes is None or len(boxes) == 0:
                 tracked = sv.Detections.empty()
             else:
-                tracked = self._camera_state(camera_id)["person_tracker"].update_with_detections(
-                    sv.Detections.from_ultralytics(result)
-                )
+                keep_indices = []
+
+                for i, box_tensor in enumerate(boxes.xyxy):
+                    bbox = box_tensor.cpu().numpy().astype(int).tolist()
+                    cls_id = int(boxes.cls[i].item())
+                    conf = float(boxes.conf[i].item())
+
+                    x1, y1, x2, y2 = bbox
+                    bw = max(0, x2 - x1)
+                    bh = max(0, y2 - y1)
+
+                    # --------------------------------------------------
+                    # 1. DISTANCE / PERSPECTIVE ZONE
+                    # --------------------------------------------------
+                    zone = _get_distance_zone(
+                        bbox,
+                        camera_id,
+                        w,
+                        h,
+                    )
+
+                    if ENABLE_DISTANCE_ZONE and zone == "FAR":
+                        continue
+
+                    # --------------------------------------------------
+                    # 2. OBJECT SIZE QUALITY GATE
+                    # --------------------------------------------------
+                    if cls_id == 0:
+                        if bw < MIN_PERSON_WIDTH or bh < MIN_PERSON_HEIGHT:
+                            continue
+                    elif cls_id in VEHICLE_TYPES:
+                        if bw < MIN_VEHICLE_WIDTH or bh < MIN_VEHICLE_HEIGHT:
+                            continue
+                    else:
+                        continue
+
+                    keep_indices.append(i)
+
+                if keep_indices:
+                    filtered_result = result[keep_indices]
+                    tracked = self._camera_state(
+                        camera_id
+                    )["person_tracker"].update_with_detections(
+                        sv.Detections.from_ultralytics(filtered_result)
+                    )
+                else:
+                    tracked = sv.Detections.empty()
 
             for i in range(len(tracked)):
                 bbox = tracked.xyxy[i].astype(int).tolist()
+
                 cls_id = (
                     int(tracked.class_id[i])
                     if tracked.class_id is not None
                     else 0
                 )
+
                 conf = (
                     _safe_float(tracked.confidence[i])
                     if tracked.confidence is not None
                     else 0.0
                 )
+
                 track_id = (
                     int(tracked.tracker_id[i])
                     if tracked.tracker_id is not None
                     else -1
                 )
 
+                zone = _get_distance_zone(
+                    bbox,
+                    camera_id,
+                    w,
+                    h,
+                )
+
+                # A track should never re-enter from FAR because the
+                # pre-tracker filter above already blocks FAR objects.
+                if ENABLE_DISTANCE_ZONE and zone == "FAR":
+                    continue
+
                 detections.append({
                     "box": bbox,
                     "track_id": track_id,
                     "conf": conf,
                     "cls": cls_id,
-                    "object_type": "vehicle" if cls_id in VEHICLE_TYPES else "person",
-                    "vehicle_type": VEHICLE_TYPES.get(cls_id, "unknown")
+                    "distance_zone": zone,
+                    "object_type": (
+                        "vehicle"
+                        if cls_id in VEHICLE_TYPES
+                        else "person"
+                    ),
+                    "vehicle_type": VEHICLE_TYPES.get(
+                        cls_id,
+                        "unknown",
+                    ),
                 })
 
         except Exception as exc:
-            print(f"[AI STREAM ERROR] Vehicle detection failed: {exc}")
+            print(
+                f"[AI STREAM ERROR] Vehicle detection failed: {exc}"
+            )
 
         return detections
 
     def _detect_plates_in_vehicles(self, frame, vehicle_dets):
+        """Run plate detection only on NEAR_ZONE vehicles."""
         h, w = frame.shape[:2]
+
         candidates = [
-            d for d in vehicle_dets
+            d
+            for d in vehicle_dets
             if d.get("cls") in (2, 3, 5)
+            and (
+                not ENABLE_DISTANCE_ZONE
+                or d.get("distance_zone") == "NEAR"
+            )
         ]
+
         candidates.sort(
-            key=lambda d: max(1, d["box"][2] - d["box"][0])
-            * max(1, d["box"][3] - d["box"][1]),
+            key=lambda d: (
+                1 if d.get("distance_zone") == "NEAR" else 0,
+                max(1, d["box"][2] - d["box"][0])
+                * max(1, d["box"][3] - d["box"][1]),
+                _safe_float(d.get("conf", 0.0)),
+            ),
             reverse=True,
         )
 
         all_plates = []
 
-        # Process only the top N vehicle ROIs based on size (CPU-friendly)
+        # Only the largest near vehicle(s) get the expensive plate model.
         for vehicle in candidates[:MAX_PLATE_ROI]:
-            vx1, vy1, vx2, vy2 = [int(v) for v in vehicle["box"]]
+            vx1, vy1, vx2, vy2 = [
+                int(v) for v in vehicle["box"]
+            ]
+
             vx1 = max(0, min(vx1, w - 1))
             vy1 = max(0, min(vy1, h - 1))
             vx2 = max(0, min(vx2, w))
             vy2 = max(0, min(vy2, h))
 
-            # Skip vehicles that are too small for reliable plate detection
-            if vx2 - vx1 < MIN_VEHICLE_WIDTH or vy2 - vy1 < MIN_VEHICLE_HEIGHT:
+            vw = vx2 - vx1
+            vh = vy2 - vy1
+
+            # Stronger gate for plate/OCR because distant vehicles
+            # may technically be trackable but do not contain enough
+            # plate pixels.
+            if (
+                vw < PLATE_VEHICLE_MIN_WIDTH
+                or vh < PLATE_VEHICLE_MIN_HEIGHT
+            ):
                 continue
 
             if vx2 <= vx1 or vy2 <= vy1:
                 continue
-            if vx2 - vx1 < 50 or vy2 - vy1 < 40:
-                continue
 
-            vw = vx2 - vx1
-            vh = vy2 - vy1
             pad_x = int(vw * 0.06)
             pad_y = int(vh * 0.10)
 
@@ -756,21 +1009,31 @@ class StreamAIService:
             ry2 = min(h, vy2 + pad_y)
 
             crop = frame[ry1:ry2, rx1:rx2]
+
             if crop.size == 0:
                 continue
 
             try:
-                local_plates = self.plate_detector.detect(crop) or []
+                local_plates = (
+                    self.plate_detector.detect(crop)
+                    or []
+                )
             except Exception as exc:
-                print(f"[AI STREAM ERROR] Plate ROI failed: {exc}")
+                print(
+                    f"[AI STREAM ERROR] Plate ROI failed: {exc}"
+                )
                 continue
 
             for plate in local_plates:
                 lb = plate.get("bbox", [])
+
                 if len(lb) != 4:
                     continue
 
-                bx1, by1, bx2, by2 = [int(v) for v in lb]
+                bx1, by1, bx2, by2 = [
+                    int(v) for v in lb
+                ]
+
                 bx1 += rx1
                 by1 += ry1
                 bx2 += rx1
@@ -784,40 +1047,94 @@ class StreamAIService:
                 if bx2 <= bx1 or by2 <= by1:
                     continue
 
-                plate_crop = frame[by1:by2, bx1:bx2]
+                plate_width = bx2 - bx1
+                plate_height = by2 - by1
+
+                # Reject tiny plate boxes before tracker/OCR.
+                if (
+                    plate_width < PLATE_MIN_WIDTH
+                    or plate_height < PLATE_MIN_HEIGHT
+                ):
+                    continue
+
+                plate_crop = frame[
+                    by1:by2,
+                    bx1:bx2,
+                ]
+
                 if plate_crop.size == 0:
                     continue
 
                 item = dict(plate)
-                item["bbox"] = [bx1, by1, bx2, by2]
+                item["bbox"] = [
+                    bx1,
+                    by1,
+                    bx2,
+                    by2,
+                ]
+                item["box"] = item["bbox"]
                 item["crop"] = plate_crop
-                item["vehicle_cls"] = vehicle.get("cls", 0)
-                item["vehicle_track_id"] = vehicle.get("track_id", -1)
-                item["vehicle_box"] = [vx1, vy1, vx2, vy2]
+                item["vehicle_cls"] = vehicle.get(
+                    "cls",
+                    0,
+                )
+                item["vehicle_track_id"] = vehicle.get(
+                    "track_id",
+                    -1,
+                )
+                item["vehicle_box"] = [
+                    vx1,
+                    vy1,
+                    vx2,
+                    vy2,
+                ]
+                item["distance_zone"] = "NEAR"
+                item["ocr_ready"] = _plate_ready_for_ocr(
+                    item
+                )
+
                 all_plates.append(item)
 
-        # Hilangkan duplikat berdasarkan jarak center.
+        # Remove duplicates by center distance.
         all_plates.sort(
-            key=lambda x: _safe_float(x.get("confidence", x.get("conf", 0.0))),
+            key=lambda x: _safe_float(
+                x.get(
+                    "confidence",
+                    x.get("conf", 0.0),
+                )
+            ),
             reverse=True,
         )
 
         final = []
+
         for candidate in all_plates:
             bx = candidate.get("bbox", [])
+
             if len(bx) != 4:
                 continue
+
             cx = (bx[0] + bx[2]) / 2.0
             cy = (bx[1] + bx[3]) / 2.0
 
             duplicate = False
+
             for existing in final:
                 eb = existing.get("bbox", [])
+
+                if len(eb) != 4:
+                    continue
+
                 ecx = (eb[0] + eb[2]) / 2.0
                 ecy = (eb[1] + eb[3]) / 2.0
-                if ((cx - ecx) ** 2 + (cy - ecy) ** 2) ** 0.5 < 18:
+
+                if (
+                    (cx - ecx) ** 2
+                    + (cy - ecy) ** 2
+                ) ** 0.5 < 18:
                     duplicate = True
                     break
+
             if not duplicate:
                 final.append(candidate)
 
@@ -1091,10 +1408,39 @@ class StreamAIService:
 
     def _select_dynamic_focus(self, frame, vehicle_dets, plate_raw, now):
         h,w=frame.shape[:2]
-        vehicles=[d for d in vehicle_dets if d.get("cls") in (2,3,5,7) and d.get("track_id",-1)>=0]
+        vehicles = [
+            d for d in vehicle_dets
+            if d.get("cls") in (2, 3, 5, 7)
+            and d.get("track_id", -1) >= 0
+        ]
+
+        # Prefer the closest perspective zone first, then object size.
+        if ENABLE_DISTANCE_ZONE:
+            near_vehicles = [
+                d for d in vehicles
+                if d.get("distance_zone") == "NEAR"
+            ]
+            if near_vehicles:
+                vehicles = near_vehicles
+
         target_type = "VEHICLE"
+
         if not vehicles:
-            vehicles=[d for d in vehicle_dets if d.get("cls") == 0 and d.get("track_id",-1)>=0]
+            people = [
+                d for d in vehicle_dets
+                if d.get("cls") == 0
+                and d.get("track_id", -1) >= 0
+            ]
+
+            if ENABLE_DISTANCE_ZONE:
+                near_people = [
+                    d for d in people
+                    if d.get("distance_zone") == "NEAR"
+                ]
+                vehicles = near_people or people
+            else:
+                vehicles = people
+
             target_type = "PERSON"
         by_id={int(d["track_id"]):d for d in vehicles}
         target=by_id.get(self.focus_track_id) if self.focus_track_id is not None else None
@@ -1214,8 +1560,15 @@ class StreamAIService:
 
                 if self.plate_ocr is not None:
                     try:
+                        # OCR/PlateTracker receives only plates that
+                        # have enough pixels to read reliably.
+                        ocr_candidates = [
+                            p for p in plate_raw
+                            if p.get("ocr_ready", False)
+                        ]
+
                         active_tracks = plate_tracker.update(
-                            plate_raw,
+                            ocr_candidates,
                             ai_frame,
                             self.plate_ocr,
                         ) or []
@@ -1263,6 +1616,13 @@ class StreamAIService:
                             "valid": False,
                             "votes": 0,
                             "total_reads": 0,
+                            "distance_zone": item.get(
+                                "distance_zone",
+                                "NEAR",
+                            ),
+                            "ocr_ready": bool(
+                                item.get("ocr_ready", False)
+                            ),
                         })
 
             except Exception as exc:
@@ -1386,6 +1746,9 @@ class StreamAIService:
 
         # Display uses the latest completed AI result. It never waits for AI.
         output = frame.copy()
+
+        # Draw the perspective distance zones first, then detections.
+        self._draw_detection_zones(output, camera_id)
         self._draw_clean_bboxes(output, camera_state["last_results"])
         self._draw_dynamic_focus(output)
 
@@ -1413,6 +1776,87 @@ class StreamAIService:
     # DRAW
     # ------------------------------------------------------------
 
+    def _draw_detection_zones(self, frame, camera_id):
+        """Draw MID and NEAR perspective zones on the CCTV preview."""
+        if not ENABLE_DISTANCE_ZONE:
+            return
+
+        h, w = frame.shape[:2]
+
+        mid = _normalized_polygon_to_pixels(
+            _camera_zone_points(camera_id, "mid"),
+            w,
+            h,
+        )
+
+        near = _normalized_polygon_to_pixels(
+            _camera_zone_points(camera_id, "near"),
+            w,
+            h,
+        )
+
+        # Use translucent overlays without changing the original frame
+        # permanently.
+        overlay = frame.copy()
+
+        cv2.fillPoly(overlay, [mid], (80, 80, 80))
+        cv2.fillPoly(overlay, [near], (120, 120, 120))
+
+        cv2.addWeighted(
+            overlay,
+            0.10,
+            frame,
+            0.90,
+            0,
+            frame,
+        )
+
+        cv2.polylines(
+            frame,
+            [mid],
+            True,
+            (255, 180, 0),
+            2,
+            cv2.LINE_AA,
+        )
+
+        cv2.polylines(
+            frame,
+            [near],
+            True,
+            (0, 255, 120),
+            2,
+            cv2.LINE_AA,
+        )
+
+        # Labels
+        if len(mid) > 0:
+            mx, my = mid[0]
+            cv2.putText(
+                frame,
+                "MID: PERSON + VEHICLE",
+                (max(5, mx), max(22, my - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.50,
+                (255, 180, 0),
+                2,
+                cv2.LINE_AA,
+            )
+
+        if len(near) > 0:
+            nx, ny = near[0]
+            cv2.putText(
+                frame,
+                "NEAR: PLATE + OCR",
+                (max(5, nx), max(22, ny - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.50,
+                (0, 255, 120),
+                2,
+                cv2.LINE_AA,
+            )
+
+
     def _draw_clean_bboxes(self, frame, results):
         for obj in results.get("persons", []):
             x1, y1, x2, y2 = [int(v) for v in obj["box"]]
@@ -1420,20 +1864,26 @@ class StreamAIService:
             conf = _safe_float(obj.get("conf", 0.0))
             track_id = int(obj.get("track_id", -1))
 
+            zone = obj.get("distance_zone", "")
+            zone_label = f" {zone}" if zone else ""
+
             if cls_id == 0:
-                label = f"Orang ID:{track_id} {conf:.0%}"
+                label = f"Orang ID:{track_id} {conf:.0%}{zone_label}"
                 color = (0, 165, 255)
             elif cls_id == 2:
-                label = f"Mobil ID:{track_id} {conf:.0%}"
+                label = f"Mobil ID:{track_id} {conf:.0%}{zone_label}"
                 color = (0, 200, 255)
             elif cls_id == 3:
-                label = f"Motor ID:{track_id} {conf:.0%}"
+                label = f"Motor ID:{track_id} {conf:.0%}{zone_label}"
                 color = (0, 200, 255)
             elif cls_id == 5:
-                label = f"Bus ID:{track_id} {conf:.0%}"
+                label = f"Bus ID:{track_id} {conf:.0%}{zone_label}"
+                color = (0, 200, 255)
+            elif cls_id == 7:
+                label = f"Truk ID:{track_id} {conf:.0%}{zone_label}"
                 color = (0, 200, 255)
             else:
-                label = f"Objek {conf:.0%}"
+                label = f"Objek {conf:.0%}{zone_label}"
                 color = (0, 200, 255)
 
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
@@ -1475,7 +1925,14 @@ class StreamAIService:
                 label = f"Review {text} {ocr_conf:.0%}"
                 color = (0, 215, 255)
             else:
-                label = f"Plat YOLO:{p_conf:.0%}"
+                ocr_ready = bool(
+                    plate.get("ocr_ready", False)
+                )
+                readiness = " OCR-READY" if ocr_ready else " TERLALU KECIL"
+                label = (
+                    f"Plat YOLO:{p_conf:.0%}"
+                    f"{readiness}"
+                )
                 color = (0, 215, 255)
 
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
