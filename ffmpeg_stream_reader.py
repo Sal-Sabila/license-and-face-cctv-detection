@@ -3,13 +3,22 @@ import re
 import sys
 import shutil
 import subprocess
+import threading
+import time
 import numpy as np
 
 
 def find_ffmpeg_executable(custom_path="ffmpeg"):
-    """Mencari lokasi executable ffmpeg di PATH atau direktori Python."""
-    if custom_path and custom_path != "ffmpeg" and os.path.exists(custom_path):
-        return custom_path
+    """
+    Mencari executable FFmpeg:
+    1. custom_path jika valid
+    2. PATH Windows
+    3. folder Scripts Python/venv
+    4. beberapa lokasi umum
+    """
+    if custom_path and custom_path != "ffmpeg":
+        if os.path.isfile(custom_path):
+            return custom_path
 
     which_path = shutil.which("ffmpeg")
     if which_path:
@@ -21,235 +30,419 @@ def find_ffmpeg_executable(custom_path="ffmpeg"):
         r"C:\Users\LENOVO\AppData\Local\Programs\Python\Python312\Scripts\ffmpeg.exe",
         r"D:\Bimaa\Magang\CCTV\venv\Scripts\ffmpeg.exe",
     ]
-    for c in candidates:
-        if os.path.exists(c):
-            return c
+
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
 
     return "ffmpeg"
 
 
 def normalize_stream_url(url):
     """
-    Normalisasi URL stream CCTV:
-    1. Memperbaiki typo seperti 'GSMasukViewLuarstream' -> 'GSMasukViewLuar.stream'
-    2. Jika URL adalah RTMP dari Wowza server (103.255.15.138:1935),
-       karena Wowza mengirimkan stream HEVC (H.265) lewat RTMP FLV tag 0x0c
-       yang tidak didukung demuxer FLV bawaan FFmpeg (error: Video codec (c) is not implemented),
-       secara otomatis alihkan ke stream HLS (m3u8) resmi dari Wowza di port yang sama (1935).
-       Stream HLS ini 100% didukung FFmpeg untuk decoding H.265 secara native tanpa drop frame.
+    Normalisasi URL stream CCTV.
+
+    Catatan penting:
+    Fungsi ini HARUS mengembalikan URL asli, bukan Markdown link.
     """
     if not isinstance(url, str):
         return url
 
     url = url.strip()
 
-    if "103.255.15.138:1935" in url:
-        m = re.search(r'/live/([^/?#]+)', url)
-        if m:
-            stream_name = m.group(1).replace('/playlist.m3u8', '')
-            if stream_name.endswith('stream') and not stream_name.endswith('.stream'):
-                stream_name = stream_name[:-6] + '.stream'
-            elif not stream_name.endswith('.stream'):
-                stream_name = stream_name + '.stream'
-            return f"http://103.255.15.138:1935/live/{stream_name}/playlist.m3u8"
-
-    if url.startswith("rtmp://") and url.endswith("stream") and not url.endswith(".stream"):
+    # Perbaiki typo nama stream:
+    # GSMasukViewLuarstream -> GSMasukViewLuar.stream
+    if url.startswith("rtmp://") and url.endswith("stream"):
         url = url[:-6] + ".stream"
+
+    # Jika menggunakan Wowza RTMP dan stream name belum berekstensi .stream,
+    # tambahkan .stream.
+    if "103.255.15.138:1935" in url:
+        match = re.search(r"/live/([^/?#]+)", url)
+
+        if match:
+            stream_name = match.group(1)
+
+            # Bersihkan kemungkinan suffix playlist.
+            stream_name = stream_name.replace("/playlist.m3u8", "")
+
+            if stream_name.endswith("stream") and not stream_name.endswith(".stream"):
+                stream_name = stream_name[:-6] + ".stream"
+            elif not stream_name.endswith(".stream"):
+                stream_name += ".stream"
+
+            # PENTING:
+            # Return string URL biasa, BUKAN:
+            # [http://...](http://...)
+            return (
+                f"http://103.255.15.138:1935/"
+                f"live/{stream_name}/playlist.m3u8"
+            )
 
     return url
 
 
 class FFmpegStreamReader:
     """
-    Pengganti cv2.VideoCapture() khusus untuk stream yang codec-nya
-    TIDAK didukung oleh FFmpeg bawaan opencv-python (misal H.265/HEVC).
+    Reader FFmpeg -> raw BGR frame untuk OpenCV.
+
+    Tujuan:
+    - Tidak menggunakan cv2.VideoCapture.
+    - Cocok untuk RTMP / RTSP / HLS.
+    - Menangani stream CCTV yang timestamp-nya tidak monoton.
+    - Tidak membiarkan stderr FFmpeg memenuhi pipe.
+    - Bisa reconnect ketika FFmpeg benar-benar berhenti.
+    - Interface tetap kompatibel dengan:
+          ret, frame = cap.read()
+          cap.isOpened()
+          cap.release()
+          cap.get(...)
     """
 
-    def __init__(self, rtmp_url, width, height, ffmpeg_path="ffmpeg"):
-        """
-        rtmp_url    : URL stream RTMP / RTSP / HLS
-        width       : lebar frame target
-        height      : tinggi frame target
-        ffmpeg_path : path ke ffmpeg.exe, default auto-detect
-        """
+    def __init__(
+        self,
+        rtmp_url,
+        width=1280,
+        height=720,
+        ffmpeg_path="ffmpeg",
+        max_reconnect=3,
+        reconnect_delay=1.5,
+    ):
+        self.width = int(width)
+        self.height = int(height)
+        self.original_url = str(rtmp_url).strip()
+        self.rtmp_url = normalize_stream_url(self.original_url)
 
-        self.width = width
-        self.height = height
-        self.rtmp_url = rtmp_url
-        self.ffmpeg_path = ffmpeg_path
+        self.ffmpeg_path = find_ffmpeg_executable(ffmpeg_path)
+
+        self.max_reconnect = max(1, int(max_reconnect))
+        self.reconnect_delay = max(0.2, float(reconnect_delay))
+
         self.error_message = None
+        self.last_error = None
+        self.last_stderr = ""
+        self._stderr_lines = []
+        self._stderr_lock = threading.Lock()
+        self._stderr_thread = None
 
+        self.process = None
+        self._released = False
+        self._starting = False
 
-        # Ukuran 1 frame mentah dalam bytes:
-        # width * height * 3 channel warna (BGR), 1 byte per channel
-        self.frame_size_bytes = width * height * 3
+        self.frame_size_bytes = self.width * self.height * 3
 
-        url_str = str(self.rtmp_url).strip()
-        perintah = [
+        self._start_process()
+
+    # ------------------------------------------------------------------
+    # FFmpeg PROCESS
+    # ------------------------------------------------------------------
+
+    def _build_command(self):
+        url = self.rtmp_url
+
+        command = [
             self.ffmpeg_path,
-            "-loglevel", "error",   # supaya stdout FFmpeg bersih
+            "-hide_banner",
+            "-loglevel", "warning",
+
+            # Generate/fix missing timestamps when possible.
+            "-fflags", "+genpts",
+
+            # Jangan menunggu input terlalu lama.
+            "-rw_timeout", "15000000",
         ]
 
-        if url_str.startswith("rtsp://"):
-            perintah.extend([
+        if url.lower().startswith("rtsp://"):
+            command.extend([
                 "-rtsp_transport", "tcp",
-                "-stimeout", "15000000",
             ])
-        elif url_str.startswith("rtmp://"):
-            perintah.extend([
+
+        elif url.lower().startswith("rtmp://"):
+            command.extend([
                 "-rtmp_live", "live",
-                "-rw_timeout", "15000000",
             ])
-        elif url_str.startswith("http://") or url_str.startswith("https://"):
-            perintah.extend([
+
+        elif url.lower().startswith(("http://", "https://")):
+            command.extend([
                 "-reconnect", "1",
                 "-reconnect_at_eof", "1",
                 "-reconnect_streamed", "1",
                 "-reconnect_delay_max", "2",
-                "-rw_timeout", "15000000",
             ])
 
-        perintah.extend([
-            "-i", self.rtmp_url,
+        command.extend([
+            "-i", url,
 
-            "-an",                  # tidak perlu audio, buang saja
+            # CCTV kita hanya membutuhkan video.
+            "-an",
 
-            # PENTING: paksa ukuran output PERSIS width x height yang kita minta
-            "-vf", f"scale={width}:{height}",
+            # Output konsisten untuk OpenCV.
+            "-vf", f"scale={self.width}:{self.height}",
 
-            "-f", "rawvideo",       # output format: piksel mentah
-            "-pix_fmt", "bgr24",    # urutan warna sama seperti OpenCV
-            "-",                    # tulis hasil ke stdout
+            # Raw BGR langsung ke stdout.
+            "-f", "rawvideo",
+            "-pix_fmt", "bgr24",
+
+            # Jangan melakukan frame duplication/drop di output.
+            "-fps_mode", "passthrough",
+
+            "pipe:1",
         ])
 
+        return command
+
+    def _start_process(self):
+        if self._released:
+            return False
+
+        if self.process is not None:
+            return self.isOpened()
+
+        if self._starting:
+            return False
+
+        self._starting = True
+
         try:
+            command = self._build_command()
+
+            print(
+                "[FFMPEG] Starting:",
+                " ".join(command[:-2]),
+                "..."
+            )
+
+            # PENTING:
+            # stderr tetap PIPE tetapi selalu dibaca thread background.
+            # Jika stderr tidak dibaca, warning DTS yang sangat banyak
+            # dapat memenuhi OS pipe buffer dan membuat FFmpeg berhenti
+            # mengirim frame ke stdout.
             self.process = subprocess.Popen(
-                perintah,
+                command,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                bufsize=0,
             )
-        except Exception as e:
-            print(f"[FFMPEG ERROR] Gagal menjalankan proses FFmpeg: {e}")
+
+            self.error_message = None
+
+            self._stderr_lines = []
+
+            self._stderr_thread = threading.Thread(
+                target=self._drain_stderr,
+                daemon=True,
+                name="ffmpeg-stderr",
+            )
+            self._stderr_thread.start()
+
+            time.sleep(0.15)
+
+            if self.process.poll() is not None:
+                self._capture_error()
+                return False
+
+            return True
+
+        except Exception as exc:
+            self.error_message = str(exc)
+            self.last_error = str(exc)
             self.process = None
 
+            print(f"[FFMPEG ERROR] Gagal menjalankan FFmpeg: {exc}")
+            return False
+
+        finally:
+            self._starting = False
+
+    def _drain_stderr(self):
+        """
+        Baca stderr FFmpeg terus-menerus di thread terpisah.
+
+        Ini sangat penting untuk kasus CCTV Anda karena FFmpeg menghasilkan
+        banyak warning:
+            non monotonically increasing dts
+
+        Warning tersebut tidak boleh memenuhi stderr pipe.
+        """
+        process = self.process
+
+        if process is None or process.stderr is None:
+            return
+
+        try:
+            while True:
+                line = process.stderr.readline()
+
+                if not line:
+                    break
+
+                text = line.decode("utf-8", errors="replace").strip()
+
+                if not text:
+                    continue
+
+                with self._stderr_lock:
+                    self._stderr_lines.append(text)
+
+                    # Simpan hanya beberapa baris terakhir agar RAM stabil.
+                    if len(self._stderr_lines) > 40:
+                        self._stderr_lines = self._stderr_lines[-40:]
+
+        except (OSError, ValueError):
+            pass
+
+    def _capture_error(self):
+        """
+        Ambil error/warning terakhir dari buffer stderr.
+        """
+        with self._stderr_lock:
+            if self._stderr_lines:
+                self.last_stderr = "\n".join(self._stderr_lines[-15:])
+                self.error_message = self.last_stderr[-1500:]
+                self.last_error = self.error_message
+
+    # ------------------------------------------------------------------
+    # FRAME READER
+    # ------------------------------------------------------------------
+
+    def _read_exact(self, size):
+        """
+        Membaca tepat 'size' bytes.
+
+        stdout.read(size) tidak selalu menjamin seluruh frame tersedia
+        dalam satu read. Karena itu kita loop sampai ukuran frame lengkap.
+        """
+        if self.process is None or self.process.stdout is None:
+            return None
+
+        buffer = bytearray()
+
+        while len(buffer) < size:
+            process = self.process
+
+            if process is None:
+                return None
+
+            if process.poll() is not None:
+                self._capture_error()
+                return None
+
+            remaining = size - len(buffer)
+
+            try:
+                chunk = process.stdout.read(remaining)
+            except (OSError, ValueError) as exc:
+                self.error_message = str(exc)
+                self.last_error = str(exc)
+                return None
+
+            if not chunk:
+                self._capture_error()
+                return None
+
+            buffer.extend(chunk)
+
+        return bytes(buffer)
+
+    def read(self):
+        """
+        Return:
+            (True, frame)
+        atau:
+            (False, None)
+
+        Jika FFmpeg mati, reader mencoba reconnect beberapa kali.
+        """
+        if self._released:
+            return False, None
+
+        for attempt in range(self.max_reconnect + 1):
+            if self.process is None:
+                if not self._start_process():
+                    if attempt >= self.max_reconnect:
+                        return False, None
+
+                    time.sleep(self.reconnect_delay)
+                    continue
+
+            raw_bytes = self._read_exact(self.frame_size_bytes)
+
+            if raw_bytes is not None:
+                try:
+                    frame = np.frombuffer(
+                        raw_bytes,
+                        dtype=np.uint8,
+                    ).reshape(
+                        (self.height, self.width, 3)
+                    ).copy()
+
+                    return True, frame
+
+                except Exception as exc:
+                    self.error_message = f"Frame decode error: {exc}"
+                    self.last_error = self.error_message
+                    return False, None
+
+            # FFmpeg benar-benar berhenti / stdout EOF.
+            self._capture_error()
+
+            if attempt >= self.max_reconnect:
+                return False, None
+
+            print(
+                f"[FFMPEG] Stream berhenti. "
+                f"Reconnect {attempt + 1}/{self.max_reconnect}..."
+            )
+
+            self._restart_process()
+            time.sleep(self.reconnect_delay)
+
+        return False, None
+
+    # ------------------------------------------------------------------
+    # RECONNECT
+    # ------------------------------------------------------------------
+
+    def _restart_process(self):
+        self._terminate_process()
+        self.process = None
+
+        if not self._released:
+            self._start_process()
+
     def reconnect(self):
-        """Restart FFmpeg after a remote stream EOF or network timeout."""
-        self.release()
-        self.__init__(
-            self.rtmp_url,
-            self.width,
-            self.height,
-            self.ffmpeg_path,
-        )
+        """
+        Public method agar kode lama yang memanggil:
+            cap.reconnect()
+        tetap kompatibel.
+        """
+        if self._released:
+            return False
+
+        print("[FFMPEG] Manual reconnect...")
+
+        self._restart_process()
+
+        return self.isOpened()
+
+    # ------------------------------------------------------------------
+    # OPENCV-COMPATIBLE METHODS
+    # ------------------------------------------------------------------
 
     def isOpened(self):
         """
-        Mengecek apakah proses FFmpeg masih hidup.
-        Meniru method isOpened() milik cv2.VideoCapture.
+        Meniru cv2.VideoCapture.isOpened().
         """
-
         if self.process is None:
             return False
 
         return self.process.poll() is None
 
-    def _baca_bytes_lengkap(self, jumlah_bytes):
-        """
-        stdout.read(n) TIDAK menjamin dapat tepat n bytes sekali
-        panggil -- ini disebut "short read", bisa terjadi kalau
-        data dari FFmpeg belum semuanya sampai di pipe saat itu.
-
-        Kalau ini tidak diantisipasi, byte-byte dari 1 frame akan
-        tercampur/kegeser dengan frame berikutnya, menyebabkan
-        gambar jadi noise/pecah (persis seperti yang terjadi).
-
-        Makanya di sini kita loop terus membaca SAMPAI benar-benar
-        terkumpul tepat sejumlah `jumlah_bytes`, baru berhenti.
-        """
-
-        potongan_data = bytearray()
-
-        while len(potongan_data) < jumlah_bytes:
-
-            if self.process is None or self.process.poll() is not None:
-                self._capture_error()
-                return None
-
-            sisa_bytes = jumlah_bytes - len(potongan_data)
-
-            chunk = self.process.stdout.read(sisa_bytes)
-
-            if not chunk:
-
-                # FFmpeg berhenti mengirim data -> stream putus
-                self._capture_error()
-                return None
-
-            potongan_data.extend(chunk)
-
-        return bytes(potongan_data)
-
-    def _capture_error(self):
-        """Menyimpan pesan FFmpeg terakhir untuk diagnosis operator."""
-        if self.process is None or self.process.stderr is None:
-            return
-        try:
-            error = self.process.stderr.read().decode("utf-8", errors="replace").strip()
-            if error:
-                self.error_message = error[-500:]
-        except (OSError, ValueError):
-            pass
-
-    def read(self):
-        """
-        Membaca 1 frame dari stdout FFmpeg.
-        Meniru method read() milik cv2.VideoCapture, yaitu
-        return (ret, frame) supaya bisa langsung dipakai
-        tanpa ubah kode yang sudah ada.
-        """
-
-        raw_bytes = self._baca_bytes_lengkap(self.frame_size_bytes)
-
-        if raw_bytes is None:
-
-            # Data tidak lengkap -> stream putus / proses berhenti
-            return False, None
-
-        # .copy() penting di sini: np.frombuffer() menghasilkan array
-        # READ-ONLY (cuma "menumpang" di memory buffer asli, tidak
-        # punya memory sendiri). Fungsi seperti cv2.putText() atau
-        # cv2.rectangle() butuh menulis LANGSUNG ke frame, jadi kalau
-        # tidak di-copy dulu, akan muncul error "readonly array".
-        frame = np.frombuffer(raw_bytes, dtype=np.uint8).copy()
-
-        frame = frame.reshape((self.height, self.width, 3))
-
-        return True, frame
-
-    def release(self):
-        """
-        Menghentikan proses FFmpeg.
-        Meniru method release() milik cv2.VideoCapture.
-        """
-
-        if self.process is not None:
-
-            self.process.terminate()
-
-            try:
-                self.process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-
-            self.process = None
-
     def get(self, prop_id):
         """
-        Method dummy supaya kode lama yang manggil
-        cap.get(cv2.CAP_PROP_FRAME_WIDTH) dll tidak error.
-        Cuma return nilai yang sudah kita ketahui dari ffprobe.
+        Mendukung property OpenCV yang umum digunakan.
         """
-
         import cv2
 
         if prop_id == cv2.CAP_PROP_FRAME_WIDTH:
@@ -258,4 +451,48 @@ class FFmpegStreamReader:
         if prop_id == cv2.CAP_PROP_FRAME_HEIGHT:
             return self.height
 
-        return 0
+        if prop_id == cv2.CAP_PROP_FPS:
+            return 25.0
+
+        return 0.0
+
+    # ------------------------------------------------------------------
+    # RELEASE / CLEANUP
+    # ------------------------------------------------------------------
+
+    def _terminate_process(self):
+        process = self.process
+
+        if process is None:
+            return
+
+        try:
+            if process.poll() is None:
+                process.terminate()
+
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=1)
+
+        except (OSError, ValueError):
+            pass
+
+        finally:
+            self.process = None
+
+    def release(self):
+        """
+        Menghentikan FFmpeg dan membersihkan resource.
+        """
+        self._released = True
+        self._terminate_process()
+
+        self._stderr_thread = None
+
+    def __del__(self):
+        try:
+            self.release()
+        except Exception:
+            pass
