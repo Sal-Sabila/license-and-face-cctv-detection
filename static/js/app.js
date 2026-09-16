@@ -23,9 +23,196 @@ async function json(url, options = {}) {
 // MODAL GLOBAL: PRATINJAU GAMBAR & DETAIL DETEKSI
 // ============================================================
 
+<<<<<<< Updated upstream
 function openImageModal(imgSrc, title = 'Detail Foto Tangkapan CCTV', meta = '', details = '') {
+=======
+let previewZoom = 1.0;
+let previewPanX = 0;
+let previewPanY = 0;
+let isPreviewDragging = false;
+let previewDragStartX = 0;
+let previewDragStartY = 0;
+let isZoomInitialized = false;
+
+function applyPreviewTransform(smooth = true) {
+    const srcEl = document.getElementById('imagePreviewSrc');
+    const containerEl = document.getElementById('imagePreviewContainer') || document.querySelector('#imagePreviewModal .preview-img-container');
+
+    if (!srcEl) return;
+
+    srcEl.style.transition = smooth ? 'transform 0.12s ease-out' : 'none';
+    srcEl.style.transformOrigin = 'center center';
+    srcEl.style.transform = `translate(${previewPanX}px, ${previewPanY}px) scale(${previewZoom})`;
+
+    if (containerEl) {
+        if (previewZoom > 1.0) {
+            containerEl.style.cursor = isPreviewDragging ? 'grabbing' : 'grab';
+        } else {
+            containerEl.style.cursor = 'zoom-in';
+        }
+    }
+}
+
+function resetPreviewZoom() {
+    previewZoom = 1.0;
+    previewPanX = 0;
+    previewPanY = 0;
+    isPreviewDragging = false;
+    applyPreviewTransform(true);
+}
+
+function zoomPreview(delta, centerX = null, centerY = null) {
+    const oldZoom = previewZoom;
+    let newZoom = previewZoom + delta;
+    newZoom = Math.max(1.0, Math.min(6.0, Math.round(newZoom * 100) / 100));
+
+    if (newZoom === oldZoom) return;
+
+    if (newZoom === 1.0) {
+        previewPanX = 0;
+        previewPanY = 0;
+    } else if (centerX !== null && centerY !== null) {
+        const container = document.getElementById('imagePreviewContainer') || document.querySelector('#imagePreviewModal .preview-img-container');
+        if (container) {
+            const rect = container.getBoundingClientRect();
+            const relX = centerX - rect.left - rect.width / 2;
+            const relY = centerY - rect.top - rect.height / 2;
+            const ratio = newZoom / oldZoom;
+            previewPanX = relX - (relX - previewPanX) * ratio;
+            previewPanY = relY - (relY - previewPanY) * ratio;
+
+            const maxPanX = Math.max(0, (rect.width * (newZoom - 1)) / 2 + 80);
+            const maxPanY = Math.max(0, (rect.height * (newZoom - 1)) / 2 + 80);
+            previewPanX = Math.max(-maxPanX, Math.min(maxPanX, previewPanX));
+            previewPanY = Math.max(-maxPanY, Math.min(maxPanY, previewPanY));
+        }
+    }
+
+    previewZoom = newZoom;
+    applyPreviewTransform(true);
+}
+
+function initImagePreviewZoom() {
+    if (isZoomInitialized) return;
+    isZoomInitialized = true;
+
+    const container = document.getElementById('imagePreviewContainer') || document.querySelector('#imagePreviewModal .preview-img-container');
+    const modalEl = document.getElementById('imagePreviewModal');
+
+    if (modalEl) {
+        modalEl.addEventListener('hidden.bs.modal', resetPreviewZoom);
+    }
+
+    if (container) {
+        // Mouse Wheel Zoom di area abu-abu/hitam capture
+        container.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const delta = e.deltaY < 0 ? 0.25 : -0.25;
+            zoomPreview(delta, e.clientX, e.clientY);
+        }, { passive: false });
+
+        // Klik & Drag untuk geser (pan) saat foto di-zoom
+        container.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return; // Hanya klik kiri
+            if (previewZoom <= 1.0) {
+                zoomPreview(1.0, e.clientX, e.clientY);
+                return;
+            }
+            isPreviewDragging = true;
+            previewDragStartX = e.clientX - previewPanX;
+            previewDragStartY = e.clientY - previewPanY;
+            container.style.cursor = 'grabbing';
+            applyPreviewTransform(false);
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (!isPreviewDragging) return;
+            const containerEl = document.getElementById('imagePreviewContainer') || document.querySelector('#imagePreviewModal .preview-img-container');
+            const rect = containerEl ? containerEl.getBoundingClientRect() : { width: 600, height: 400 };
+            const maxPanX = Math.max(0, (rect.width * (previewZoom - 1)) / 2 + 80);
+            const maxPanY = Math.max(0, (rect.height * (previewZoom - 1)) / 2 + 80);
+
+            let nextPanX = e.clientX - previewDragStartX;
+            let nextPanY = e.clientY - previewDragStartY;
+            previewPanX = Math.max(-maxPanX, Math.min(maxPanX, nextPanX));
+            previewPanY = Math.max(-maxPanY, Math.min(maxPanY, nextPanY));
+
+            applyPreviewTransform(false);
+        });
+
+        window.addEventListener('mouseup', () => {
+            if (isPreviewDragging) {
+                isPreviewDragging = false;
+                if (container) {
+                    container.style.cursor = previewZoom > 1.0 ? 'grab' : 'zoom-in';
+                }
+                applyPreviewTransform(true);
+            }
+        });
+
+        // Dobel klik untuk toggle zoom (1.0x <-> 2.5x)
+        container.addEventListener('dblclick', (e) => {
+            e.preventDefault();
+            if (previewZoom > 1.0) {
+                resetPreviewZoom();
+            } else {
+                zoomPreview(1.5, e.clientX, e.clientY);
+            }
+        });
+
+        // Touch support (Mobile / Tablet)
+        let touchStartDist = 0;
+        let touchStartZoom = 1.0;
+        let touchStartX = 0;
+        let touchStartY = 0;
+
+        container.addEventListener('touchstart', (e) => {
+            if (e.touches.length === 1) {
+                isPreviewDragging = true;
+                touchStartX = e.touches[0].clientX - previewPanX;
+                touchStartY = e.touches[0].clientY - previewPanY;
+                applyPreviewTransform(false);
+            } else if (e.touches.length === 2) {
+                isPreviewDragging = false;
+                touchStartDist = Math.hypot(
+                    e.touches[0].clientX - e.touches[1].clientX,
+                    e.touches[0].clientY - e.touches[1].clientY
+                );
+                touchStartZoom = previewZoom;
+            }
+        }, { passive: true });
+
+        container.addEventListener('touchmove', (e) => {
+            if (e.touches.length === 1 && isPreviewDragging && previewZoom > 1.0) {
+                previewPanX = e.touches[0].clientX - touchStartX;
+                previewPanY = e.touches[0].clientY - touchStartY;
+                applyPreviewTransform(false);
+            } else if (e.touches.length === 2 && touchStartDist > 0) {
+                const dist = Math.hypot(
+                    e.touches[0].clientX - e.touches[1].clientX,
+                    e.touches[0].clientY - e.touches[1].clientY
+                );
+                const scale = dist / touchStartDist;
+                previewZoom = Math.max(1.0, Math.min(6.0, touchStartZoom * scale));
+                applyPreviewTransform(false);
+            }
+        }, { passive: true });
+
+        container.addEventListener('touchend', () => {
+            isPreviewDragging = false;
+            touchStartDist = 0;
+            applyPreviewTransform(true);
+        });
+    }
+}
+
+function openImageModal(imgSrc, title = 'Detail Foto Tangkapan CCTV', meta = '', details = '', objType = null) {
+>>>>>>> Stashed changes
     const modalEl = document.getElementById('imagePreviewModal');
     if (!modalEl) return;
+
+    // Reset zoom ke 100% setiap kali membuka foto baru
+    resetPreviewZoom();
 
     const titleEl = document.getElementById('imagePreviewTitle');
     const metaEl = document.getElementById('imagePreviewMeta');
@@ -36,9 +223,24 @@ function openImageModal(imgSrc, title = 'Detail Foto Tangkapan CCTV', meta = '',
     if (metaEl) metaEl.textContent = meta;
     if (detailsEl) detailsEl.innerHTML = details;
 
+<<<<<<< Updated upstream
     if (srcEl) {
         if (imgSrc && imgSrc !== 'null' && imgSrc !== 'undefined') {
             srcEl.src = '/' + imgSrc.replace(/^\/+/, '');
+=======
+    // Compute image URL from the provided path (already prioritized)
+    const imageUrl = buildCaptureUrl(imgSrc);
+    console.log('[IMAGE SRC]', imgSrc);
+    console.log('[OBJECT TYPE]', objType);
+    console.log('[IMAGE URL]', imageUrl);
+
+    if (srcEl) {
+        srcEl.onload = function() {
+            resetPreviewZoom();
+        };
+        if (imageUrl) {
+            srcEl.src = imageUrl;
+>>>>>>> Stashed changes
             srcEl.style.display = 'block';
         } else {
             srcEl.src = 'https://placehold.co/600x400/1e293b/94a3b8?text=Foto+Tidak+Tersedia';
@@ -49,6 +251,8 @@ function openImageModal(imgSrc, title = 'Detail Foto Tangkapan CCTV', meta = '',
     bootstrap.Modal.getOrCreateInstance(modalEl).show();
 }
 window.openImageModal = openImageModal;
+window.resetPreviewZoom = resetPreviewZoom;
+window.zoomPreview = zoomPreview;
 
 
 // ============================================================
@@ -252,9 +456,99 @@ async function initDashboard() {
         if (cameraNameEl) cameraNameEl.textContent = 'Stream Dihentikan';
     }
 
+<<<<<<< Updated upstream
     const activeCam = cameras.find(item => item.active) || cameras[0];
     if (activeCam && activeCam.active) {
         if (select) select.value = activeCam.id;
+=======
+    function updateDetectionMode() {
+        const videoMode = detectionMode?.value === 'video';
+        if (videoFileLabel) videoFileLabel.style.display = videoMode ? 'inline-flex' : 'none';
+        if (streamImg) streamImg.style.display = videoMode ? (videoJobPoller ? 'block' : 'none') : streamImg.src ? 'block' : 'none';
+        if (processedVideo && !videoMode) processedVideo.style.display = 'none';
+    }
+
+    async function startVideoJob(file, camId) {
+        if (!file || !camId) return;
+        stopCameraStream();
+        if (cameraNameEl) cameraNameEl.textContent = `Memproses ${file.name}`;
+
+        const formData = new FormData();
+        formData.append('video', file);
+        formData.append('camera_id', camId);
+
+        try {
+            const response = await fetch('/api/video_jobs', { method: 'POST', body: formData });
+            const result = await response.json();
+            if (!response.ok || !result.success) throw new Error(result.message || 'Upload video gagal');
+            localStorage.setItem('platevision.videoJobId', result.job_id);
+            monitorVideoJob(result.job_id);
+        } catch (error) {
+            if (cameraNameEl) cameraNameEl.textContent = error.message;
+            if (placeholder) placeholder.style.display = 'flex';
+        }
+    }
+
+    function monitorVideoJob(jobId) {
+        if (!jobId) return;
+        if (videoJobPoller) clearInterval(videoJobPoller);
+        if (streamImg) {
+            streamImg.src = `/api/video_jobs/${jobId}/feed`;
+            streamImg.style.display = 'block';
+        }
+        if (placeholder) placeholder.style.display = 'none';
+        if (processedVideo) processedVideo.style.display = 'none';
+
+        const checkJob = async () => {
+            try {
+                const statusResult = await json(`/api/video_jobs/${jobId}`);
+                const job = statusResult.data;
+                if (job.status === 'completed') {
+                    clearInterval(videoJobPoller);
+                    if (streamImg) {
+                        streamImg.src = '';
+                        streamImg.style.display = 'none';
+                    }
+                    if (processedVideo) {
+                        processedVideo.src = `${job.output_url}?t=${Date.now()}`;
+                        processedVideo.style.display = 'block';
+                        processedVideo.load();
+                        processedVideo.play().catch(() => { });
+                    }
+                    if (placeholder) placeholder.style.display = 'none';
+                    if (cameraNameEl) cameraNameEl.textContent = 'Hasil Deteksi Video';
+                } else if (job.status === 'failed') {
+                    clearInterval(videoJobPoller);
+                    localStorage.removeItem('platevision.videoJobId');
+                    if (cameraNameEl) cameraNameEl.textContent = `Gagal: ${job.error || 'proses video'}`;
+                } else if (cameraNameEl) {
+                    cameraNameEl.textContent = `Memproses video (${job.progress || 0}%)`;
+                }
+            } catch (error) {
+                clearInterval(videoJobPoller);
+                console.error('Status video error:', error);
+            }
+        };
+
+        checkJob();
+        videoJobPoller = setInterval(checkJob, 1000);
+    }
+
+    const savedMode = localStorage.getItem('platevision.mode') || 'stream';
+    const savedCameraId = localStorage.getItem('platevision.cameraId');
+    const savedVideoJobId = localStorage.getItem('platevision.videoJobId');
+    if (detectionMode) detectionMode.value = savedMode;
+    if (savedCameraId && cameras.some(camera => String(camera.id) === savedCameraId)) {
+        select.value = savedCameraId;
+    }
+
+    const activeCam = cameras.find(item => String(item.id) === String(select?.value)) || cameras.find(item => item.active) || cameras[0];
+    if (activeCam && select) select.value = activeCam.id;
+
+    if (savedMode === 'video' && savedVideoJobId) {
+        monitorVideoJob(savedVideoJobId);
+    } else if (activeCam && activeCam.active) {
+>>>>>>> Stashed changes
         startCameraStream(activeCam.id);
     } else {
         stopCameraStream();
@@ -436,7 +730,19 @@ async function loadDetections() {
                 statusBadge = `<span class="badge bg-danger-subtle text-danger border border-danger-subtle">Gagal</span>`;
             }
 
+<<<<<<< Updated upstream
             const photo = item.plate_image_path || item.face_image_path || '';
+=======
+            let photo = '';
+            if (isVehicle) {
+                photo = item.vehicle_image_path || item.vehicleImagePath || item.plate_image_path || item.plateImagePath || '';
+            } else {
+                photo = item.face_image_path || item.faceImagePath || '';
+            }
+            const confidenceText = isPlate
+                ? `Kendaraan ${item.vehicle_confidence_percent || 0}% · Plat ${item.plate_confidence_percent || 0}% · OCR ${item.ocr_confidence_percent || 0}%`
+                : (isVehicle ? `Kendaraan ${item.vehicle_confidence_percent || item.confidence_percent || 0}%` : `Orang ${item.person_confidence_percent || item.confidence_percent || 0}%`);
+>>>>>>> Stashed changes
             const thumbHtml = photo
                 ? `<img src="/${esc(photo.replace(/^\/+/, ''))}" alt="Thumb" class="rounded border" style="width: 50px; height: 36px; object-fit: cover; cursor: pointer;" onclick="openImageModal('${esc(photo)}', '${esc(item.plate || 'Deteksi')}', '${esc(item.camera)} · ${esc(item.timestamp)}', 'Akurasi: <b>${item.confidence_percent}%</b>')">`
                 : `<div class="rounded border bg-light text-muted d-flex align-items-center justify-content-center small" style="width: 50px; height: 36px;"><i class="bi bi-image"></i></div>`;
@@ -484,7 +790,7 @@ async function initDetectionsPage() {
                 loadDetections();
             });
         }
-    } catch (e) {}
+    } catch (e) { }
 
     const typeGroup = document.getElementById('detTypeButtonGroup');
     if (typeGroup) {
@@ -646,7 +952,7 @@ async function initHistoryPage() {
                 loadPlateHistory();
             });
         }
-    } catch (e) {}
+    } catch (e) { }
 
     const statusSelect = document.getElementById('plateStatusFilter');
     if (statusSelect) {
@@ -1147,6 +1453,7 @@ function initSidebarToggle() {
 
 document.addEventListener('DOMContentLoaded', () => {
     initSidebarToggle();
+    initImagePreviewZoom();
     setInterval(updateClock, 1000);
     updateClock();
 

@@ -1,3 +1,4 @@
+# pyrefly: ignore [missing-import]
 from flask import Flask
 from routes.plate import plate_bp
 from routes.dashboard import dashboard_bp

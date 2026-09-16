@@ -39,6 +39,59 @@ body {
     overflow-x: hidden;
 }
 
+<<<<<<< Updated upstream
+=======
+.flow-summary {
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--primary);
+    border-radius: 10px;
+    padding: 14px 16px;
+    background: #fff;
+}
+
+.flow-summary.people-flow {
+    border-left-color: var(--warning);
+}
+
+.flow-summary span,
+.flow-summary small {
+    display: block;
+    color: var(--muted);
+    font-size: .75rem;
+}
+
+.flow-summary strong {
+    display: block;
+    margin: 4px 0;
+    font-size: 1.65rem;
+}
+
+.insight-list {
+    padding-left: 1.1rem;
+    color: var(--muted);
+    font-size: .82rem;
+}
+
+.insight-list li {
+    margin-bottom: .65rem;
+}
+
+.analytics-filters .form-label {
+    margin-bottom: 4px;
+    color: var(--muted);
+}
+
+.analytics-filters .form-select,
+.analytics-filters .form-control {
+    min-width: 130px;
+}
+
+.recap-stat {
+    min-height: 92px;
+    padding: 13px;
+}
+
+>>>>>>> Stashed changes
 img {
     max-width: 100%;
     display: block;
@@ -101,9 +154,9 @@ select {
     flex-direction: column;
     box-shadow: 6px 0 24px rgba(15, 23, 42, 0.08);
     transition: width 0.24s cubic-bezier(0.4, 0, 0.2, 1),
-                min-width 0.24s cubic-bezier(0.4, 0, 0.2, 1),
-                max-width 0.24s cubic-bezier(0.4, 0, 0.2, 1),
-                transform 0.24s cubic-bezier(0.4, 0, 0.2, 1);
+        min-width 0.24s cubic-bezier(0.4, 0, 0.2, 1),
+        max-width 0.24s cubic-bezier(0.4, 0, 0.2, 1),
+        transform 0.24s cubic-bezier(0.4, 0, 0.2, 1);
     flex-shrink: 0;
     overflow: hidden;
 }
@@ -196,9 +249,11 @@ select {
 .sidebar-scrollable::-webkit-scrollbar {
     width: 4px;
 }
+
 .sidebar-scrollable::-webkit-scrollbar-track {
     background: transparent;
 }
+
 .sidebar-scrollable::-webkit-scrollbar-thumb {
     background: rgba(255, 255, 255, 0.15);
     border-radius: 999px;
@@ -816,10 +871,21 @@ select {
     opacity: 0.88;
 }
 
-.action-toggle.deactivate { background: #f59e0b; }
-.action-toggle.activate { background: #16a34a; }
-.action-edit { background: #2563eb; }
-.action-delete { background: #dc2626; }
+.action-toggle.deactivate {
+    background: #f59e0b;
+}
+
+.action-toggle.activate {
+    background: #16a34a;
+}
+
+.action-edit {
+    background: #2563eb;
+}
+
+.action-delete {
+    background: #dc2626;
+}
 
 .status {
     display: inline-block;
@@ -849,7 +915,7 @@ select {
 }
 
 /* Statistics Bars */
-.stats-bars > div {
+.stats-bars>div {
     margin-bottom: 16px;
 }
 
@@ -877,8 +943,13 @@ select {
     transition: width 0.35s ease;
 }
 
-.bar i.green { background: var(--success); }
-.bar i.orange { background: var(--warning); }
+.bar i.green {
+    background: var(--success);
+}
+
+.bar i.orange {
+    background: var(--warning);
+}
 
 .system-metric {
     display: flex;
@@ -1045,9 +1116,13 @@ select {
 
 /* Bounding Box Toggle Switch Container */
 .bbox-switch-container {
+<<<<<<< Updated upstream
     background: rgba(15, 23, 42, 0.65);
     border: 1px solid rgba(148, 163, 184, 0.22);
     padding: 5px 12px;
+=======
+
+>>>>>>> Stashed changes
     border-radius: 8px;
     cursor: pointer;
     user-select: none;
@@ -1105,6 +1180,7 @@ select {
 
 /* Print Styling for Executive PDF / Print Reports */
 @media print {
+
     .sidebar,
     .sidebar-backdrop,
     .topbar-actions,
@@ -1137,6 +1213,7 @@ select {
         background: #ffffff !important;
         color: #000000 !important;
     }
+<<<<<<< Updated upstream
 }
 
 /* ============================================================
@@ -1191,3 +1268,6 @@ select {
 
 
 
+=======
+}
+>>>>>>> Stashed changes
