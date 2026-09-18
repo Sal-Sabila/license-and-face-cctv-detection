@@ -284,7 +284,7 @@ PERSON_COOLDOWN = 30.0
 
 # ByteTrack IDs can be reused after an object disappears. Treat a track as a
 # new physical event only after it has been absent for this long.
-TRACK_REUSE_GAP = 5.0
+TRACK_REUSE_GAP = 2.5
 
 PERSON_CAPTURE_CONFIDENCE = 0.40
 MIN_PERSON_CROP_WIDTH = 25
@@ -354,11 +354,31 @@ def _save_image(image, directory, filename, quality=94):
         return None
 
 
-def save_person_capture(frame, bbox, track_id, camera_id):
-    if frame is None:
+def _prepare_high_quality_capture(
+    frame,
+    bbox,
+    padding=0.18,
+    target_short_side=420,
+    max_scale=3.0,
+    max_long_side=1280,
+    sharpen=True,
+):
+    """
+    Prepare a web/database capture from the ORIGINAL CCTV frame.
+
+    Detection may run on an enhanced/downsized frame, but this function must
+    receive the original frame so the saved capture keeps all available
+    source pixels.
+
+    Note:
+        Upscaling increases display resolution but cannot create detail that
+        was not present in the CCTV source.
+    """
+    if frame is None or not hasattr(frame, "size") or frame.size == 0:
         return None
 
     h, w = frame.shape[:2]
+
     try:
         x1, y1, x2, y2 = [int(v) for v in bbox]
     except Exception:
@@ -371,18 +391,111 @@ def save_person_capture(frame, bbox, track_id, camera_id):
 
     if x2 <= x1 or y2 <= y1:
         return None
+
+    bw = x2 - x1
+    bh = y2 - y1
+
+    # Add proportional context around the detected object.
+    px = int(bw * float(padding))
+    py = int(bh * float(padding))
+
+    cx1 = max(0, x1 - px)
+    cy1 = max(0, y1 - py)
+    cx2 = min(w, x2 + px)
+    cy2 = min(h, y2 + py)
+
+    crop = frame[cy1:cy2, cx1:cx2].copy()
+
+    if crop.size == 0:
+        return None
+
+    ch, cw = crop.shape[:2]
+
+    # Upscale only when the source crop is small.
+    short_side = min(cw, ch)
+
+    if short_side > 0 and short_side < target_short_side:
+        scale = target_short_side / float(short_side)
+        scale = min(scale, float(max_scale))
+
+        new_w = max(1, int(round(cw * scale)))
+        new_h = max(1, int(round(ch * scale)))
+
+        # Lanczos gives better enlargement quality than nearest/bilinear.
+        crop = cv2.resize(
+            crop,
+            (new_w, new_h),
+            interpolation=cv2.INTER_LANCZOS4,
+        )
+
+    # Prevent very large captures from unnecessarily consuming disk/RAM.
+    ch, cw = crop.shape[:2]
+    long_side = max(cw, ch)
+
+    if long_side > max_long_side:
+        scale = max_long_side / float(long_side)
+        new_w = max(1, int(round(cw * scale)))
+        new_h = max(1, int(round(ch * scale)))
+
+        crop = cv2.resize(
+            crop,
+            (new_w, new_h),
+            interpolation=cv2.INTER_AREA,
+        )
+
+    # Mild unsharp mask. It improves edge perception but does not invent detail.
+    if sharpen and crop.shape[1] >= 3 and crop.shape[0] >= 3:
+        blur = cv2.GaussianBlur(crop, (0, 0), 0.8)
+        crop = cv2.addWeighted(crop, 1.12, blur, -0.12, 0)
+
+    return crop
+
+
+def save_person_capture(frame, bbox, track_id, camera_id):
+    if frame is None:
+        return None
+
+    h, w = frame.shape[:2]
+
+    try:
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+    except Exception:
+        return None
+
+    x1 = max(0, min(x1, w - 1))
+    y1 = max(0, min(y1, h - 1))
+    x2 = max(0, min(x2, w))
+    y2 = max(0, min(y2, h))
+
+    if x2 <= x1 or y2 <= y1:
+        return None
+
     if x2 - x1 < MIN_PERSON_CROP_WIDTH:
         return None
     if y2 - y1 < MIN_PERSON_CROP_HEIGHT:
         return None
 
-    crop = frame[y1:y2, x1:x2]
+    # IMPORTANT:
+    # Capture is taken from the original CCTV frame, not ai_frame.
+    crop = _prepare_high_quality_capture(
+        frame,
+        (x1, y1, x2, y2),
+        padding=0.20,
+        target_short_side=360,
+        max_scale=2.5,
+        max_long_side=960,
+        sharpen=True,
+    )
+
+    if crop is None:
+        return None
+
     now = datetime.now()
     date_dir = os.path.join(CAPTURE_DIR, now.strftime("%Y%m%d"))
     ts = now.strftime("%Y%m%d_%H%M%S_%f")[:-3]
     filename = f"person_cam{camera_id}_track{track_id}_{ts}.jpg"
 
-    return _save_image(crop, date_dir, filename, 92)
+    return _save_image(crop, date_dir, filename, 95)
 
 
 def save_plate_capture(crop, track_id, camera_id, plate_text, prefix="plate"):
@@ -399,6 +512,19 @@ def save_plate_capture(crop, track_id, camera_id, plate_text, prefix="plate"):
     )
 
     return _save_image(crop, date_dir, filename, 95)
+
+
+def _prepare_vehicle_capture(frame, bbox):
+    """High-quality vehicle capture from the original CCTV frame."""
+    return _prepare_high_quality_capture(
+        frame,
+        bbox,
+        padding=0.15,
+        target_short_side=480,
+        max_scale=2.5,
+        max_long_side=1280,
+        sharpen=True,
+    )
 
 
 def _get_value(data, keys, default=None):
@@ -472,6 +598,13 @@ def _track_to_result(track):
         "votes": votes,
         "total_reads": total_reads,
         "crop": getattr(track, "best_crop", None),
+        # PlateTracker may expose the originating vehicle track. Keep it
+        # when available so OCR results can be tied to the correct vehicle.
+        "vehicle_track_id": (
+            int(getattr(track, "vehicle_track_id"))
+            if getattr(track, "vehicle_track_id", None) is not None
+            else None
+        ),
         "distance_zone": "NEAR",
     }
 
@@ -1297,6 +1430,22 @@ class StreamAIService:
         crop = finished.get("crop")
         bbox = finished.get("bbox")
 
+        # PlateTracker may carry a crop from the enhanced AI frame.
+        # For the persisted capture, prefer a fresh crop from the ORIGINAL
+        # CCTV frame so enhancement/resize does not reduce source quality.
+        if frame is not None and bbox and len(bbox) == 4:
+            original_plate_crop = _prepare_high_quality_capture(
+                frame,
+                bbox,
+                padding=0.20,
+                target_short_side=400,
+                max_scale=3.0,
+                max_long_side=1000,
+                sharpen=True,
+            )
+            if original_plate_crop is not None:
+                crop = original_plate_crop
+
         valid = _valid_indonesian_plate(text)
         if not valid and det_conf < PLATE_REVIEW_CONFIDENCE:
             return None
@@ -1321,6 +1470,45 @@ class StreamAIService:
         )
 
         finished = dict(finished)
+
+        # PlateTracker's ID is a plate-track ID, not necessarily the vehicle
+        # ByteTrack ID. Resolve the finished plate against the CURRENT vehicle
+        # detections so OCR is enriched into the correct vehicle event.
+        vehicle_track_id = finished.get("vehicle_track_id")
+        if vehicle_track_id is None and bbox and len(bbox) == 4:
+            px1, py1, px2, py2 = [float(v) for v in bbox]
+            pcx = (px1 + px2) / 2.0
+            pcy = (py1 + py2) / 2.0
+            best_vehicle = None
+            best_score = 0.0
+
+            for vehicle in vehicle_dets or []:
+                if vehicle.get("cls") not in VEHICLE_TYPES:
+                    continue
+                vb = vehicle.get("box") or []
+                if len(vb) != 4:
+                    continue
+                vx1, vy1, vx2, vy2 = [float(v) for v in vb]
+                if not (vx1 <= pcx <= vx2 and vy1 <= pcy <= vy2):
+                    continue
+
+                vw = max(1.0, vx2 - vx1)
+                vh = max(1.0, vy2 - vy1)
+                # Prefer the smallest containing vehicle, which is useful
+                # when two vehicle boxes overlap in crowded scenes.
+                score = 1.0 / (vw * vh)
+                if score > best_score:
+                    best_score = score
+                    best_vehicle = vehicle
+
+            if best_vehicle is not None:
+                vehicle_track_id = best_vehicle.get("track_id")
+
+        try:
+            vehicle_track_id = int(vehicle_track_id) if vehicle_track_id is not None else None
+        except (TypeError, ValueError):
+            vehicle_track_id = None
+
         finished.update({
             "text": text,
             "formatted": formatted or text,
@@ -1328,6 +1516,7 @@ class StreamAIService:
             "conf": det_conf,
             "valid": valid,
             "plate_image_path": plate_path,
+            "vehicle_track_id": vehicle_track_id,
         })
 
         self.last_plate_capture = finished
@@ -1367,26 +1556,60 @@ class StreamAIService:
         return intersection / area
 
     def _get_track_generation(self, camera_id, track_id, current_time):
-        """Return a stable event generation for a camera/track lifecycle.
+        """Return a generation number for one ByteTrack lifecycle.
 
-        ByteTrack IDs are not globally unique and may be reused after an
-        object disappears. The database event_key therefore includes this
-        generation so a later vehicle/person with the same tracker ID can
-        create a new event.
+        ByteTrack can reuse IDs after a track is lost. The reuse gap is kept
+        slightly above the 60-frame/25-FPS tracker buffer so a reused ID is
+        treated as a new physical object instead of the old DB event.
         """
-        key = (int(camera_id), int(track_id))
+        try:
+            camera_id = int(camera_id)
+            track_id = int(track_id)
+            current_time = float(current_time)
+        except (TypeError, ValueError):
+            return 1
+
+        key = (camera_id, track_id)
         state = self.track_lifecycle.get(key)
 
         if state is None:
             state = {"generation": 1, "last_seen": current_time}
-        elif current_time - float(state["last_seen"]) > TRACK_REUSE_GAP:
-            state["generation"] = int(state.get("generation", 1)) + 1
-            state["last_seen"] = current_time
         else:
+            last_seen = float(state.get("last_seen", current_time))
+            gap = current_time - last_seen
+
+            # Clock correction / restart protection.
+            if gap < 0:
+                state["generation"] = int(state.get("generation", 1)) + 1
+            elif gap > TRACK_REUSE_GAP:
+                state["generation"] = int(state.get("generation", 1)) + 1
+
             state["last_seen"] = current_time
 
         self.track_lifecycle[key] = state
         return int(state["generation"])
+
+    def _cleanup_runtime_state(self, current_time):
+        """Prevent lifecycle/cache dictionaries from growing forever."""
+        now = float(current_time)
+        lifecycle_ttl = 300.0
+        event_ttl = 1800.0
+
+        for key, state in list(self.track_lifecycle.items()):
+            if now - float(state.get("last_seen", now)) > lifecycle_ttl:
+                self.track_lifecycle.pop(key, None)
+
+        for cache_name in ("captured_tracks", "saved_plate_events", "saved_event_meta"):
+            cache = getattr(self, cache_name, None)
+            if not isinstance(cache, dict):
+                continue
+            for key, value in list(cache.items()):
+                try:
+                    stamp = float(value if cache_name != "saved_event_meta" else value.get("updated_at", now))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+                if now - stamp > event_ttl:
+                    cache.pop(key, None)
 
     def _save_consistent_events(self, frame, person_dets, plate_dets, camera_id, current_time):
         """Persist one explicit event per tracked vehicle or unassociated person."""
@@ -1401,11 +1624,28 @@ class StreamAIService:
             vehicle_type = vehicle.get("vehicle_type") or VEHICLE_TYPES.get(vehicle.get("cls"), "unknown")
 
             matching_plates = []
+            geometric_plates = []
             for plate in plate_dets:
+                plate_vehicle_id = plate.get("vehicle_track_id")
+                if plate_vehicle_id is not None:
+                    try:
+                        if int(plate_vehicle_id) == vehicle_id:
+                            matching_plates.append(plate)
+                            continue
+                    except (TypeError, ValueError):
+                        pass
+
                 plate_box = plate.get("bbox") or plate.get("box") or [0, 0, 0, 0]
+                if len(plate_box) != 4:
+                    continue
                 center = plate.get("center") or [(plate_box[0] + plate_box[2]) / 2, (plate_box[1] + plate_box[3]) / 2]
                 if vehicle_box[0] <= center[0] <= vehicle_box[2] and vehicle_box[1] <= center[1] <= vehicle_box[3]:
-                    matching_plates.append(plate)
+                    geometric_plates.append(plate)
+
+            # Exact vehicle-track association wins. Geometry is only a
+            # fallback for tracker versions that do not expose that ID.
+            if not matching_plates:
+                matching_plates = geometric_plates
             plate = max(matching_plates, key=lambda item: float(item.get("conf", item.get("confidence", 0)) or 0), default=None)
 
             driver = None
@@ -1454,7 +1694,6 @@ class StreamAIService:
             )
             if not is_new_event and not needs_enrichment:
                 continue
-            self.captured_tracks[event_key] = current_time
 
             try:
                 result = db.save_detection_event(
@@ -1468,15 +1707,22 @@ class StreamAIService:
                     object_type="vehicle",
                     vehicle_type=vehicle_type,
                     vehicle_confidence=float(vehicle.get("conf", 0.0) or 0),
-                    vehicle_crop=frame[max(0, int(vehicle_box[1])):min(frame.shape[0], int(vehicle_box[3])), max(0, int(vehicle_box[0])):min(frame.shape[1], int(vehicle_box[2]))],
+                    vehicle_crop=_prepare_vehicle_capture(
+                        frame,
+                        vehicle_box,
+                    ),
                     has_driver=driver is not None,
                     driver_track_id=(driver or {}).get("track_id"),
                     direction=direction,
                     event_key=event_key
                 )
+                self.captured_tracks[event_key] = current_time
+                previous_plate = (previous_meta or {}).get("plate_text", "")
+                previous_driver = bool((previous_meta or {}).get("has_driver", False))
                 self.saved_event_meta[event_key] = {
-                    "plate_text": plate_text_now,
-                    "has_driver": has_driver_now,
+                    "plate_text": plate_text_now or previous_plate,
+                    "has_driver": has_driver_now or previous_driver,
+                    "updated_at": current_time,
                 }
                 print(
                     f"[DETECTION] camera={camera_id} track_id={vehicle_id} object_type=vehicle "
@@ -1506,13 +1752,24 @@ class StreamAIService:
             # One database event per physical person track lifecycle.
             if event_key in self.captured_tracks:
                 continue
-            self.captured_tracks[event_key] = current_time
             bx1, by1, bx2, by2 = person.get("box", [0, 0, 0, 0])
-            crop = frame[max(0, int(by1)):min(frame.shape[0], int(by2)), max(0, int(bx1)):min(frame.shape[1], int(bx2))]
+
+            # Save a quality crop from the ORIGINAL CCTV frame.
+            crop = _prepare_high_quality_capture(
+                frame,
+                (bx1, by1, bx2, by2),
+                padding=0.20,
+                target_short_side=360,
+                max_scale=2.5,
+                max_long_side=960,
+                sharpen=True,
+            )
+
             if crop is None or crop.size == 0:
                 continue
+
             try:
-                db.save_detection_event(
+                result = db.save_detection_event(
                     camera_id=camera_id,
                     face_crop=crop,
                     face_conf=float(person.get("conf", 0.0) or 0),
@@ -1522,7 +1779,13 @@ class StreamAIService:
                     direction=direction,
                     event_key=event_key
                 )
-                print(f"[DETECTION] camera={camera_id} track_id={track_id} object_type=person person_confidence={float(person.get('conf', 0) or 0):.3f} direction={direction}")
+                self.captured_tracks[event_key] = current_time
+                print(
+                    f"[DETECTION] camera={camera_id} track_id={track_id} "
+                    f"object_type=person person_confidence="
+                    f"{float(person.get('conf', 0) or 0):.3f} "
+                    f"direction={direction} duplicate={result.get('duplicate', False)}"
+                )
             except Exception as exc:
                 print(f"[AI STREAM ERROR] Save person event failed: {exc}")
 
@@ -1636,6 +1899,13 @@ class StreamAIService:
         camera_state = self._camera_state(camera_id)
         now = time.time()
         ai_pipeline_start = time.perf_counter()
+
+        # Always initialize these before entering nested AI stages. This
+        # prevents the classic "person_dets is not associated" failure even
+        # when an upstream model/lighting step raises unexpectedly.
+        person_dets = []
+        plate_dets = []
+        plate_raw = []
 
         try:
             # ==============================================================
@@ -1779,6 +2049,9 @@ class StreamAIService:
             # ==============================================================
             # 5. SAVE DATABASE EVENTS
             # ============================================================== 
+            person_dets = person_dets or []
+            plate_dets = plate_dets or []
+
             self._save_consistent_events(
                 frame,
                 person_dets,
@@ -1786,6 +2059,7 @@ class StreamAIService:
                 camera_id,
                 now,
             )
+            self._cleanup_runtime_state(now)
 
         except Exception as exc:
             # Never allow an AI exception to terminate the worker thread.
@@ -1843,12 +2117,11 @@ class StreamAIService:
             # a full interval if another frame has not arrived yet.
             remaining = interval - (now - camera_state["last_ai_time"])
             if remaining > 0:
-                # Put the newest frame back only when the queue is empty; this
-                # allows the next incoming CCTV frame to replace it naturally.
+                # IMPORTANT: never requeue the frame we just popped. A newer
+                # CCTV frame may arrive while we sleep; requeueing the old
+                # frame would put stale data back in front of it and increase
+                # latency. The next incoming frame will wake the worker.
                 time.sleep(min(remaining, 0.05))
-                with self.frame_queue_lock:
-                    self.frame_queue.append((frame, camera_id))
-                self.ai_wakeup.set()
                 continue
 
             camera_state["last_ai_time"] = now
@@ -1869,7 +2142,11 @@ class StreamAIService:
 
         try:
             with self.frame_queue_lock:
+                # Keep at most one pending frame per camera. AI always wants
+                # the newest frame, not a backlog.
                 self.frame_queue.append((frame.copy(), camera_id))
+                while len(self.frame_queue) > 1:
+                    self.frame_queue.popleft()
             self.ai_wakeup.set()
         except Exception as exc:
             # Queue problems must never stop CCTV display.

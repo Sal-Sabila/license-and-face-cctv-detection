@@ -370,24 +370,30 @@ def save_detection_event(
     vehicle_crop=None
 ) -> dict:
     """
-    Simpan satu event deteksi ke database dan capture lokal.
+    Simpan satu event deteksi secara konsisten.
 
-    Aturan penting:
-    - vehicle_crop -> static/captures/vehicles -> full_detection.vehicle_image_path
-    - plate_crop   -> static/captures/plates   -> plate.plate_image_path
-    - face_crop    -> static/captures/faces    -> full_detection.face_image_path
-    - duplicate event_key tidak membuat event baru.
-    - Capture baru yang tidak dipakai oleh event duplicate akan dihapus.
-    - vehicle tanpa plat tetap disimpan sebagai object_type='vehicle'.
-    - confidence kendaraan, plat, OCR, orang dan wajah tetap terpisah.
+    Perbaikan utama:
+    1. Cek event_key SEBELUM membuat capture/row plate baru.
+    2. Duplicate tidak membuat row full_detection baru.
+    3. Duplicate yang belum lengkap hanya melakukan enrichment:
+       - vehicle event: tambahkan plate/vehicle image/driver bila tersedia.
+       - person event: tambahkan face image bila event lama belum punya.
+    4. Jika event lama sudah mempunyai plate, jangan membuat row plate baru.
+       Data plate lama cukup diperbarui bila OCR/confidence baru lebih baik.
+    5. Capture yang benar-benar tidak dipakai selalu dihapus.
+    6. Event baru tetap dibuat dengan INSERT penuh.
     """
 
     object_type = object_type if object_type in ("vehicle", "person") else "vehicle"
-    vehicle_type = vehicle_type if vehicle_type in ("car", "motorcycle", "truck", "bus", "unknown") else "unknown"
+    vehicle_type = (
+        vehicle_type
+        if vehicle_type in ("car", "motorcycle", "truck", "bus", "unknown")
+        else "unknown"
+    )
     direction = direction if direction in ("entry", "exit", "unknown") else "unknown"
 
     normalized_plate = normalize_plate_number(plate_number)
-    has_plate = bool(plate_crop is not None or normalized_plate)
+    has_plate_input = bool(plate_crop is not None or normalized_plate)
 
     vehicle_confidence = float(vehicle_confidence or 0.0)
     plate_conf = float(plate_conf or 0.0)
@@ -396,16 +402,428 @@ def save_detection_event(
 
     conn = get_db()
 
+    # Capture yang benar-benar dibuat oleh pemanggilan ini.
+    vehicle_rel_path = None
+    plate_rel_path = None
+    face_rel_path = None
+
     try:
         with conn.cursor() as cur:
+
+            # ======================================================
+            # 1. CEK EVENT EXISTING TERLEBIH DAHULU
+            # ======================================================
+            existing = None
+
+            if event_key:
+                cur.execute(
+                    """
+                    SELECT
+                        fd.detection_id,
+                        fd.plate_id,
+                        fd.object_type,
+                        fd.vehicle_type,
+                        fd.has_plate,
+                        fd.has_driver,
+                        fd.vehicle_confidence,
+                        fd.plate_detection_confidence,
+                        fd.ocr_confidence AS event_ocr_confidence,
+                        fd.person_confidence,
+                        fd.face_confidence,
+                        fd.direction,
+                        fd.driver_track_id,
+                        fd.driver_face_path,
+                        fd.face_image_path,
+                        fd.vehicle_image_path,
+                        fd.detection_status,
+                        fd.detection_confidence,
+                        fd.created_at,
+                        p.plate_number,
+                        p.raw_ocr_text,
+                        p.normalized_plate_number,
+                        p.detection_status AS plate_status,
+                        p.detection_confidence AS plate_confidence,
+                        p.ocr_confidence AS plate_ocr_confidence,
+                        p.plate_image_path
+                    FROM full_detection fd
+                    LEFT JOIN plate p ON p.plate_id = fd.plate_id
+                    WHERE fd.event_key = %s
+                    ORDER BY fd.detection_id DESC
+                    LIMIT 1
+                    """,
+                    (event_key,)
+                )
+                existing = cur.fetchone()
+
+            # ======================================================
+            # 2. DUPLICATE / ENRICHMENT
+            # ======================================================
+            if existing:
+                existing_id = existing["detection_id"]
+                existing_plate_id = existing.get("plate_id")
+                existing_vehicle_path = existing.get("vehicle_image_path")
+                existing_face_path = existing.get("face_image_path")
+
+                # --------------------------------------------------
+                # EVENT VEHICLE
+                # --------------------------------------------------
+                if object_type == "vehicle":
+
+                    # Capture kendaraan hanya dibuat jika event lama
+                    # belum mempunyai capture kendaraan.
+                    if vehicle_crop is not None and not existing_vehicle_path:
+                        vehicle_rel_path = save_crop_locally(
+                            vehicle_crop,
+                            VEHICLE_DIR,
+                            prefix="vehicle",
+                            camera_id=camera_id,
+                            track_id=track_id
+                        )
+
+                    # ----------------------------------------------
+                    # Jika event belum mempunyai plate:
+                    # buat row plate baru dan hubungkan ke event.
+                    # ----------------------------------------------
+                    new_plate_id = None
+
+                    if has_plate_input and not existing_plate_id:
+                        if plate_crop is not None:
+                            plate_rel_path = save_crop_locally(
+                                plate_crop,
+                                PLATE_DIR,
+                                prefix="plate",
+                                camera_id=camera_id,
+                                track_id=track_id
+                            )
+
+                        plate_status = compute_plate_status(
+                            normalized_plate,
+                            ocr_conf
+                        )
+
+                        cur.execute(
+                            """
+                            INSERT INTO plate (
+                                plate_number,
+                                raw_ocr_text,
+                                normalized_plate_number,
+                                detection_status,
+                                detection_confidence,
+                                ocr_confidence,
+                                plate_image_path
+                            )
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            """,
+                            (
+                                normalized_plate or None,
+                                raw_ocr_text or plate_number,
+                                normalized_plate or None,
+                                plate_status,
+                                plate_conf,
+                                ocr_conf,
+                                plate_rel_path
+                            )
+                        )
+                        new_plate_id = cur.lastrowid
+
+                        cur.execute(
+                            """
+                            INSERT INTO plate_logs (plate_id, camera_id, status)
+                            VALUES (%s, %s, %s)
+                            """,
+                            (
+                                new_plate_id,
+                                camera_id,
+                                plate_status
+                            )
+                        )
+
+                    # ----------------------------------------------
+                    # Jika event SUDAH punya plate, jangan membuat
+                    # plate_id baru. Update hanya jika data baru
+                    # lebih baik / lebih lengkap.
+                    # ----------------------------------------------
+                    elif has_plate_input and existing_plate_id:
+
+                        old_ocr_conf = float(
+                            existing.get("plate_ocr_confidence") or 0.0
+                        )
+
+                        should_update_plate = (
+                            normalized_plate
+                            and (
+                                not existing.get("plate_number")
+                                or ocr_conf > old_ocr_conf
+                            )
+                        )
+
+                        if should_update_plate:
+                            plate_status = compute_plate_status(
+                                normalized_plate,
+                                ocr_conf
+                            )
+
+                            cur.execute(
+                                """
+                                UPDATE plate
+                                SET
+                                    plate_number = %s,
+                                    raw_ocr_text = %s,
+                                    normalized_plate_number = %s,
+                                    detection_status = %s,
+                                    detection_confidence = %s,
+                                    ocr_confidence = %s
+                                WHERE plate_id = %s
+                                """,
+                                (
+                                    normalized_plate,
+                                    raw_ocr_text or plate_number,
+                                    normalized_plate,
+                                    plate_status,
+                                    plate_conf,
+                                    ocr_conf,
+                                    existing_plate_id
+                                )
+                            )
+
+                    final_plate_id = new_plate_id or existing_plate_id
+
+                    # ----------------------------------------------
+                    # Tentukan apakah memang ada enrichment.
+                    # ----------------------------------------------
+                    should_update_event = (
+                        bool(vehicle_rel_path)
+                        or bool(new_plate_id)
+                        or (
+                            has_driver
+                            and not bool(existing.get("has_driver"))
+                        )
+                        or (
+                            vehicle_confidence
+                            > float(existing.get("vehicle_confidence") or 0.0)
+                        )
+                        or (
+                            has_plate_input
+                            and ocr_conf
+                            > float(existing.get("event_ocr_confidence") or 0.0)
+                        )
+                    )
+
+                    if should_update_event:
+                        final_has_plate = bool(final_plate_id)
+
+                        if final_has_plate:
+                            final_plate_conf = plate_conf
+                            final_ocr_conf = ocr_conf
+                        else:
+                            final_plate_conf = None
+                            final_ocr_conf = None
+
+                        # Status event menggunakan plate bila tersedia,
+                        # jika tidak menggunakan confidence kendaraan.
+                        if final_has_plate:
+                            status_val = compute_plate_status(
+                                normalized_plate
+                                if normalized_plate
+                                else existing.get("plate_number"),
+                                final_ocr_conf or existing.get(
+                                    "event_ocr_confidence"
+                                ) or 0.0
+                            )
+                            conf_val = (
+                                final_ocr_conf
+                                or existing.get("event_ocr_confidence")
+                                or 0.0
+                            )
+                        else:
+                            conf_val = max(
+                                vehicle_confidence,
+                                float(existing.get("vehicle_confidence") or 0.0)
+                            )
+                            status_val = (
+                                1 if conf_val >= 0.70
+                                else 2 if conf_val >= 0.40
+                                else 0
+                            )
+
+                        cur.execute(
+                            """
+                            UPDATE full_detection
+                            SET
+                                object_type = 'vehicle',
+                                vehicle_type = %s,
+                                has_plate = %s,
+                                has_driver = %s,
+                                detection_status = %s,
+                                detection_confidence = %s,
+                                vehicle_confidence = %s,
+                                plate_detection_confidence = %s,
+                                ocr_confidence = %s,
+                                direction = %s,
+                                driver_track_id = %s,
+                                vehicle_image_path = COALESCE(
+                                    vehicle_image_path,
+                                    %s
+                                )
+                            WHERE detection_id = %s
+                            """,
+                            (
+                                vehicle_type,
+                                int(final_has_plate),
+                                int(bool(has_driver or existing.get("has_driver"))),
+                                status_val,
+                                conf_val,
+                                max(
+                                    vehicle_confidence,
+                                    float(existing.get("vehicle_confidence") or 0.0)
+                                ),
+                                (
+                                    max(
+                                        plate_conf,
+                                        float(existing.get("plate_detection_confidence") or 0.0)
+                                    )
+                                    if final_has_plate
+                                    else None
+                                ),
+                                (
+                                    max(
+                                        ocr_conf,
+                                        float(existing.get("event_ocr_confidence") or 0.0)
+                                    )
+                                    if final_has_plate
+                                    else None
+                                ),
+                                direction,
+                                driver_track_id or existing.get("driver_track_id"),
+                                vehicle_rel_path,
+                                existing_id
+                            )
+                        )
+
+                    # Capture kendaraan baru tidak terpakai.
+                    if vehicle_rel_path and existing_vehicle_path:
+                        _delete_capture_file(vehicle_rel_path)
+                        vehicle_rel_path = None
+
+                    return {
+                        "plate_id": final_plate_id,
+                        "detection_id": existing_id,
+                        "duplicate": True,
+                        "enriched": bool(should_update_event),
+                        "plate_image_path": (
+                            plate_rel_path
+                            or existing.get("plate_image_path")
+                        ),
+                        "face_image_path": existing_face_path,
+                        "vehicle_image_path": (
+                            existing_vehicle_path
+                            or vehicle_rel_path
+                        ),
+                        "plate_number": (
+                            normalized_plate
+                            or existing.get("plate_number")
+                            or None
+                        ),
+                        "object_type": "vehicle",
+                        "vehicle_type": vehicle_type,
+                        "has_plate": bool(final_plate_id),
+                        "has_driver": bool(
+                            has_driver or existing.get("has_driver")
+                        )
+                    }
+
+                # --------------------------------------------------
+                # EVENT PERSON
+                # --------------------------------------------------
+                if object_type == "person":
+
+                    # Hanya buat face capture jika event lama belum punya.
+                    if face_crop is not None and not existing_face_path:
+                        face_rel_path = save_crop_locally(
+                            face_crop,
+                            FACE_DIR,
+                            prefix="face",
+                            camera_id=camera_id,
+                            track_id=track_id
+                        )
+
+                    if face_rel_path:
+                        cur.execute(
+                            """
+                            UPDATE full_detection
+                            SET
+                                object_type = 'person',
+                                person_confidence = %s,
+                                face_confidence = %s,
+                                detection_confidence = %s,
+                                detection_status = %s,
+                                direction = %s,
+                                face_image_path = %s
+                            WHERE detection_id = %s
+                            """,
+                            (
+                                max(
+                                    face_conf,
+                                    float(existing.get("person_confidence") or 0.0),
+                                ),
+                                max(
+                                    face_conf,
+                                    float(existing.get("face_confidence") or 0.0),
+                                ),
+                                max(
+                                    face_conf,
+                                    float(existing.get("detection_confidence") or 0.0),
+                                ),
+                                compute_face_status(
+                                    max(
+                                        face_conf,
+                                        float(existing.get("face_confidence") or 0.0),
+                                    )
+                                ),
+                                direction,
+                                face_rel_path,
+                                existing_id
+                            )
+                        )
+                    else:
+                        # Tidak ada face baru -> tidak perlu UPDATE DB.
+                        face_rel_path = None
+
+                    # Person tidak boleh mempunyai plate.
+                    if existing_plate_id:
+                        # Jangan hapus plate lama secara otomatis karena
+                        # mungkin dipakai event lain pada legacy database.
+                        pass
+
+                    return {
+                        "plate_id": None,
+                        "detection_id": existing_id,
+                        "duplicate": True,
+                        "enriched": bool(face_rel_path),
+                        "plate_image_path": None,
+                        "face_image_path": (
+                            face_rel_path or existing_face_path
+                        ),
+                        "vehicle_image_path": None,
+                        "plate_number": None,
+                        "object_type": "person",
+                        "vehicle_type": "unknown",
+                        "has_plate": False,
+                        "has_driver": False
+                    }
+
+            # ======================================================
+            # 3. EVENT BARU
+            # ======================================================
+
             plate_id = None
             plate_rel_path = None
             face_rel_path = None
             vehicle_rel_path = None
 
-            # ======================================================
-            # 1. SIMPAN CAPTURE KENDARAAN TERLEBIH DAHULU
-            # ======================================================
+            # ----------------------------------------------
+            # CAPTURE KENDARAAN
+            # ----------------------------------------------
             if object_type == "vehicle" and vehicle_crop is not None:
                 vehicle_rel_path = save_crop_locally(
                     vehicle_crop,
@@ -415,25 +833,13 @@ def save_detection_event(
                     track_id=track_id
                 )
 
-                if vehicle_rel_path:
-                    print(
-                        f"[VEHICLE CAPTURE] camera={camera_id} "
-                        f"track_id={track_id} vehicle_type={vehicle_type} "
-                        f"confidence={vehicle_confidence:.3f} "
-                        f"path={vehicle_rel_path}"
-                    )
-                else:
-                    print(
-                        f"[VEHICLE CAPTURE ERROR] camera={camera_id} "
-                        f"track_id={track_id} - cv2.imwrite gagal"
-                    )
-
-            # ======================================================
-            # 2. SIMPAN CAPTURE PLAT + ROW PLATE
-            # ======================================================
+            # ----------------------------------------------
+            # CAPTURE + ROW PLATE
+            # ----------------------------------------------
             plate_status = 0
 
-            if has_plate:
+            if object_type == "vehicle" and has_plate_input:
+
                 if plate_crop is not None:
                     plate_rel_path = save_crop_locally(
                         plate_crop,
@@ -481,254 +887,14 @@ def save_detection_event(
                     (
                         plate_id,
                         camera_id,
-                        1 if plate_status == 1 else (2 if plate_status == 2 else 0)
+                        plate_status
                     )
                 )
 
-            # ======================================================
-            # 3. CEK DUPLICATE BERDASARKAN event_key
-            # ======================================================
-            if event_key:
-                cur.execute(
-                    """
-                    SELECT
-                        fd.detection_id,
-                        fd.plate_id,
-                        fd.object_type,
-                        fd.vehicle_image_path,
-                        fd.face_image_path,
-                        p.plate_image_path
-                    FROM full_detection fd
-                    LEFT JOIN plate p ON p.plate_id = fd.plate_id
-                    WHERE fd.event_key = %s
-                    LIMIT 1
-                    """,
-                    (event_key,)
-                )
-                existing = cur.fetchone()
-
-                if existing:
-                    existing_id = existing["detection_id"]
-                    existing_vehicle_path = existing.get("vehicle_image_path")
-                    existing_face_path = existing.get("face_image_path")
-
-                    # --------------------------------------------------
-                    # EVENT KENDARAAN DUPLICATE
-                    # --------------------------------------------------
-                    if object_type == "vehicle":
-                        new_vehicle_path = existing_vehicle_path
-
-                        # Jika event lama belum punya foto kendaraan,
-                        # pakai capture yang baru. JANGAN menghapusnya.
-                        if vehicle_rel_path and not existing_vehicle_path:
-                            cur.execute(
-                                """
-                                UPDATE full_detection
-                                SET
-                                    object_type = 'vehicle',
-                                    vehicle_type = %s,
-                                    has_plate = %s,
-                                    has_driver = %s,
-                                    vehicle_confidence = %s,
-                                    plate_detection_confidence = %s,
-                                    ocr_confidence = %s,
-                                    detection_status = %s,
-                                    detection_confidence = %s,
-                                    direction = %s,
-                                    driver_track_id = %s,
-                                    vehicle_image_path = %s
-                                WHERE detection_id = %s
-                                """,
-                                (
-                                    vehicle_type,
-                                    int(has_plate),
-                                    int(bool(has_driver)),
-                                    vehicle_confidence,
-                                    plate_conf if has_plate else None,
-                                    ocr_conf if has_plate else None,
-                                    plate_status if has_plate else (
-                                        1 if vehicle_confidence >= 0.70
-                                        else 2 if vehicle_confidence >= 0.40
-                                        else 0
-                                    ),
-                                    vehicle_confidence,
-                                    direction,
-                                    driver_track_id,
-                                    vehicle_rel_path,
-                                    existing_id
-                                )
-                            )
-                            new_vehicle_path = vehicle_rel_path
-                        else:
-                            # Event lama sudah punya foto. Capture baru
-                            # hanya sementara dan harus dibuang agar tidak
-                            # memenuhi storage dengan duplicate image.
-                            if vehicle_rel_path:
-                                _delete_capture_file(vehicle_rel_path)
-
-                            cur.execute(
-                                """
-                                UPDATE full_detection
-                                SET
-                                    object_type = 'vehicle',
-                                    vehicle_type = %s,
-                                    has_plate = %s,
-                                    has_driver = %s,
-                                    vehicle_confidence = %s,
-                                    plate_detection_confidence = %s,
-                                    ocr_confidence = %s,
-                                    detection_status = %s,
-                                    detection_confidence = %s,
-                                    direction = %s,
-                                    driver_track_id = %s
-                                WHERE detection_id = %s
-                                """,
-                                (
-                                    vehicle_type,
-                                    int(has_plate),
-                                    int(bool(has_driver)),
-                                    vehicle_confidence,
-                                    plate_conf if has_plate else None,
-                                    ocr_conf if has_plate else None,
-                                    plate_status if has_plate else (
-                                        1 if vehicle_confidence >= 0.70
-                                        else 2 if vehicle_confidence >= 0.40
-                                        else 0
-                                    ),
-                                    vehicle_confidence,
-                                    direction,
-                                    driver_track_id,
-                                    existing_id
-                                )
-                            )
-
-                        # Jika plate baru dibuat untuk event duplicate,
-                        # hubungkan ke event lama. Jika event lama sudah
-                        # memakai plate lain, hapus row plate sementara.
-                        if plate_id:
-                            old_plate_id = existing.get("plate_id")
-
-                            if old_plate_id != plate_id:
-                                cur.execute(
-                                    """
-                                    UPDATE full_detection
-                                    SET
-                                        plate_id = %s,
-                                        has_plate = 1,
-                                        plate_detection_confidence = %s,
-                                        ocr_confidence = %s,
-                                        detection_status = %s
-                                    WHERE detection_id = %s
-                                    """,
-                                    (
-                                        plate_id,
-                                        plate_conf,
-                                        ocr_conf,
-                                        plate_status,
-                                        existing_id
-                                    )
-                                )
-
-                            # Kalau plate_id yang baru tidak dipakai oleh event
-                            # karena event lama sudah punya plate yang sama,
-                            # bersihkan row sementara dan file capture-nya.
-                            elif old_plate_id == plate_id:
-                                cur.execute(
-                                    "DELETE FROM plate_logs WHERE plate_id = %s",
-                                    (plate_id,)
-                                )
-                                cur.execute(
-                                    "DELETE FROM plate WHERE plate_id = %s",
-                                    (plate_id,)
-                                )
-                                _delete_capture_file(plate_rel_path)
-
-                        return {
-                            "plate_id": plate_id or existing.get("plate_id"),
-                            "detection_id": existing_id,
-                            "duplicate": True,
-                            "plate_image_path": plate_rel_path,
-                            "face_image_path": existing_face_path,
-                            "vehicle_image_path": new_vehicle_path,
-                            "plate_number": normalized_plate or None,
-                            "object_type": "vehicle",
-                            "vehicle_type": vehicle_type,
-                            "has_plate": has_plate,
-                            "has_driver": bool(has_driver)
-                        }
-
-                    # --------------------------------------------------
-                    # EVENT PERSON DUPLICATE
-                    # --------------------------------------------------
-                    if object_type == "person":
-                        new_face_path = existing_face_path
-
-                        if face_crop is not None:
-                            face_rel_path = save_crop_locally(
-                                face_crop,
-                                FACE_DIR,
-                                prefix="face",
-                                camera_id=camera_id,
-                                track_id=track_id
-                            )
-
-                        if face_rel_path and not existing_face_path:
-                            cur.execute(
-                                """
-                                UPDATE full_detection
-                                SET
-                                    person_confidence = %s,
-                                    face_confidence = %s,
-                                    detection_confidence = %s,
-                                    detection_status = %s,
-                                    direction = %s,
-                                    face_image_path = %s
-                                WHERE detection_id = %s
-                                """,
-                                (
-                                    face_conf,
-                                    face_conf,
-                                    face_conf,
-                                    compute_face_status(face_conf),
-                                    direction,
-                                    face_rel_path,
-                                    existing_id
-                                )
-                            )
-                            new_face_path = face_rel_path
-                        elif face_rel_path:
-                            _delete_capture_file(face_rel_path)
-
-                        # Tidak boleh ada plate sementara untuk person.
-                        if plate_id:
-                            cur.execute(
-                                "DELETE FROM plate_logs WHERE plate_id = %s",
-                                (plate_id,)
-                            )
-                            cur.execute(
-                                "DELETE FROM plate WHERE plate_id = %s",
-                                (plate_id,)
-                            )
-                            _delete_capture_file(plate_rel_path)
-
-                        return {
-                            "plate_id": None,
-                            "detection_id": existing_id,
-                            "duplicate": True,
-                            "plate_image_path": None,
-                            "face_image_path": new_face_path,
-                            "vehicle_image_path": None,
-                            "plate_number": None,
-                            "object_type": "person",
-                            "vehicle_type": "unknown",
-                            "has_plate": False,
-                            "has_driver": False
-                        }
-
-            # ======================================================
-            # 4. SIMPAN FACE CAPTURE UNTUK EVENT BARU
-            # ======================================================
-            if face_crop is not None:
+            # ----------------------------------------------
+            # CAPTURE PERSON
+            # ----------------------------------------------
+            if object_type == "person" and face_crop is not None:
                 face_rel_path = save_crop_locally(
                     face_crop,
                     FACE_DIR,
@@ -737,29 +903,27 @@ def save_detection_event(
                     track_id=track_id
                 )
 
-            # ======================================================
-            # 5. HITUNG STATUS EVENT
-            # ======================================================
+            # ----------------------------------------------
+            # STATUS EVENT BARU
+            # ----------------------------------------------
             if object_type == "person":
                 status_val = compute_face_status(face_conf)
                 conf_val = face_conf
             else:
-                if has_plate:
-                    status_val = compute_plate_status(
-                        normalized_plate,
-                        ocr_conf
-                    )
+                if plate_id:
+                    status_val = plate_status
+                    conf_val = ocr_conf
                 else:
                     status_val = (
                         1 if vehicle_confidence >= 0.70
                         else 2 if vehicle_confidence >= 0.40
                         else 0
                     )
-                conf_val = vehicle_confidence
+                    conf_val = vehicle_confidence
 
-            # ======================================================
-            # 6. INSERT FULL DETECTION
-            # ======================================================
+            # ----------------------------------------------
+            # INSERT FULL DETECTION
+            # ----------------------------------------------
             cur.execute(
                 """
                 INSERT INTO full_detection (
@@ -783,7 +947,10 @@ def save_detection_event(
                     vehicle_image_path,
                     event_key
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s
+                )
                 """,
                 (
                     plate_id,
@@ -791,13 +958,13 @@ def save_detection_event(
                     track_id,
                     object_type,
                     vehicle_type,
-                    int(has_plate) if object_type == "vehicle" else 0,
+                    int(has_plate_input) if object_type == "vehicle" else 0,
                     int(bool(has_driver)) if object_type == "vehicle" else 0,
                     status_val,
                     conf_val,
                     vehicle_confidence if object_type == "vehicle" else None,
-                    plate_conf if object_type == "vehicle" and has_plate else None,
-                    ocr_conf if object_type == "vehicle" and has_plate else None,
+                    plate_conf if object_type == "vehicle" and plate_id else None,
+                    ocr_conf if object_type == "vehicle" and plate_id else None,
                     face_conf if object_type == "person" else None,
                     face_conf if object_type == "person" else None,
                     direction,
@@ -813,9 +980,11 @@ def save_detection_event(
             print(
                 f"[DB EVENT] detection_id={detection_id} "
                 f"camera={camera_id} type={object_type} "
+                f"track_id={track_id} "
                 f"vehicle_image={vehicle_rel_path or '-'} "
                 f"plate_image={plate_rel_path or '-'} "
-                f"face_image={face_rel_path or '-'}"
+                f"face_image={face_rel_path or '-'} "
+                f"event_key={event_key or '-'}"
             )
 
             return {
@@ -827,13 +996,22 @@ def save_detection_event(
                 "plate_number": normalized_plate or None,
                 "object_type": object_type,
                 "vehicle_type": vehicle_type,
-                "has_plate": has_plate if object_type == "vehicle" else False,
-                "has_driver": bool(has_driver) if object_type == "vehicle" else False,
-                "duplicate": False
+                "has_plate": (
+                    has_plate_input
+                    if object_type == "vehicle"
+                    else False
+                ),
+                "has_driver": (
+                    bool(has_driver)
+                    if object_type == "vehicle"
+                    else False
+                ),
+                "duplicate": False,
+                "enriched": False
             }
 
     except Exception as exc:
-        # Jika transaksi gagal, jangan meninggalkan file capture orphan.
+        # Jangan meninggalkan capture orphan bila transaksi gagal.
         if vehicle_rel_path:
             _delete_capture_file(vehicle_rel_path)
         if plate_rel_path:
