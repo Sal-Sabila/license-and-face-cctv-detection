@@ -416,6 +416,10 @@
                             <i class="bi bi-file-earmark-spreadsheet"></i>
                             <span>Ekspor Excel</span>
                         </button>
+                        <button type="button" class="btn-action-outline" onclick="exportCameras('pdf')">
+                            <i class="bi bi-file-earmark-pdf"></i>
+                            <span>Download PDF</span>
+                        </button>
                         <button type="button" class="btn-action-primary" onclick="openCameraModal()">
                             <i class="bi bi-plus-lg"></i>
                             <span>Tambah Kamera</span>
@@ -454,7 +458,11 @@
                         </div>
                         <button type="button" class="btn-action-outline" onclick="exportDetections()">
                             <i class="bi bi-file-earmark-spreadsheet"></i>
-                            <span>Ekspor CSV</span>
+                            <span>Ekspor Excel</span>
+                        </button>
+                        <button type="button" class="btn-action-outline" onclick="exportDetectionsPdf()">
+                            <i class="bi bi-file-earmark-pdf"></i>
+                            <span>Ekspor PDF</span>
                         </button>
                     </div>
                 </div>
@@ -543,7 +551,11 @@
                     <div class="d-flex gap-2 align-items-center flex-wrap">
                         <button type="button" class="btn-action-outline" onclick="exportPlates()">
                             <i class="bi bi-file-earmark-spreadsheet"></i>
-                            <span>Ekspor CSV</span>
+                            <span>Ekspor Excel</span>
+                        </button>
+                        <button type="button" class="btn-action-outline" onclick="exportPlatesPdf()">
+                            <i class="bi bi-file-earmark-pdf"></i>
+                            <span>Ekspor PDF</span>
                         </button>
                     </div>
                 </div>
@@ -631,7 +643,8 @@
                         <div><label class="form-label small">Gerbang</label><input id="recapGate" class="form-control form-control-sm" placeholder="Cari gerbang"></div>
                         <div><label class="form-label small">Arah</label><select id="recapDirection" class="form-select form-select-sm"><option value="">Semua arah</option><option value="entry">Masuk</option><option value="exit">Keluar</option></select></div>
                         <button id="recapApply" class="btn btn-primary btn-sm"><i class="bi bi-funnel"></i> Terapkan</button>
-                        <button id="recapExport" class="btn btn-outline-success btn-sm"><i class="bi bi-download"></i> CSV</button>
+                        <button id="recapExport" class="btn btn-outline-success btn-sm"><i class="bi bi-download"></i> Excel</button>
+                        <button id="recapExportPdf" class="btn btn-outline-danger btn-sm"><i class="bi bi-file-earmark-pdf"></i> PDF</button>
                     </div>
                 </div>
                 <div class="row g-3 mb-4" id="recapTotals"></div>
@@ -668,11 +681,11 @@
                         <button type="button" class="btn btn-sm btn-outline-secondary" onclick="loadEnterpriseStatistics()" title="Muat Ulang Data">
                             <i class="bi bi-arrow-clockwise"></i> Refresh
                         </button>
-                        <button type="button" class="btn btn-sm btn-outline-success" onclick="exportStatsReport()" title="Ekspor Rekap CSV">
-                            <i class="bi bi-file-earmark-spreadsheet"></i> Ekspor CSV
+                        <button type="button" class="btn btn-sm btn-outline-success" onclick="exportStatsReport()" title="Ekspor Excel">
+                            <i class="bi bi-file-earmark-spreadsheet"></i> Ekspor Excel
                         </button>
-                        <button type="button" class="btn btn-sm btn-primary" onclick="window.print()" title="Cetak Laporan PDF">
-                            <i class="bi bi-printer"></i> Cetak / PDF
+                        <button type="button" class="btn btn-sm btn-primary" onclick="exportStatsPdf()" title="Download Laporan PDF">
+                            <i class="bi bi-file-earmark-pdf"></i> Ekspor PDF
                         </button>
                     </div>
                 </div>

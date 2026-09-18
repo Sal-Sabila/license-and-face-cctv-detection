@@ -265,6 +265,18 @@ function openCameraModal(camera = null) {
 
 async function exportCameras(format) {
     try {
+        // Excel (.xlsx) dan PDF dibuat di backend (openpyxl / ReportLab) agar
+        // hasilnya rapi dan konsisten dengan data kamera di database.
+        // Backend tetap menghasilkan file valid walau daftar kamera kosong.
+        if (format === 'excel') {
+            window.location.href = '/api/export/cameras';
+            return;
+        }
+        if (format === 'pdf') {
+            window.location.href = '/api/export/cameras/pdf';
+            return;
+        }
+
         const result = await json('/api/cameras');
         const cameras = result.data || [];
         if (!cameras.length) {
@@ -283,17 +295,6 @@ async function exportCameras(format) {
             const a = document.createElement('a');
             a.href = URL.createObjectURL(blob);
             a.download = 'cctv_playlist.xspf';
-            a.click();
-            URL.revokeObjectURL(a.href);
-        } else if (format === 'excel' || format === 'csv') {
-            let csv = 'ID,Nama CCTV,URL Stream,Status\n';
-            cameras.forEach(cam => {
-                csv += `"${cam.id}","${String(cam.name || '').replace(/"/g, '""')}","${String(cam.url || '').replace(/"/g, '""')}","${cam.active ? 'Aktif' : 'Nonaktif'}"\n`;
-            });
-            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
-            const a = document.createElement('a');
-            a.href = URL.createObjectURL(blob);
-            a.download = 'daftar_cctv.csv';
             a.click();
             URL.revokeObjectURL(a.href);
         }
@@ -881,6 +882,12 @@ function exportDetections() {
 }
 window.exportDetections = exportDetections;
 
+function exportDetectionsPdf() {
+    const params = new URLSearchParams(getStateDateRange(detState));
+    window.location.href = `/api/export/detections/pdf?${params.toString()}`;
+}
+window.exportDetectionsPdf = exportDetectionsPdf;
+
 
 // ============================================================
 // MODUL: RIWAYAT PLAT NOMOR (/history)
@@ -1073,6 +1080,12 @@ function exportPlates() {
 }
 window.exportPlates = exportPlates;
 
+function exportPlatesPdf() {
+    const params = new URLSearchParams(getStateDateRange(plateState));
+    window.location.href = `/api/export/plates/pdf?${params.toString()}`;
+}
+window.exportPlatesPdf = exportPlatesPdf;
+
 
 // ============================================================
 // MODUL: STATISTIK STANDAR PERUSAHAAN (ENTERPRISE ANALYTICS)
@@ -1144,8 +1157,15 @@ async function loadRecap() {
 }
 
 function exportRecap() {
-    window.location.href = `/api/export/statistics?${analyticsParams('recap').toString()}`;
+    window.location.href = `/api/export/recap?${analyticsParams('recap').toString()}`;
 }
+window.exportRecap = exportRecap;
+
+function exportRecapPdf() {
+    window.location.href = `/api/export/recap/pdf?${analyticsParams('recap').toString()}`;
+}
+window.exportRecapPdf = exportRecapPdf;
+
 window.loadRecap = loadRecap;
 
 async function initRecap() {
@@ -1157,6 +1177,7 @@ async function initRecap() {
         });
     });
     document.getElementById('recapExport')?.addEventListener('click', exportRecap);
+    document.getElementById('recapExportPdf')?.addEventListener('click', exportRecapPdf);
     loadRecap().catch(err => console.error('Error loadRecap:', err));
 }
 
@@ -1459,6 +1480,12 @@ function exportStatsReport() {
     window.location.href = `/api/export/statistics?${analyticsParams('stats', period).toString()}`;
 }
 window.exportStatsReport = exportStatsReport;
+
+function exportStatsPdf() {
+    const period = window._currentStatsPeriod || document.getElementById('statsPeriod')?.value || 'today';
+    window.location.href = `/api/export/statistics/pdf?${analyticsParams('stats', period).toString()}`;
+}
+window.exportStatsPdf = exportStatsPdf;
 
 async function initStatistics() {
     setDateFilterLimits();
@@ -1802,4 +1829,3 @@ document.addEventListener('DOMContentLoaded', () => {
         initSettings();
     }
 });
-

@@ -1,16 +1,26 @@
 import time
 import cv2
-import csv
-import io
 import numpy as np
 import os
 import threading
 import uuid
 import queue
-from flask import Blueprint, jsonify, request, Response, send_from_directory
+from flask import Blueprint, jsonify, request, Response, send_from_directory, send_file
 from datetime import datetime
 import db
 from ffmpeg_stream_reader import FFmpegStreamReader, normalize_stream_url
+from report_export import (
+    build_detections_excel,
+    build_detections_pdf,
+    build_plates_excel,
+    build_plates_pdf,
+    build_recap_excel,
+    build_recap_pdf,
+    build_statistics_excel,
+    build_statistics_pdf,
+    build_cameras_excel,
+    build_cameras_pdf,
+)
 
 plate_bp = Blueprint("plate", __name__)
 
@@ -541,12 +551,18 @@ def seed_demo():
 
 
 # ============================================================
-# ENDPOINT EKSPOR DATA KE CSV (STANDAR LAPORAN AUDIT PERUSAHAAN)
+# ENDPOINT EKSPOR DATA KE EXCEL (.xlsx) & PDF
+# Excel dibuat dengan openpyxl, PDF dibuat dengan ReportLab,
+# keduanya lewat report_export.py agar konsisten dengan data
+# yang memang ditampilkan di halaman masing-masing.
 # ============================================================
 
+EXCEL_MIMETYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
 @plate_bp.route("/export/detections", methods=["GET"])
-def export_detections_csv():
-    """Mengekspor seluruh data deteksi ke format CSV."""
+def export_detections_excel():
+    """Mengekspor seluruh data Hasil Deteksi ke file Excel (.xlsx) menggunakan openpyxl."""
     try:
         res = db.get_all_detections_paginated(
             page=1,
@@ -555,35 +571,44 @@ def export_detections_csv():
             end_date=request.args.get("end_date", type=str)
         )
         items = res.get("items", [])
+        buffer = build_detections_excel(items)
+        filename = f"laporan_deteksi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        return send_file(
+            buffer,
+            mimetype=EXCEL_MIMETYPE,
+            as_attachment=True,
+            download_name=filename
+        )
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
 
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow(["ID", "Tipe", "Nomor Plat", "Kamera CCTV", "Confidence (%)", "Waktu Deteksi", "Status"])
 
-        for it in items:
-            writer.writerow([
-                it["id"],
-                it["type"],
-                it["plate"],
-                it["camera"],
-                it["confidence_percent"],
-                it["timestamp"],
-                it["status"]
-            ])
-
-        output.seek(0)
-        return Response(
-            output.getvalue(),
-            mimetype="text/csv",
-            headers={"Content-Disposition": f"attachment; filename=laporan_deteksi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"}
+@plate_bp.route("/export/detections/pdf", methods=["GET"])
+def export_detections_pdf():
+    """Mengekspor seluruh data Hasil Deteksi ke file PDF (dengan foto) menggunakan ReportLab."""
+    try:
+        res = db.get_all_detections_paginated(
+            page=1,
+            limit=5000,
+            start_date=request.args.get("start_date", type=str),
+            end_date=request.args.get("end_date", type=str)
+        )
+        items = res.get("items", [])
+        buffer = build_detections_pdf(items)
+        filename = f"laporan_deteksi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        return send_file(
+            buffer,
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=filename
         )
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
 
 @plate_bp.route("/export/plates", methods=["GET"])
-def export_plates_csv():
-    """Mengekspor riwayat plat nomor ke format CSV."""
+def export_plates_excel():
+    """Mengekspor riwayat plat nomor ke file Excel (.xlsx) menggunakan openpyxl."""
     try:
         res = db.get_plate_history_paginated(
             page=1,
@@ -592,78 +617,147 @@ def export_plates_csv():
             end_date=request.args.get("end_date", type=str)
         )
         items = res.get("items", [])
+        buffer = build_plates_excel(items)
+        filename = f"riwayat_plat_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        return send_file(
+            buffer,
+            mimetype=EXCEL_MIMETYPE,
+            as_attachment=True,
+            download_name=filename
+        )
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
 
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow(["ID Plat", "Nomor Plat", "Kamera CCTV", "Confidence (%)", "Waktu Deteksi", "Status"])
 
-        for it in items:
-            writer.writerow([
-                it["id"],
-                it["plate"],
-                it["camera"],
-                it["confidence_percent"],
-                it["timestamp"],
-                it["status"]
-            ])
+@plate_bp.route("/export/plates/pdf", methods=["GET"])
+def export_plates_pdf():
+    """Mengekspor riwayat plat nomor ke file PDF (dengan crop plat) menggunakan ReportLab."""
+    try:
+        res = db.get_plate_history_paginated(
+            page=1,
+            limit=5000,
+            start_date=request.args.get("start_date", type=str),
+            end_date=request.args.get("end_date", type=str)
+        )
+        items = res.get("items", [])
+        buffer = build_plates_pdf(items)
+        filename = f"riwayat_plat_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        return send_file(
+            buffer,
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=filename
+        )
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
 
-        output.seek(0)
-        return Response(
-            output.getvalue(),
-            mimetype="text/csv",
-            headers={"Content-Disposition": f"attachment; filename=riwayat_plat_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"}
+
+@plate_bp.route("/export/recap", methods=["GET"])
+def export_recap_excel():
+    """Mengekspor Rekapitulasi ke Excel (.xlsx) - 1 file, 3 sheet: Ringkasan, Rekap CCTV, Total Harian."""
+    try:
+        analytics = db.get_analytics(request.args.to_dict())
+        buffer = build_recap_excel(analytics)
+        filename = f"rekapitulasi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        return send_file(
+            buffer,
+            mimetype=EXCEL_MIMETYPE,
+            as_attachment=True,
+            download_name=filename
+        )
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@plate_bp.route("/export/recap/pdf", methods=["GET"])
+def export_recap_pdf():
+    """Mengekspor Rekapitulasi ke PDF (Ringkasan, Rekap CCTV, Total Harian) menggunakan ReportLab."""
+    try:
+        analytics = db.get_analytics(request.args.to_dict())
+        buffer = build_recap_pdf(analytics)
+        filename = f"rekapitulasi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        return send_file(
+            buffer,
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=filename
         )
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
 
 @plate_bp.route("/export/statistics", methods=["GET"])
-def export_statistics_csv():
-    """Mengekspor laporan statistik analitik eksekutif ke CSV."""
+def export_statistics_excel():
+    """Mengekspor Statistik ke Excel (.xlsx) - 1 file, 2 sheet: Statistik, Top 10."""
     period = request.args.get("period", "today")
     try:
-        data = db.get_analytics(request.args.to_dict())
-        summary = data.get("summary", {})
-        top_plates = data.get("top_plates", [])
-        cam_dist = data.get("cameras", [])
+        analytics = db.get_analytics(request.args.to_dict())
+        buffer = build_statistics_excel(analytics, period=analytics.get("period", period))
+        filename = f"laporan_statistik_{period}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        return send_file(
+            buffer,
+            mimetype=EXCEL_MIMETYPE,
+            as_attachment=True,
+            download_name=filename
+        )
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
 
-        output = io.StringIO()
-        writer = csv.writer(output)
 
-        writer.writerow(["LAPORAN EKSEKUTIF ANALITIK CCTV - PLATEVISION"])
-        writer.writerow(["Periode", data.get("period", period)])
-        writer.writerow(["Tanggal Cetak", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
-        writer.writerow([])
+@plate_bp.route("/export/statistics/pdf", methods=["GET"])
+def export_statistics_pdf():
+    """Mengekspor Statistik ke PDF (Statistik Utama, Beban Lalu Lintas, Jam Sibuk, Top 10) menggunakan ReportLab."""
+    period = request.args.get("period", "today")
+    try:
+        analytics = db.get_analytics(request.args.to_dict())
+        buffer = build_statistics_pdf(analytics, period=analytics.get("period", period))
+        filename = f"laporan_statistik_{period}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        return send_file(
+            buffer,
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=filename
+        )
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
 
-        writer.writerow(["RINGKASAN KPI UTAMA"])
-        writer.writerow(["Metrik", "Nilai"])
-        writer.writerow(["Total Kendaraan", summary.get("vehicles", 0)])
-        writer.writerow(["Kendaraan Masuk", summary.get("vehicle_entry", 0)])
-        writer.writerow(["Kendaraan Keluar", summary.get("vehicle_exit", 0)])
-        writer.writerow(["Total Plat Terdeteksi", summary.get("plates", 0)])
-        writer.writerow(["Plat Unik", summary.get("unique_plates", 0)])
-        writer.writerow(["Total Orang", summary.get("people", 0)])
-        writer.writerow(["Orang Masuk", summary.get("people_entry", 0)])
-        writer.writerow(["Orang Keluar", summary.get("people_exit", 0)])
-        writer.writerow(["Kamera Aktif", f"{summary.get('active_cameras', 0)} / {summary.get('total_cameras', 0)}"])
-        writer.writerow([])
 
-        writer.writerow(["DISTRIBUSI LALU LINTAS PER KAMERA CCTV"])
-        writer.writerow(["Nama CCTV", "Arah", "Kendaraan", "Orang", "Plat Unik", "Status"])
-        for c in cam_dist:
-            writer.writerow([c["camera"], c["direction"], c["vehicles"], c["people"], c["unique_plates"], c["status"]])
-        writer.writerow([])
+# ============================================================
+# ENDPOINT EKSPOR MONITORING CCTV (EXCEL .xlsx & PDF)
+# Data diambil dari db.get_all_cameras() -- fungsi yang sama
+# dipakai endpoint GET /cameras -- agar data website, Excel,
+# dan PDF selalu konsisten.
+# ============================================================
 
-        writer.writerow(["TOP 10 PLAT PALING SERING TERDETEKSI"])
-        writer.writerow(["Nomor Plat", "Frekuensi", "Lokasi Terakhir", "Waktu Terakhir", "Confidence (%)"])
-        for tp in top_plates:
-            writer.writerow([tp["plate"], tp["count"], tp["camera"], tp["last_seen"], tp["confidence"]])
+@plate_bp.route("/export/cameras", methods=["GET"])
+def export_cameras_excel():
+    """Mengekspor daftar kamera CCTV ke file Excel (.xlsx) menggunakan openpyxl."""
+    try:
+        cameras_db = db.get_all_cameras()
+        buffer = build_cameras_excel(cameras_db)
+        filename = f"monitoring_cctv_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        return send_file(
+            buffer,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            as_attachment=True,
+            download_name=filename
+        )
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
 
-        output.seek(0)
-        return Response(
-            output.getvalue(),
-            mimetype="text/csv",
-            headers={"Content-Disposition": f"attachment; filename=laporan_statistik_{period}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"}
+
+@plate_bp.route("/export/cameras/pdf", methods=["GET"])
+def export_cameras_pdf():
+    """Mengekspor daftar kamera CCTV ke file PDF menggunakan ReportLab."""
+    try:
+        cameras_db = db.get_all_cameras()
+        buffer = build_cameras_pdf(cameras_db)
+        filename = f"monitoring_cctv_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        return send_file(
+            buffer,
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=filename
         )
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
@@ -808,4 +902,3 @@ def video_feed(camera_id=None):
         ),
         mimetype='multipart/x-mixed-replace; boundary=frame'
     )
-
