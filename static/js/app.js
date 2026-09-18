@@ -1663,10 +1663,119 @@ function initSidebarToggle() {
 
 
 // ============================================================
+// THEME MANAGER (DARK / LIGHT MODE)
+// ============================================================
+
+function getActiveTheme() {
+    return document.documentElement.classList.contains('dark') ? 'dark' : 'light';
+}
+
+function updateThemeUI(theme) {
+    const icon = document.getElementById('themeToggleIcon');
+    const label = document.getElementById('themeToggleLabel');
+    const btn = document.getElementById('themeToggleBtn');
+
+    if (theme === 'dark') {
+        document.documentElement.classList.add('dark');
+        document.documentElement.setAttribute('data-bs-theme', 'dark');
+        if (icon) {
+            icon.className = 'bi bi-sun-fill text-warning';
+        }
+        if (label) {
+            label.textContent = 'Mode Terang';
+        }
+        if (btn) {
+            btn.title = 'Beralih ke Mode Terang';
+            btn.setAttribute('aria-label', 'Beralih ke Mode Terang');
+        }
+    } else {
+        document.documentElement.classList.remove('dark');
+        document.documentElement.setAttribute('data-bs-theme', 'light');
+        if (icon) {
+            icon.className = 'bi bi-moon-stars-fill';
+        }
+        if (label) {
+            label.textContent = 'Mode Gelap';
+        }
+        if (btn) {
+            btn.title = 'Beralih ke Mode Gelap';
+            btn.setAttribute('aria-label', 'Beralih ke Mode Gelap');
+        }
+    }
+
+    refreshChartThemes(theme);
+}
+
+function refreshChartThemes(theme) {
+    if (!window.Chart) return;
+    const isDark = theme === 'dark';
+    const textColor = isDark ? '#94a3b8' : '#64748b';
+    const gridColor = isDark ? 'rgba(255, 255, 255, 0.08)' : '#f1f5f9';
+
+    [window._trendChart, window._cameraChart, window._statusChart].forEach(chart => {
+        if (!chart) return;
+        try {
+            if (chart.options && chart.options.scales) {
+                if (chart.options.scales.x) {
+                    chart.options.scales.x.ticks = chart.options.scales.x.ticks || {};
+                    chart.options.scales.x.ticks.color = textColor;
+                    if (chart.options.scales.x.grid) chart.options.scales.x.grid.color = gridColor;
+                }
+                if (chart.options.scales.y) {
+                    chart.options.scales.y.ticks = chart.options.scales.y.ticks || {};
+                    chart.options.scales.y.ticks.color = textColor;
+                    if (chart.options.scales.y.grid) chart.options.scales.y.grid.color = gridColor;
+                }
+            }
+            if (chart.options && chart.options.plugins && chart.options.plugins.legend) {
+                chart.options.plugins.legend.labels = chart.options.plugins.legend.labels || {};
+                chart.options.plugins.legend.labels.color = textColor;
+            }
+            chart.update();
+        } catch (e) {
+            console.warn('Error updating chart theme:', e);
+        }
+    });
+}
+
+function toggleTheme() {
+    const currentTheme = getActiveTheme();
+    const nextTheme = currentTheme === 'dark' ? 'light' : 'dark';
+    try {
+        localStorage.setItem('platevision_theme', nextTheme);
+        localStorage.setItem('theme', nextTheme);
+    } catch (e) {}
+    updateThemeUI(nextTheme);
+}
+
+function initTheme() {
+    let savedTheme = null;
+    try {
+        savedTheme = localStorage.getItem('platevision_theme') || localStorage.getItem('theme');
+    } catch (e) {}
+
+    if (!savedTheme) {
+        // Default light mode as existing look
+        savedTheme = 'light';
+    }
+
+    updateThemeUI(savedTheme);
+
+    const toggleBtn = document.getElementById('themeToggleBtn');
+    if (toggleBtn) {
+        toggleBtn.addEventListener('click', toggleTheme);
+    }
+}
+window.toggleTheme = toggleTheme;
+window.initTheme = initTheme;
+
+
+// ============================================================
 // INISIALISASI HALAMAN (ROUTING CLIENT-SIDE)
 // ============================================================
 
 document.addEventListener('DOMContentLoaded', () => {
+    initTheme();
     initSidebarToggle();
     setInterval(updateClock, 1000);
     updateClock();
@@ -1693,3 +1802,4 @@ document.addEventListener('DOMContentLoaded', () => {
         initSettings();
     }
 });
+
