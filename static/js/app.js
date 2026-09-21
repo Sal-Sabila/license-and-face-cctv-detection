@@ -259,38 +259,84 @@ window.zoomPreview = zoomPreview;
 // MODUL: MONITORING CCTV
 // ============================================================
 
+let allCameras = [];
+let cameraState = {
+    page: 1,
+    limit: 10,
+    search: ''
+};
+
+function renderCameraTable() {
+    const table = document.getElementById('cameraTable');
+    if (!table) return;
+
+    const query = (cameraState.search || '').trim().toLowerCase();
+    const filtered = allCameras.filter(c => {
+        if (!query) return true;
+        const name = (c.name || '').toLowerCase();
+        const url = (c.url || '').toLowerCase();
+        return name.includes(query) || url.includes(query);
+    });
+
+    const total = filtered.length;
+    const totalPages = Math.ceil(total / cameraState.limit) || 1;
+    if (cameraState.page > totalPages) cameraState.page = totalPages;
+    if (cameraState.page < 1) cameraState.page = 1;
+
+    const startIdx = (cameraState.page - 1) * cameraState.limit;
+    const endIdx = Math.min(startIdx + cameraState.limit, total);
+    const pageItems = filtered.slice(startIdx, endIdx);
+
+    const infoEl = document.getElementById('cameraPaginationInfo');
+    const pageEl = document.getElementById('cameraPageNumber');
+    const prevBtn = document.getElementById('cameraPrevBtn');
+    const nextBtn = document.getElementById('cameraNextBtn');
+
+    if (infoEl) infoEl.textContent = `Menampilkan ${total === 0 ? 0 : startIdx + 1} - ${endIdx} dari ${total} kamera`;
+    if (pageEl) pageEl.textContent = `Hal ${cameraState.page} dari ${totalPages}`;
+    if (prevBtn) prevBtn.disabled = cameraState.page <= 1;
+    if (nextBtn) nextBtn.disabled = cameraState.page >= totalPages;
+
+    if (pageItems.length === 0) {
+        table.innerHTML = `<tr><td colspan="5" class="text-center text-muted py-5">${query ? 'Tidak ada kamera yang cocok dengan pencarian.' : 'Belum ada kamera.'}</td></tr>`;
+        return;
+    }
+
+    table.innerHTML = pageItems.map((camera, i) => `
+        <tr>
+            <td class="text-center text-muted fw-semibold">${startIdx + i + 1}</td>
+            <td><strong>${esc(camera.name)}</strong></td>
+            <td class="camera-url">${esc(camera.url)}</td>
+            <td class="text-center">
+                <span class="status ${camera.active ? 'success' : 'warning'}">${camera.active ? 'Aktif' : 'Nonaktif'}</span>
+            </td>
+            <td class="text-center">
+                <div class="table-actions justify-content-center">
+                    <button class="action-toggle ${camera.active ? 'deactivate' : 'activate'}" data-action="toggle" data-id="${camera.id}">
+                        ${camera.active ? 'Nonaktifkan' : 'Aktifkan'}
+                    </button>
+                    <button class="action-edit" data-action="edit" data-id="${camera.id}">Edit</button>
+                    <button class="action-delete" data-action="delete" data-id="${camera.id}">Hapus</button>
+                </div>
+            </td>
+        </tr>
+    `).join('');
+}
+
 async function loadCameras() {
     try {
         const result = await json('/api/cameras');
-        const cameras = result.data || [];
+        allCameras = result.data || [];
         const count = document.getElementById('cameraCountTitle');
-        if (count) count.textContent = cameras.length;
+        if (count) count.textContent = allCameras.length;
 
         const select = document.getElementById('cameraSelect');
         if (select) {
-            select.innerHTML = cameras.map(item => `<option value="${item.id}">${esc(item.name)}</option>`).join('') || '<option value="">Belum ada kamera</option>';
+            select.innerHTML = allCameras.map(item => `<option value="${item.id}">${esc(item.name)}</option>`).join('') || '<option value="">Belum ada kamera</option>';
         }
 
-        const table = document.getElementById('cameraTable');
-        if (table) {
-            table.innerHTML = cameras.map(camera => `
-                <tr>
-                    <td><strong>${esc(camera.name)}</strong></td>
-                    <td class="camera-url">${esc(camera.url)}</td>
-                    <td><span class="status ${camera.active ? 'success' : 'warning'}">${camera.active ? 'Aktif' : 'Nonaktif'}</span></td>
-                    <td>
-                        <div class="table-actions">
-                            <button class="action-toggle ${camera.active ? 'deactivate' : 'activate'}" data-action="toggle" data-id="${camera.id}">
-                                ${camera.active ? 'Nonaktifkan' : 'Aktifkan'}
-                            </button>
-                            <button class="action-edit" data-action="edit" data-id="${camera.id}">Edit</button>
-                            <button class="action-delete" data-action="delete" data-id="${camera.id}">Hapus</button>
-                        </div>
-                    </td>
-                </tr>
-            `).join('') || '<tr><td colspan="4" class="text-center text-muted py-5">Belum ada kamera.</td></tr>';
-        }
-        return cameras;
+        renderCameraTable();
+        return allCameras;
     } catch (err) {
         console.error('Error loadCameras:', err);
         return [];
@@ -352,7 +398,41 @@ async function exportCameras(format) {
 window.exportCameras = exportCameras;
 
 async function initMonitoring() {
-    let cameras = await loadCameras();
+    await loadCameras();
+
+    const searchInput = document.getElementById('cameraSearchInput');
+    let searchTimer = null;
+    if (searchInput) {
+        searchInput.addEventListener('input', () => {
+            clearTimeout(searchTimer);
+            searchTimer = setTimeout(() => {
+                cameraState.search = searchInput.value;
+                cameraState.page = 1;
+                renderCameraTable();
+            }, 250);
+        });
+    }
+
+    document.getElementById('cameraPrevBtn')?.addEventListener('click', () => {
+        if (cameraState.page > 1) {
+            cameraState.page--;
+            renderCameraTable();
+        }
+    });
+
+    document.getElementById('cameraNextBtn')?.addEventListener('click', () => {
+        const query = (cameraState.search || '').trim().toLowerCase();
+        const filtered = allCameras.filter(c => {
+            if (!query) return true;
+            return (c.name || '').toLowerCase().includes(query) || (c.url || '').toLowerCase().includes(query);
+        });
+        const totalPages = Math.ceil(filtered.length / cameraState.limit) || 1;
+        if (cameraState.page < totalPages) {
+            cameraState.page++;
+            renderCameraTable();
+        }
+    });
+
     document.getElementById('cameraForm')?.addEventListener('submit', async event => {
         event.preventDefault();
         const id = document.getElementById('cameraId').value;
@@ -367,18 +447,23 @@ async function initMonitoring() {
             body: JSON.stringify(data)
         });
         bootstrap.Modal.getInstance(document.getElementById('cameraModal')).hide();
-        cameras = await loadCameras();
+        await loadCameras();
     });
 
     document.getElementById('cameraTable')?.addEventListener('click', async event => {
         const button = event.target.closest('button');
         if (!button) return;
         const id = Number(button.dataset.id);
-        const camera = cameras.find(item => item.id === id);
+        const camera = allCameras.find(item => item.id === id);
         if (button.dataset.action === 'edit') openCameraModal(camera);
         if (button.dataset.action === 'delete' && confirm('Hapus kamera ini?')) {
             await json(`/api/cameras/${id}`, { method: 'DELETE' });
+<<<<<<< Updated upstream
             cameras = await loadCameras();
+=======
+            await loadCameras();
+            showNotification('Kamera berhasil dihapus.', 'success');
+>>>>>>> Stashed changes
         }
         if (button.dataset.action === 'toggle') {
             await json(`/api/cameras/${id}`, {
@@ -386,7 +471,7 @@ async function initMonitoring() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ active: !camera.active })
             });
-            cameras = await loadCameras();
+            await loadCameras();
         }
     });
 }
@@ -792,6 +877,16 @@ async function initDetectionsPage() {
         }
     } catch (e) { }
 
+    const typeSelect = document.getElementById('detTypeFilter');
+    if (typeSelect) {
+        typeSelect.value = detState.type || 'all';
+        typeSelect.addEventListener('change', () => {
+            detState.type = typeSelect.value;
+            detState.page = 1;
+            loadDetections();
+        });
+    }
+
     const typeGroup = document.getElementById('detTypeButtonGroup');
     if (typeGroup) {
         typeGroup.addEventListener('click', e => {
@@ -827,6 +922,66 @@ async function initDetectionsPage() {
         });
     }
 
+<<<<<<< Updated upstream
+=======
+    const periodSelect = document.getElementById('detPeriodFilter');
+    if (periodSelect) {
+        periodSelect.addEventListener('change', () => {
+            detState.period = periodSelect.value;
+            detState.start_date = '';
+            detState.end_date = '';
+            document.getElementById('detStartDate').value = '';
+            document.getElementById('detEndDate').value = '';
+            detState.page = 1;
+            loadDetections();
+        });
+    }
+
+    ['detStartDate', 'detEndDate'].forEach(id => {
+        document.getElementById(id)?.addEventListener('change', () => {
+            const p = document.getElementById('detPeriodFilter');
+            if (p) p.value = 'custom';
+            detState.period = 'custom';
+        });
+    });
+
+    document.getElementById('detDateApply')?.addEventListener('click', () => {
+        if (applyCustomDateRange(detState, 'detStartDate', 'detEndDate')) {
+            detState.page = 1;
+            loadDetections();
+        }
+    });
+
+    document.getElementById('detResetBtn')?.addEventListener('click', () => {
+        detState = {
+            page: 1,
+            limit: 15,
+            type: 'all',
+            status: 'all',
+            camera_id: '',
+            search: '',
+            period: 'today',
+            start_date: '',
+            end_date: ''
+        };
+        const searchInput = document.getElementById('detectionSearch');
+        if (searchInput) searchInput.value = '';
+        const typeFilter = document.getElementById('detTypeFilter');
+        if (typeFilter) typeFilter.value = 'all';
+        const camFilter = document.getElementById('detCameraFilter');
+        if (camFilter) camFilter.value = '';
+        const statusFilter = document.getElementById('detStatusFilter');
+        if (statusFilter) statusFilter.value = 'all';
+        const periodFilter = document.getElementById('detPeriodFilter');
+        if (periodFilter) periodFilter.value = 'today';
+        const startInput = document.getElementById('detStartDate');
+        if (startInput) startInput.value = '';
+        const endInput = document.getElementById('detEndDate');
+        if (endInput) endInput.value = '';
+        loadDetections();
+    });
+
+>>>>>>> Stashed changes
     document.getElementById('detPrevBtn')?.addEventListener('click', () => {
         if (detState.page > 1) {
             detState.page--;
@@ -976,6 +1131,63 @@ async function initHistoryPage() {
         });
     }
 
+<<<<<<< Updated upstream
+=======
+    const periodSelect = document.getElementById('platePeriodFilter');
+    if (periodSelect) {
+        periodSelect.addEventListener('change', () => {
+            plateState.period = periodSelect.value;
+            plateState.start_date = '';
+            plateState.end_date = '';
+            document.getElementById('plateStartDate').value = '';
+            document.getElementById('plateEndDate').value = '';
+            plateState.page = 1;
+            loadPlateHistory();
+        });
+    }
+
+    ['plateStartDate', 'plateEndDate'].forEach(id => {
+        document.getElementById(id)?.addEventListener('change', () => {
+            const p = document.getElementById('platePeriodFilter');
+            if (p) p.value = 'custom';
+            plateState.period = 'custom';
+        });
+    });
+
+    document.getElementById('plateDateApply')?.addEventListener('click', () => {
+        if (applyCustomDateRange(plateState, 'plateStartDate', 'plateEndDate')) {
+            plateState.page = 1;
+            loadPlateHistory();
+        }
+    });
+
+    document.getElementById('plateResetBtn')?.addEventListener('click', () => {
+        plateState = {
+            page: 1,
+            limit: 15,
+            search: '',
+            camera_id: '',
+            status: 'all',
+            period: 'today',
+            start_date: '',
+            end_date: ''
+        };
+        const searchInput = document.getElementById('plateSearch');
+        if (searchInput) searchInput.value = '';
+        const camFilter = document.getElementById('plateCameraFilter');
+        if (camFilter) camFilter.value = '';
+        const statusFilter = document.getElementById('plateStatusFilter');
+        if (statusFilter) statusFilter.value = 'all';
+        const periodFilter = document.getElementById('platePeriodFilter');
+        if (periodFilter) periodFilter.value = 'today';
+        const startInput = document.getElementById('plateStartDate');
+        if (startInput) startInput.value = '';
+        const endInput = document.getElementById('plateEndDate');
+        if (endInput) endInput.value = '';
+        loadPlateHistory();
+    });
+
+>>>>>>> Stashed changes
     document.getElementById('platePrevBtn')?.addEventListener('click', () => {
         if (plateState.page > 1) {
             plateState.page--;
@@ -1001,6 +1213,145 @@ window.exportPlates = exportPlates;
 // MODUL: STATISTIK STANDAR PERUSAHAAN (ENTERPRISE ANALYTICS)
 // ============================================================
 
+<<<<<<< Updated upstream
+=======
+function analyticsParams(prefix, periodOverride = '') {
+    const period = periodOverride || document.getElementById(`${prefix}Period`)?.value || 'today';
+    const params = new URLSearchParams({ period });
+    const start = document.getElementById(`${prefix}Start`)?.value;
+    const end = document.getElementById(`${prefix}End`)?.value;
+    const camera = document.getElementById(`${prefix}Camera`)?.value;
+    const region = document.getElementById(`${prefix}Region`)?.value;
+    const gate = document.getElementById(`${prefix}Gate`)?.value;
+    const type = document.getElementById(`${prefix}ObjectType`)?.value;
+    const direction = document.getElementById(`${prefix}Direction`)?.value;
+    if (start) params.set('start_date', start);
+    if (end) params.set('end_date', end);
+    if (camera) params.set('camera_id', camera);
+    if (region) params.set('region', region);
+    if (gate) params.set('gate', gate);
+    if (type) params.set('object_type', type);
+    if (direction) params.set('direction', direction);
+    return params;
+}
+
+async function populateAnalyticsCameraSelect(id) {
+    const select = document.getElementById(id);
+    if (!select) return;
+    const res = await json('/api/cameras').catch(() => ({ data: [] }));
+    select.innerHTML = '<option value="">Semua CCTV</option>' + (res.data || []).map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+}
+
+async function loadRecap() {
+    const start = document.getElementById('recapStart')?.value || '';
+    const end = document.getElementById('recapEnd')?.value || '';
+    if (start && end && start > end) {
+        throw new Error('Tanggal mulai tidak boleh lebih besar dari tanggal akhir.');
+    }
+
+    const applyButton = document.getElementById('recapApply');
+    const cameraTable = document.getElementById('recapCameraTable');
+    const dailyTable = document.getElementById('recapDailyTable');
+    if (applyButton) applyButton.disabled = true;
+    if (cameraTable) cameraTable.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">Memuat data sesuai filter...</td></tr>';
+    if (dailyTable) dailyTable.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">Memuat data sesuai filter...</td></tr>';
+
+    try {
+        const res = await json(`/api/analytics?${analyticsParams('recap').toString()}`);
+        if (!res.success) throw new Error(res.message || 'Data rekap tidak dapat dimuat.');
+
+        const data = res.data || {};
+        const s = data.summary || {};
+        const cards = [
+            ['Kendaraan masuk', s.vehicle_entry], ['Kendaraan keluar', s.vehicle_exit], ['Total kendaraan', s.vehicles],
+            ['Orang masuk', s.people_entry], ['Orang keluar', s.people_exit], ['Total orang', s.people]
+        ];
+        const totals = document.getElementById('recapTotals');
+        if (totals) totals.innerHTML = cards.map(([label, value]) => `<div class="col-xl-2 col-md-4 col-6"><div class="stat-card recap-stat"><div><span>${label}</span><strong>${value || 0}</strong></div></div></div>`).join('');
+        if (cameraTable) cameraTable.innerHTML = (data.cameras || []).map(c => `<tr><td><strong>${esc(c.camera)}</strong></td><td>${esc(c.direction)}</td><td>${c.vehicles}</td><td>${c.people}</td><td>${c.unique_plates}</td><td><span class="status ${c.status === 'Aktif' ? 'success' : 'warning'}">${c.status}</span></td></tr>`).join('') || '<tr><td colspan="6" class="text-center text-muted py-4">Belum ada event pada filter ini.</td></tr>';
+        if (dailyTable) dailyTable.innerHTML = (data.daily || []).map(d => `<tr><td>${esc(d.date)}</td><td>${d.vehicles}</td><td>${d.unique_plates}</td><td>${d.entry}</td><td>${d.exit}</td><td>${d.people}</td></tr>`).join('') || '<tr><td colspan="6" class="text-center text-muted py-4">Belum ada data harian.</td></tr>';
+    } catch (error) {
+        const message = esc(error.message || 'Gagal memuat data rekapitulasi.');
+        if (cameraTable) cameraTable.innerHTML = `<tr><td colspan="6" class="text-center text-danger py-4">${message}</td></tr>`;
+        if (dailyTable) dailyTable.innerHTML = `<tr><td colspan="6" class="text-center text-danger py-4">${message}</td></tr>`;
+        throw error;
+    } finally {
+        if (applyButton) applyButton.disabled = false;
+    }
+}
+
+function exportRecap() {
+    window.location.href = `/api/export/recap?${analyticsParams('recap').toString()}`;
+}
+window.exportRecap = exportRecap;
+
+function exportRecapPdf() {
+    window.location.href = `/api/export/recap/pdf?${analyticsParams('recap').toString()}`;
+}
+window.exportRecapPdf = exportRecapPdf;
+
+window.loadRecap = loadRecap;
+
+async function initRecap() {
+    setDateFilterLimits();
+    await populateAnalyticsCameraSelect('recapCamera');
+    const recapPeriod = document.getElementById('recapPeriod');
+    if (recapPeriod) {
+        recapPeriod.addEventListener('change', () => {
+            if (recapPeriod.value !== 'custom') {
+                const s = document.getElementById('recapStart');
+                const e = document.getElementById('recapEnd');
+                if (s) s.value = '';
+                if (e) e.value = '';
+            }
+            loadRecap().catch(err => {
+                if (err.message) showNotification(err.message, 'warning');
+            });
+        });
+    }
+
+    ['recapStart', 'recapEnd'].forEach(id => {
+        document.getElementById(id)?.addEventListener('change', () => {
+            if (recapPeriod) recapPeriod.value = 'custom';
+        });
+    });
+
+    ['recapObjectType', 'recapCamera', 'recapDirection'].forEach(id => {
+        document.getElementById(id)?.addEventListener('change', () => {
+            loadRecap().catch(err => {
+                if (err.message) showNotification(err.message, 'warning');
+            });
+        });
+    });
+
+    document.getElementById('recapApply')?.addEventListener('click', () => {
+        loadRecap().catch(err => {
+            if (err.message) showNotification(err.message, 'warning');
+        });
+    });
+    document.getElementById('recapResetBtn')?.addEventListener('click', () => {
+        const period = document.getElementById('recapPeriod');
+        if (period) period.value = 'today';
+        const start = document.getElementById('recapStart');
+        if (start) start.value = '';
+        const end = document.getElementById('recapEnd');
+        if (end) end.value = '';
+        const objType = document.getElementById('recapObjectType');
+        if (objType) objType.value = '';
+        const cam = document.getElementById('recapCamera');
+        if (cam) cam.value = '';
+        const dir = document.getElementById('recapDirection');
+        if (dir) dir.value = '';
+        loadRecap().catch(err => {
+            if (err.message) showNotification(err.message, 'warning');
+        });
+    });
+    document.getElementById('recapExport')?.addEventListener('click', exportRecap);
+    document.getElementById('recapExportPdf')?.addEventListener('click', exportRecapPdf);
+    loadRecap().catch(err => console.error('Error loadRecap:', err));
+}
+
+>>>>>>> Stashed changes
 window._currentStatsPeriod = 'today';
 window._trendChart = null;
 window._donutChart = null;
@@ -1254,7 +1605,75 @@ function exportStatsReport() {
 }
 window.exportStatsReport = exportStatsReport;
 
+<<<<<<< Updated upstream
 function initStatistics() {
+=======
+function exportStatsPdf() {
+    const period = window._currentStatsPeriod || document.getElementById('statsPeriod')?.value || 'today';
+    window.location.href = `/api/export/statistics/pdf?${analyticsParams('stats', period).toString()}`;
+}
+window.exportStatsPdf = exportStatsPdf;
+
+async function initStatistics() {
+    setDateFilterLimits();
+    await populateAnalyticsCameraSelect('statsCamera');
+    const statsPeriodSelect = document.getElementById('statsPeriod');
+    if (statsPeriodSelect) {
+        statsPeriodSelect.addEventListener('change', () => {
+            if (statsPeriodSelect.value !== 'custom') {
+                const s = document.getElementById('statsStart');
+                const e = document.getElementById('statsEnd');
+                if (s) s.value = '';
+                if (e) e.value = '';
+            }
+            const period = statsPeriodSelect.value;
+            const periodGroup = document.getElementById('statsPeriodGroup');
+            if (periodGroup) {
+                periodGroup.querySelectorAll('button').forEach(b => {
+                    if (b.dataset.period === period) b.classList.add('active');
+                    else b.classList.remove('active');
+                });
+            }
+            loadEnterpriseStatistics(period).catch(err => console.error('Error loadEnterpriseStatistics:', err));
+        });
+    }
+
+    ['statsStart', 'statsEnd'].forEach(id => {
+        document.getElementById(id)?.addEventListener('change', () => {
+            if (statsPeriodSelect) statsPeriodSelect.value = 'custom';
+        });
+    });
+
+    ['statsObjectType', 'statsCamera'].forEach(id => {
+        document.getElementById(id)?.addEventListener('change', () => {
+            loadEnterpriseStatistics(document.getElementById('statsPeriod')?.value || 'today').catch(err => console.error('Error loadEnterpriseStatistics:', err));
+        });
+    });
+
+    document.getElementById('statsApply')?.addEventListener('click', () => {
+        loadEnterpriseStatistics(document.getElementById('statsPeriod')?.value || 'today').catch(err => showNotification(err.message, 'warning'));
+    });
+    document.getElementById('statsResetBtn')?.addEventListener('click', () => {
+        const period = document.getElementById('statsPeriod');
+        if (period) period.value = 'today';
+        const start = document.getElementById('statsStart');
+        if (start) start.value = '';
+        const end = document.getElementById('statsEnd');
+        if (end) end.value = '';
+        const objType = document.getElementById('statsObjectType');
+        if (objType) objType.value = '';
+        const cam = document.getElementById('statsCamera');
+        if (cam) cam.value = '';
+        const periodGroup = document.getElementById('statsPeriodGroup');
+        if (periodGroup) {
+            periodGroup.querySelectorAll('button').forEach(b => {
+                if (b.dataset.period === 'today') b.classList.add('active');
+                else b.classList.remove('active');
+            });
+        }
+        loadEnterpriseStatistics('today').catch(err => console.error('Error loadEnterpriseStatistics:', err));
+    });
+>>>>>>> Stashed changes
     const periodGroup = document.getElementById('statsPeriodGroup');
     if (periodGroup) {
         periodGroup.addEventListener('click', e => {
