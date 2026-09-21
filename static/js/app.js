@@ -43,21 +43,67 @@ function getDateRange(period) {
 }
 
 function getStateDateRange(state) {
-    if (state.start_date || state.end_date) {
-        return { start_date: state.start_date, end_date: state.end_date };
+    if (state.period === 'custom') {
+        return { start_date: state.start_date || '', end_date: state.end_date || '' };
+    }
+    if (state.period === 'all') {
+        return { start_date: '', end_date: '' };
     }
     return getDateRange(state.period);
+}
+
+function syncPeriodInputs(periodSelectId, startInputId, endInputId, state = null) {
+    const periodEl = document.getElementById(periodSelectId);
+    const startEl = document.getElementById(startInputId);
+    const endEl = document.getElementById(endInputId);
+    if (!periodEl || !startEl || !endEl) return;
+
+    function updateInputsFromPeriod(period) {
+        if (period === 'custom') return;
+        if (period === 'all') {
+            startEl.value = '';
+            endEl.value = '';
+        } else {
+            const range = getDateRange(period);
+            startEl.value = range.start_date;
+            endEl.value = range.end_date;
+        }
+        if (state) {
+            state.period = period;
+            state.start_date = startEl.value;
+            state.end_date = endEl.value;
+        }
+    }
+
+    // Set default initial values on inputs
+    if (!startEl.value && !endEl.value && periodEl.value !== 'custom') {
+        updateInputsFromPeriod(periodEl.value || 'today');
+    }
+
+    periodEl.addEventListener('change', () => {
+        const p = periodEl.value;
+        if (p !== 'custom') {
+            updateInputsFromPeriod(p);
+        }
+    });
+
+    [startEl, endEl].forEach(input => {
+        input.addEventListener('change', () => {
+            if (periodEl.value !== 'custom') {
+                periodEl.value = 'custom';
+            }
+            if (state) {
+                state.period = 'custom';
+                state.start_date = startEl.value;
+                state.end_date = endEl.value;
+            }
+        });
+    });
 }
 
 function applyCustomDateRange(state, startInputId, endInputId) {
     const startDate = document.getElementById(startInputId)?.value || '';
     const endDate = document.getElementById(endInputId)?.value || '';
-    const today = new Date();
-    const todayValue = [
-        today.getFullYear(),
-        String(today.getMonth() + 1).padStart(2, '0'),
-        String(today.getDate()).padStart(2, '0')
-    ].join('-');
 
     if (!startDate && !endDate) {
         state.start_date = '';
@@ -67,10 +113,6 @@ function applyCustomDateRange(state, startInputId, endInputId) {
     }
     if ((startDate && endDate) && startDate > endDate) {
         showNotification('Tanggal mulai tidak boleh lebih besar dari tanggal akhir.', 'warning');
-        return false;
-    }
-    if (startDate > todayValue || endDate > todayValue) {
-        showNotification('Tanggal tidak boleh melebihi tanggal hari ini.', 'warning');
         return false;
     }
 
@@ -88,7 +130,7 @@ function setDateFilterLimits() {
         String(today.getDate()).padStart(2, '0')
     ].join('-');
 
-    ['detStartDate', 'detEndDate', 'plateStartDate', 'plateEndDate', 'recapStart', 'recapEnd'].forEach(id => {
+    ['detStartDate', 'detEndDate', 'plateStartDate', 'plateEndDate', 'recapStart', 'recapEnd', 'statsStart', 'statsEnd'].forEach(id => {
         const input = document.getElementById(id);
         if (input) input.max = todayValue;
     });
@@ -791,6 +833,7 @@ window.deleteDetection = deleteDetection;
 
 async function initDetectionsPage() {
     setDateFilterLimits();
+    syncPeriodInputs('detPeriodFilter', 'detStartDate', 'detEndDate', detState);
 
     try {
         const camRes = await json('/api/cameras');
@@ -806,14 +849,11 @@ async function initDetectionsPage() {
         }
     } catch (e) {}
 
-    const typeGroup = document.getElementById('detTypeButtonGroup');
-    if (typeGroup) {
-        typeGroup.addEventListener('click', e => {
-            const btn = e.target.closest('button');
-            if (!btn) return;
-            typeGroup.querySelectorAll('button').forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-            detState.type = btn.dataset.type || 'all';
+    const typeSelect = document.getElementById('detTypeFilter');
+    if (typeSelect) {
+        typeSelect.value = detState.type || 'all';
+        typeSelect.addEventListener('change', () => {
+            detState.type = typeSelect.value || 'all';
             detState.page = 1;
             loadDetections();
         });
@@ -844,13 +884,11 @@ async function initDetectionsPage() {
     const periodSelect = document.getElementById('detPeriodFilter');
     if (periodSelect) {
         periodSelect.addEventListener('change', () => {
-            detState.period = periodSelect.value;
-            detState.start_date = '';
-            detState.end_date = '';
-            document.getElementById('detStartDate').value = '';
-            document.getElementById('detEndDate').value = '';
-            detState.page = 1;
-            loadDetections();
+            if (periodSelect.value !== 'custom') {
+                detState.period = periodSelect.value;
+                detState.page = 1;
+                loadDetections();
+            }
         });
     }
 
@@ -859,6 +897,31 @@ async function initDetectionsPage() {
             detState.page = 1;
             loadDetections();
         }
+    });
+
+    document.getElementById('detResetBtn')?.addEventListener('click', () => {
+        const sInput = document.getElementById('detectionSearch');
+        if (sInput) sInput.value = '';
+        if (typeSelect) typeSelect.value = 'all';
+        const camSelect = document.getElementById('detCameraFilter');
+        if (camSelect) camSelect.value = '';
+        if (statusSelect) statusSelect.value = 'all';
+        if (periodSelect) periodSelect.value = 'today';
+        const r = getDateRange('today');
+        const sDate = document.getElementById('detStartDate');
+        const eDate = document.getElementById('detEndDate');
+        if (sDate) sDate.value = r.start_date;
+        if (eDate) eDate.value = r.end_date;
+
+        detState.search = '';
+        detState.type = 'all';
+        detState.camera_id = '';
+        detState.status = 'all';
+        detState.period = 'today';
+        detState.start_date = r.start_date;
+        detState.end_date = r.end_date;
+        detState.page = 1;
+        loadDetections();
     });
 
     document.getElementById('detPrevBtn')?.addEventListener('click', () => {
@@ -877,13 +940,25 @@ async function initDetectionsPage() {
 }
 
 function exportDetections() {
-    const params = new URLSearchParams(getStateDateRange(detState));
+    const params = new URLSearchParams({
+        type: detState.type,
+        status: detState.status,
+        camera_id: detState.camera_id,
+        search: detState.search,
+        ...getStateDateRange(detState)
+    });
     window.location.href = `/api/export/detections?${params.toString()}`;
 }
 window.exportDetections = exportDetections;
 
 function exportDetectionsPdf() {
-    const params = new URLSearchParams(getStateDateRange(detState));
+    const params = new URLSearchParams({
+        type: detState.type,
+        status: detState.status,
+        camera_id: detState.camera_id,
+        search: detState.search,
+        ...getStateDateRange(detState)
+    });
     window.location.href = `/api/export/detections/pdf?${params.toString()}`;
 }
 window.exportDetectionsPdf = exportDetectionsPdf;
@@ -1002,6 +1077,7 @@ window.deletePlateHistory = deletePlateHistory;
 
 async function initHistoryPage() {
     setDateFilterLimits();
+    syncPeriodInputs('platePeriodFilter', 'plateStartDate', 'plateEndDate', plateState);
 
     try {
         const camRes = await json('/api/cameras');
@@ -1042,13 +1118,11 @@ async function initHistoryPage() {
     const periodSelect = document.getElementById('platePeriodFilter');
     if (periodSelect) {
         periodSelect.addEventListener('change', () => {
-            plateState.period = periodSelect.value;
-            plateState.start_date = '';
-            plateState.end_date = '';
-            document.getElementById('plateStartDate').value = '';
-            document.getElementById('plateEndDate').value = '';
-            plateState.page = 1;
-            loadPlateHistory();
+            if (periodSelect.value !== 'custom') {
+                plateState.period = periodSelect.value;
+                plateState.page = 1;
+                loadPlateHistory();
+            }
         });
     }
 
@@ -1057,6 +1131,29 @@ async function initHistoryPage() {
             plateState.page = 1;
             loadPlateHistory();
         }
+    });
+
+    document.getElementById('plateResetBtn')?.addEventListener('click', () => {
+        const sInput = document.getElementById('plateSearch');
+        if (sInput) sInput.value = '';
+        const camSelect = document.getElementById('plateCameraFilter');
+        if (camSelect) camSelect.value = '';
+        if (statusSelect) statusSelect.value = 'all';
+        if (periodSelect) periodSelect.value = 'today';
+        const r = getDateRange('today');
+        const sDate = document.getElementById('plateStartDate');
+        const eDate = document.getElementById('plateEndDate');
+        if (sDate) sDate.value = r.start_date;
+        if (eDate) eDate.value = r.end_date;
+
+        plateState.search = '';
+        plateState.camera_id = '';
+        plateState.status = 'all';
+        plateState.period = 'today';
+        plateState.start_date = r.start_date;
+        plateState.end_date = r.end_date;
+        plateState.page = 1;
+        loadPlateHistory();
     });
 
     document.getElementById('platePrevBtn')?.addEventListener('click', () => {
@@ -1075,13 +1172,23 @@ async function initHistoryPage() {
 }
 
 function exportPlates() {
-    const params = new URLSearchParams(getStateDateRange(plateState));
+    const params = new URLSearchParams({
+        search: plateState.search,
+        camera_id: plateState.camera_id,
+        status: plateState.status,
+        ...getStateDateRange(plateState)
+    });
     window.location.href = `/api/export/plates?${params.toString()}`;
 }
 window.exportPlates = exportPlates;
 
 function exportPlatesPdf() {
-    const params = new URLSearchParams(getStateDateRange(plateState));
+    const params = new URLSearchParams({
+        search: plateState.search,
+        camera_id: plateState.camera_id,
+        status: plateState.status,
+        ...getStateDateRange(plateState)
+    });
     window.location.href = `/api/export/plates/pdf?${params.toString()}`;
 }
 window.exportPlatesPdf = exportPlatesPdf;
@@ -1094,18 +1201,22 @@ window.exportPlatesPdf = exportPlatesPdf;
 function analyticsParams(prefix, periodOverride = '') {
     const period = periodOverride || document.getElementById(`${prefix}Period`)?.value || 'today';
     const params = new URLSearchParams({ period });
-    const start = document.getElementById(`${prefix}Start`)?.value;
-    const end = document.getElementById(`${prefix}End`)?.value;
+    const start = document.getElementById(`${prefix}Start`)?.value || '';
+    const end = document.getElementById(`${prefix}End`)?.value || '';
     const camera = document.getElementById(`${prefix}Camera`)?.value;
-    const region = document.getElementById(`${prefix}Region`)?.value;
-    const gate = document.getElementById(`${prefix}Gate`)?.value;
     const type = document.getElementById(`${prefix}ObjectType`)?.value;
     const direction = document.getElementById(`${prefix}Direction`)?.value;
-    if (start) params.set('start_date', start);
-    if (end) params.set('end_date', end);
+
+    if (period === 'custom') {
+        if (start) params.set('start_date', start);
+        if (end) params.set('end_date', end);
+    } else if (period !== 'all') {
+        const range = getDateRange(period);
+        if (range.start_date) params.set('start_date', range.start_date);
+        if (range.end_date) params.set('end_date', range.end_date);
+    }
+
     if (camera) params.set('camera_id', camera);
-    if (region) params.set('region', region);
-    if (gate) params.set('gate', gate);
     if (type) params.set('object_type', type);
     if (direction) params.set('direction', direction);
     return params;
@@ -1122,7 +1233,8 @@ async function loadRecap() {
     const start = document.getElementById('recapStart')?.value || '';
     const end = document.getElementById('recapEnd')?.value || '';
     if (start && end && start > end) {
-        throw new Error('Tanggal mulai tidak boleh lebih besar dari tanggal akhir.');
+        showNotification('Tanggal mulai tidak boleh lebih besar dari tanggal akhir.', 'warning');
+        return;
     }
 
     const applyButton = document.getElementById('recapApply');
@@ -1150,7 +1262,7 @@ async function loadRecap() {
         const message = esc(error.message || 'Gagal memuat data rekapitulasi.');
         if (cameraTable) cameraTable.innerHTML = `<tr><td colspan="6" class="text-center text-danger py-4">${message}</td></tr>`;
         if (dailyTable) dailyTable.innerHTML = `<tr><td colspan="6" class="text-center text-danger py-4">${message}</td></tr>`;
-        throw error;
+        showNotification(error.message || 'Gagal memuat rekap.', 'warning');
     } finally {
         if (applyButton) applyButton.disabled = false;
     }
@@ -1170,235 +1282,119 @@ window.loadRecap = loadRecap;
 
 async function initRecap() {
     setDateFilterLimits();
+    syncPeriodInputs('recapPeriod', 'recapStart', 'recapEnd');
     await populateAnalyticsCameraSelect('recapCamera');
+
     document.getElementById('recapApply')?.addEventListener('click', () => {
-        loadRecap().catch(err => {
-            if (err.message) showNotification(err.message, 'warning');
+        loadRecap();
+    });
+
+    document.getElementById('recapPeriod')?.addEventListener('change', () => {
+        const p = document.getElementById('recapPeriod')?.value;
+        if (p !== 'custom') {
+            loadRecap();
+        }
+    });
+
+    ['recapObjectType', 'recapCamera', 'recapDirection'].forEach(id => {
+        document.getElementById(id)?.addEventListener('change', () => {
+            loadRecap();
         });
     });
+
+    document.getElementById('recapResetBtn')?.addEventListener('click', () => {
+        const pSelect = document.getElementById('recapPeriod');
+        if (pSelect) pSelect.value = 'today';
+        const r = getDateRange('today');
+        const sDate = document.getElementById('recapStart');
+        const eDate = document.getElementById('recapEnd');
+        if (sDate) sDate.value = r.start_date;
+        if (eDate) eDate.value = r.end_date;
+
+        const objType = document.getElementById('recapObjectType');
+        if (objType) objType.value = '';
+        const camSelect = document.getElementById('recapCamera');
+        if (camSelect) camSelect.value = '';
+        const dirSelect = document.getElementById('recapDirection');
+        if (dirSelect) dirSelect.value = '';
+
+        loadRecap();
+    });
+
     document.getElementById('recapExport')?.addEventListener('click', exportRecap);
     document.getElementById('recapExportPdf')?.addEventListener('click', exportRecapPdf);
-    loadRecap().catch(err => console.error('Error loadRecap:', err));
+    await loadRecap();
 }
 
 window._currentStatsPeriod = 'today';
-window._trendChart = null;
-window._donutChart = null;
 window._cameraChart = null;
 
-async function loadEnterpriseStatistics(period = 'today') {
+async function loadEnterpriseStatistics() {
+    const periodSelect = document.getElementById('statsPeriod');
+    const period = periodSelect?.value || 'today';
     window._currentStatsPeriod = period;
 
-    const periodSelect = document.getElementById('statsPeriod');
-    if (periodSelect) periodSelect.value = period;
     const start = document.getElementById('statsStart')?.value || '';
     const end = document.getElementById('statsEnd')?.value || '';
     if (start && end && start > end) {
-        throw new Error('Tanggal mulai tidak boleh lebih besar dari tanggal akhir.');
+        showNotification('Tanggal mulai tidak boleh lebih besar dari tanggal akhir.', 'warning');
+        return;
     }
 
     const applyButton = document.getElementById('statsApply');
     if (applyButton) applyButton.disabled = true;
-    const analyticsRes = await json(`/api/analytics?${analyticsParams('stats', period).toString()}`).catch(() => null);
-    if (analyticsRes?.success && analyticsRes.data) {
-        const data = analyticsRes.data;
-        const s = data.summary || {};
-        const kpiValues = {
-            kpiTotalDets: s.vehicles, kpiTotalPlates: s.plates, kpiTotalFaces: s.people,
-            kpiPlateRate: s.vehicles ? `${Math.round((s.plates / s.vehicles) * 100)}%` : '0%',
-            kpiAvgConf: '-', kpiNeedCheck: '-', kpiCamStatus: `${s.active_cameras || 0} / ${s.total_cameras || 0}`, kpiCamUptime: '-'
-        };
-        Object.entries(kpiValues).forEach(([id, value]) => { const el = document.getElementById(id); if (el) el.textContent = value ?? 0; });
-        const trend = data.daily?.length ? data.daily : data.hourly;
-        const labels = trend.map(item => item.date || item.label);
-        const vehicleData = trend.map(item => item.vehicles || 0);
-        const peopleData = trend.map(item => item.people || 0);
-        const trendCanvas = document.getElementById('trendChartCanvas');
-        if (trendCanvas && window.Chart) {
-            if (window._trendChart) window._trendChart.destroy();
-            window._trendChart = new Chart(trendCanvas, { type: 'line', data: { labels, datasets: [{ label: 'Kendaraan', data: vehicleData, borderColor: '#2563eb', backgroundColor: 'rgba(37,99,235,.12)', fill: true, tension: .3 }, { label: 'Orang', data: peopleData, borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,.08)', fill: true, tension: .3 }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true } } } });
-        }
-        const camCanvas = document.getElementById('cameraBarCanvas');
-        if (camCanvas && window.Chart) {
-            if (window._cameraChart) window._cameraChart.destroy();
-            window._cameraChart = new Chart(camCanvas, { type: 'bar', data: { labels: (data.cameras || []).map(c => c.camera), datasets: [{ label: 'Kendaraan', data: (data.cameras || []).map(c => c.vehicles), backgroundColor: '#2563eb' }, { label: 'Orang', data: (data.cameras || []).map(c => c.people), backgroundColor: '#f59e0b' }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true } } } });
-        }
-        const peak = (data.hourly || []).reduce((best, item) => item.vehicles > (best?.vehicles || -1) ? item : best, null);
-        const peakContainer = document.getElementById('peakHoursList');
-        if (peakContainer) peakContainer.innerHTML = peak ? `<div class="p-3 bg-light rounded border"><strong>${peak.label} - ${String((peak.hour + 1) % 24).padStart(2, '0')}:00</strong><span class="d-block text-primary mt-1">${peak.vehicles} kendaraan · ${peak.people} orang</span></div>` : '<div class="text-muted">Belum ada data.</div>';
-        const topBody = document.getElementById('topPlatesTable');
-        if (topBody) topBody.innerHTML = (data.top_plates || []).map((p, i) => `<tr><td>${i + 1}</td><td><strong>${esc(p.plate)}</strong></td><td>${p.count} kali</td><td>${esc(p.camera)}</td><td>${esc(p.last_seen)}</td><td>${p.confidence}%</td><td><span class="badge bg-success-subtle text-success">Aktual</span></td></tr>`).join('') || '<tr><td colspan="7" class="text-center text-muted py-4">Belum ada data plat.</td></tr>';
-        const badgeEl = document.getElementById('statsPeriodBadge');
-        if (badgeEl) badgeEl.textContent = { today: 'Hari Ini', '7d': '7 Hari Terakhir', '30d': '30 Hari', all: 'Semua Waktu' }[period] || period;
-        if (applyButton) applyButton.disabled = false;
-        return;
-    }
-
-    const badgeEl = document.getElementById('statsPeriodBadge');
-    if (badgeEl) {
-        const periodLabels = { 'today': 'Hari Ini', '7d': '7 Hari Terakhir', '30d': '30 Hari Terakhir', 'all': 'Semua Waktu' };
-        badgeEl.textContent = periodLabels[period] || period;
-    }
 
     try {
-        const res = await json(`/api/statistics/enterprise?period=${period}`);
-        const stats = res.data || {};
-        const kpi = stats.kpi || {};
-        const trend = stats.trend || {};
-        const camDist = stats.camera_distribution || [];
-        const statusBreakdown = stats.status_breakdown || {};
-        const peakHours = stats.peak_hours || [];
-        const topPlates = stats.top_plates || [];
+        const query = analyticsParams('stats').toString();
+        const analyticsRes = await json(`/api/analytics?${query}`).catch(() => null);
+        if (!analyticsRes?.success || !analyticsRes.data) {
+            throw new Error(analyticsRes?.message || 'Data statistik tidak dapat dimuat.');
+        }
 
-        // 1. Update 6 KPI Cards
+        const data = analyticsRes.data;
+        const s = data.summary || {};
+        const totalDets = (s.vehicles || 0) + (s.people || 0);
+        const totalPlates = s.plates || 0;
+        const totalPeople = s.people || 0;
+        const readRate = s.vehicles ? `${Math.round((totalPlates / s.vehicles) * 100)}%` : '0%';
+        const activeCams = s.active_cameras || 0;
+        const totalCams = s.total_cameras || 0;
+        const camUptime = totalCams ? `${Math.round((activeCams / totalCams) * 100)}%` : '0%';
+
         const elTotalDets = document.getElementById('kpiTotalDets');
         const elTotalPlates = document.getElementById('kpiTotalPlates');
         const elPlateRate = document.getElementById('kpiPlateRate');
         const elTotalFaces = document.getElementById('kpiTotalFaces');
-        const elAvgConf = document.getElementById('kpiAvgConf');
-        const elNeedCheck = document.getElementById('kpiNeedCheck');
         const elCamStatus = document.getElementById('kpiCamStatus');
         const elCamUptime = document.getElementById('kpiCamUptime');
 
-        if (elTotalDets) elTotalDets.textContent = kpi.total_detections || 0;
-        if (elTotalPlates) elTotalPlates.textContent = kpi.total_plates || 0;
-        if (elPlateRate) elPlateRate.textContent = `${kpi.plate_read_rate || 0}%`;
-        if (elTotalFaces) elTotalFaces.textContent = kpi.total_faces || 0;
-        if (elAvgConf) elAvgConf.textContent = `${kpi.avg_confidence || 0}%`;
-        if (elNeedCheck) elNeedCheck.textContent = kpi.need_check_count || 0;
-        if (elCamStatus) elCamStatus.textContent = `${kpi.active_cameras || 0} / ${kpi.total_cameras || 0}`;
-        if (elCamUptime) elCamUptime.textContent = `${kpi.camera_availability || 0}%`;
+        if (elTotalDets) elTotalDets.textContent = totalDets;
+        if (elTotalPlates) elTotalPlates.textContent = totalPlates;
+        if (elPlateRate) elPlateRate.textContent = readRate;
+        if (elTotalFaces) elTotalFaces.textContent = totalPeople;
+        if (elCamStatus) elCamStatus.textContent = `${activeCams} / ${totalCams}`;
+        if (elCamUptime) elCamUptime.textContent = camUptime;
 
-        // 2. Render Chart.js Tren Deteksi Waktu Nyata (Line)
-        const trendCanvas = document.getElementById('trendChartCanvas');
-        if (trendCanvas && window.Chart) {
-            if (window._trendChart) window._trendChart.destroy();
-
-            const labels = trend.labels || [];
-            const plateData = trend.plates || [];
-            const faceData = trend.faces || [];
-
-            window._trendChart = new Chart(trendCanvas, {
-                type: 'line',
-                data: {
-                    labels: labels,
-                    datasets: [
-                        {
-                            label: 'Plat Kendaraan',
-                            data: plateData,
-                            borderColor: '#10b981',
-                            backgroundColor: 'rgba(16, 185, 129, 0.12)',
-                            fill: true,
-                            tension: 0.35,
-                            borderWidth: 2.5,
-                            pointRadius: labels.length > 20 ? 1.5 : 3.5,
-                            pointHoverRadius: 6
-                        },
-                        {
-                            label: 'Wajah / Pengendara',
-                            data: faceData,
-                            borderColor: '#2563eb',
-                            backgroundColor: 'rgba(37, 99, 235, 0.08)',
-                            fill: true,
-                            tension: 0.35,
-                            borderWidth: 2.5,
-                            pointRadius: labels.length > 20 ? 1.5 : 3.5,
-                            pointHoverRadius: 6
-                        }
-                    ]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        legend: {
-                            position: 'top',
-                            labels: { font: { family: 'Segoe UI, Inter', size: 12, weight: '600' } }
-                        },
-                        tooltip: {
-                            mode: 'index',
-                            intersect: false,
-                            backgroundColor: 'rgba(15, 23, 42, 0.92)',
-                            titleFont: { weight: 'bold' }
-                        }
-                    },
-                    scales: {
-                        y: {
-                            beginAtZero: true,
-                            grid: { color: '#f1f5f9' },
-                            ticks: { precision: 0 }
-                        },
-                        x: {
-                            grid: { display: false }
-                        }
-                    }
-                }
-            });
-        }
-
-        // 3. Render Chart.js Donut Kualitas Deteksi SLA
-        const donutCanvas = document.getElementById('qualityDonutCanvas');
-        if (donutCanvas && window.Chart) {
-            if (window._donutChart) window._donutChart.destroy();
-
-            const validCount = statusBreakdown.valid || 0;
-            const warningCount = statusBreakdown.warning || 0;
-            const failedCount = statusBreakdown.failed || 0;
-
-            const elV = document.getElementById('donutValValid');
-            const elW = document.getElementById('donutValWarning');
-            const elF = document.getElementById('donutValFailed');
-            if (elV) elV.textContent = validCount;
-            if (elW) elW.textContent = warningCount;
-            if (elF) elF.textContent = failedCount;
-
-            window._donutChart = new Chart(donutCanvas, {
-                type: 'doughnut',
-                data: {
-                    labels: ['Valid (Jelas)', 'Perlu Review', 'Gagal'],
-                    datasets: [{
-                        data: [validCount, warningCount, failedCount],
-                        backgroundColor: ['#16a34a', '#f59e0b', '#ef4444'],
-                        borderWidth: 3,
-                        borderColor: '#ffffff'
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    cutout: '72%',
-                    plugins: {
-                        legend: { display: false },
-                        tooltip: { backgroundColor: 'rgba(15, 23, 42, 0.92)' }
-                    }
-                }
-            });
-        }
-
-        // 4. Render Chart.js Bar Distribusi CCTV
+        // Render Bar Chart: Beban Lalu Lintas per CCTV
         const camCanvas = document.getElementById('cameraBarCanvas');
         if (camCanvas && window.Chart) {
             if (window._cameraChart) window._cameraChart.destroy();
-
-            const camNames = camDist.map(c => c.camera_name);
-            const camPlates = camDist.map(c => c.plate_count);
-            const camFaces = camDist.map(c => c.face_count);
-
+            const camList = data.cameras || [];
             window._cameraChart = new Chart(camCanvas, {
                 type: 'bar',
                 data: {
-                    labels: camNames.length ? camNames : ['Belum Ada Data'],
+                    labels: camList.length ? camList.map(c => c.camera) : ['Belum Ada Data'],
                     datasets: [
                         {
-                            label: 'Plat Nomor',
-                            data: camPlates.length ? camPlates : [0],
-                            backgroundColor: '#10b981',
+                            label: 'Kendaraan',
+                            data: camList.length ? camList.map(c => c.vehicles) : [0],
+                            backgroundColor: '#2563eb',
                             borderRadius: 4
                         },
                         {
-                            label: 'Wajah / Orang',
-                            data: camFaces.length ? camFaces : [0],
-                            backgroundColor: '#3b82f6',
+                            label: 'Orang',
+                            data: camList.length ? camList.map(c => c.people) : [0],
+                            backgroundColor: '#f59e0b',
                             borderRadius: 4
                         }
                     ]
@@ -1411,64 +1407,75 @@ async function loadEnterpriseStatistics(period = 'today') {
                         tooltip: { backgroundColor: 'rgba(15, 23, 42, 0.92)' }
                     },
                     scales: {
-                        x: { stacked: true, grid: { display: false } },
-                        y: { stacked: true, beginAtZero: true, grid: { color: '#f1f5f9' }, ticks: { precision: 0 } }
+                        x: { grid: { display: false } },
+                        y: { beginAtZero: true, grid: { color: '#f1f5f9' }, ticks: { precision: 0 } }
                     }
                 }
             });
         }
 
-        // 5. Render Analisis Jam Sibuk (Peak Hours)
+        // Render Analisis Jam Sibuk (Peak Hours)
+        const hourly = data.hourly || [];
         const peakContainer = document.getElementById('peakHoursList');
         if (peakContainer) {
-            if (!peakHours.length) {
-                peakContainer.innerHTML = '<div class="text-muted text-center py-4">Belum ada data jam sibuk pada periode ini.</div>';
+            const sortedHours = [...hourly].sort((a, b) => (b.vehicles + b.people) - (a.vehicles + a.people)).slice(0, 3);
+            const maxActivity = sortedHours.length ? (sortedHours[0].vehicles + sortedHours[0].people) : 0;
+            if (!maxActivity) {
+                peakContainer.innerHTML = '<div class="text-muted text-center py-4">Belum ada data jam sibuk pada filter ini.</div>';
             } else {
-                peakContainer.innerHTML = peakHours.map((ph, idx) => `
-                    <div class="p-3 bg-light rounded border">
-                        <div class="d-flex justify-content-between align-items-center mb-1">
-                            <strong class="small text-dark">
-                                <span class="badge bg-primary me-2">#${idx + 1}</span>${esc(ph.time_range)}
-                            </strong>
-                            <span class="small fw-bold text-primary">${ph.count} deteksi (${ph.percentage}%)</span>
+                peakContainer.innerHTML = sortedHours.map((ph, idx) => {
+                    const total = ph.vehicles + ph.people;
+                    const pct = totalDets > 0 ? Math.round((total / totalDets) * 100) : 0;
+                    return `
+                        <div class="p-3 bg-light rounded border">
+                            <div class="d-flex justify-content-between align-items-center mb-1">
+                                <strong class="small text-dark">
+                                    <span class="badge bg-primary me-2">#${idx + 1}</span>${esc(ph.label)} - ${String((ph.hour + 1) % 24).padStart(2, '0')}:00 WIB
+                                </strong>
+                                <span class="small fw-bold text-primary">${total} aktivitas (${pct}%)</span>
+                            </div>
+                            <div class="small text-muted mb-2">${ph.vehicles} kendaraan · ${ph.people} orang</div>
+                            <div class="progress" style="height: 6px;">
+                                <div class="progress-bar bg-primary" style="width: ${Math.min(100, pct * 2 || 10)}%;"></div>
+                            </div>
                         </div>
-                        <div class="progress" style="height: 6px;">
-                            <div class="progress-bar bg-primary" style="width: ${Math.min(100, ph.percentage * 2)}%;"></div>
-                        </div>
-                    </div>
-                `).join('');
+                    `;
+                }).join('');
             }
         }
 
-        // 6. Render Top 10 Plat Sering Terdeteksi
-        const topPlatesBody = document.getElementById('topPlatesTable');
-        if (topPlatesBody) {
-            if (!topPlates.length) {
-                topPlatesBody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">Belum ada data plat kendaraan pada periode ini.</td></tr>';
+        // Render Top 10 Plat Kendaraan
+        const topBody = document.getElementById('topPlatesTable');
+        if (topBody) {
+            const topList = data.top_plates || [];
+            if (!topList.length) {
+                topBody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">Belum ada data plat kendaraan pada periode ini.</td></tr>';
             } else {
-                topPlatesBody.innerHTML = topPlates.map((tp, i) => `
+                topBody.innerHTML = topList.map((tp, i) => `
                     <tr>
                         <td class="fw-bold text-muted">${i + 1}</td>
-                        <td><strong class="fs-6 text-primary">${esc(tp.plate_number)}</strong></td>
-                        <td><span class="badge bg-secondary-subtle text-secondary border px-2 py-1">${tp.total_seen} kali</span></td>
-                        <td>${esc(tp.last_camera)}</td>
+                        <td><strong class="fs-6 text-primary">${esc(tp.plate)}</strong></td>
+                        <td><span class="badge bg-secondary-subtle text-secondary border px-2 py-1">${tp.count} kali</span></td>
+                        <td>${esc(tp.camera)}</td>
                         <td><span class="small text-muted">${esc(tp.last_seen)}</span></td>
                         <td>
-                            <span class="small fw-semibold ${tp.avg_confidence_percent >= 70 ? 'text-success' : 'text-warning'}">
-                                ${tp.avg_confidence_percent}%
+                            <span class="small fw-semibold ${tp.confidence >= 70 ? 'text-success' : 'text-warning'}">
+                                ${tp.confidence}%
                             </span>
                         </td>
-                        <td>
-                            <span class="badge ${tp.status_code === 1 ? 'bg-success-subtle text-success border border-success-subtle' : 'bg-warning-subtle text-warning border border-warning-subtle'}">
-                                ${esc(tp.status)}
-                            </span>
-                        </td>
+                        <td><span class="badge bg-success-subtle text-success border border-success-subtle">Aktual</span></td>
                     </tr>
                 `).join('');
             }
         }
+
+        const badgeEl = document.getElementById('statsPeriodBadge');
+        if (badgeEl) {
+            badgeEl.textContent = { today: 'Hari Ini', '7d': '7 Hari Terakhir', '30d': '30 Hari', all: 'Semua Waktu', custom: 'Kustom Tanggal' }[period] || period;
+        }
     } catch (e) {
         console.error('Error loadEnterpriseStatistics:', e);
+        showNotification(e.message || 'Gagal memuat statistik.', 'danger');
     } finally {
         if (applyButton) applyButton.disabled = false;
     }
@@ -1489,25 +1496,46 @@ window.exportStatsPdf = exportStatsPdf;
 
 async function initStatistics() {
     setDateFilterLimits();
+    syncPeriodInputs('statsPeriod', 'statsStart', 'statsEnd');
     await populateAnalyticsCameraSelect('statsCamera');
-    document.getElementById('statsApply')?.addEventListener('click', () => {
-        loadEnterpriseStatistics(document.getElementById('statsPeriod')?.value || 'today').catch(err => showNotification(err.message, 'warning'));
-    });
-    const periodGroup = document.getElementById('statsPeriodGroup');
-    if (periodGroup) {
-        periodGroup.addEventListener('click', e => {
-            const btn = e.target.closest('button');
-            if (!btn) return;
-            periodGroup.querySelectorAll('button').forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-            const period = btn.dataset.period || 'today';
-            const periodSelect = document.getElementById('statsPeriod');
-            if (periodSelect) periodSelect.value = period;
-            loadEnterpriseStatistics(period).catch(err => console.error('Error loadEnterpriseStatistics:', err));
-        });
-    }
 
-    await loadEnterpriseStatistics(document.getElementById('statsPeriod')?.value || 'today');
+    document.getElementById('statsApply')?.addEventListener('click', () => {
+        loadEnterpriseStatistics();
+    });
+
+    document.getElementById('statsPeriod')?.addEventListener('change', () => {
+        const period = document.getElementById('statsPeriod')?.value;
+        if (period !== 'custom') {
+            loadEnterpriseStatistics();
+        }
+    });
+
+    document.getElementById('statsObjectType')?.addEventListener('change', () => {
+        loadEnterpriseStatistics();
+    });
+
+    document.getElementById('statsCamera')?.addEventListener('change', () => {
+        loadEnterpriseStatistics();
+    });
+
+    document.getElementById('statsResetBtn')?.addEventListener('click', () => {
+        const pSelect = document.getElementById('statsPeriod');
+        if (pSelect) pSelect.value = 'today';
+        const r = getDateRange('today');
+        const sDate = document.getElementById('statsStart');
+        const eDate = document.getElementById('statsEnd');
+        if (sDate) sDate.value = r.start_date;
+        if (eDate) eDate.value = r.end_date;
+
+        const objType = document.getElementById('statsObjectType');
+        if (objType) objType.value = '';
+        const camSelect = document.getElementById('statsCamera');
+        if (camSelect) camSelect.value = '';
+
+        loadEnterpriseStatistics();
+    });
+
+    await loadEnterpriseStatistics();
 }
 
 

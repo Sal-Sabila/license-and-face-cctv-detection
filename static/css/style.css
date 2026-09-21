@@ -1114,16 +1114,20 @@ select {
 }
 
 .date-filter-group {
-    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
 }
 
 .date-filter-group select {
-    width: 150px;
+    min-width: 140px;
+    max-width: 160px;
 }
 
 .date-filter-group input[type="date"] {
-    width: 145px;
-    flex: 0 0 145px;
+    width: 135px;
+    flex: 0 0 135px;
 }
 
 .preview-img-container {

@@ -562,11 +562,15 @@ EXCEL_MIMETYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sh
 
 @plate_bp.route("/export/detections", methods=["GET"])
 def export_detections_excel():
-    """Mengekspor seluruh data Hasil Deteksi ke file Excel (.xlsx) menggunakan openpyxl."""
+    """Mengekspor data Hasil Deteksi sesuai filter aktif ke file Excel (.xlsx)."""
     try:
         res = db.get_all_detections_paginated(
             page=1,
             limit=5000,
+            type_filter=request.args.get("type", "all"),
+            status_filter=request.args.get("status", "all"),
+            camera_id=request.args.get("camera_id", type=int),
+            search=request.args.get("search", type=str),
             start_date=request.args.get("start_date", type=str),
             end_date=request.args.get("end_date", type=str)
         )
@@ -585,11 +589,15 @@ def export_detections_excel():
 
 @plate_bp.route("/export/detections/pdf", methods=["GET"])
 def export_detections_pdf():
-    """Mengekspor seluruh data Hasil Deteksi ke file PDF (dengan foto) menggunakan ReportLab."""
+    """Mengekspor data Hasil Deteksi sesuai filter aktif ke file PDF (dengan foto)."""
     try:
         res = db.get_all_detections_paginated(
             page=1,
             limit=5000,
+            type_filter=request.args.get("type", "all"),
+            status_filter=request.args.get("status", "all"),
+            camera_id=request.args.get("camera_id", type=int),
+            search=request.args.get("search", type=str),
             start_date=request.args.get("start_date", type=str),
             end_date=request.args.get("end_date", type=str)
         )
@@ -608,11 +616,14 @@ def export_detections_pdf():
 
 @plate_bp.route("/export/plates", methods=["GET"])
 def export_plates_excel():
-    """Mengekspor riwayat plat nomor ke file Excel (.xlsx) menggunakan openpyxl."""
+    """Mengekspor riwayat plat nomor sesuai filter aktif ke file Excel (.xlsx)."""
     try:
         res = db.get_plate_history_paginated(
             page=1,
             limit=5000,
+            search=request.args.get("search", type=str),
+            camera_id=request.args.get("camera_id", type=int),
+            status_filter=request.args.get("status", "all"),
             start_date=request.args.get("start_date", type=str),
             end_date=request.args.get("end_date", type=str)
         )
@@ -631,11 +642,14 @@ def export_plates_excel():
 
 @plate_bp.route("/export/plates/pdf", methods=["GET"])
 def export_plates_pdf():
-    """Mengekspor riwayat plat nomor ke file PDF (dengan crop plat) menggunakan ReportLab."""
+    """Mengekspor riwayat plat nomor sesuai filter aktif ke file PDF (dengan crop plat)."""
     try:
         res = db.get_plate_history_paginated(
             page=1,
             limit=5000,
+            search=request.args.get("search", type=str),
+            camera_id=request.args.get("camera_id", type=int),
+            status_filter=request.args.get("status", "all"),
             start_date=request.args.get("start_date", type=str),
             end_date=request.args.get("end_date", type=str)
         )
