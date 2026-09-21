@@ -13,6 +13,10 @@ __pycache__/
 *.pt
 *.onnx
 
+# Generated captures / media outputs
+captures/
+static/captures/
+
 # IDE
 .vscode/
 .idea/
