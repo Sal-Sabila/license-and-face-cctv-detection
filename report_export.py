@@ -6,6 +6,8 @@
 import io
 import os
 from datetime import datetime
+from urllib.parse import unquote
+from xml.sax.saxutils import escape
 
 from openpyxl import Workbook
 from openpyxl.styles import (
@@ -154,14 +156,48 @@ def _format_datetime(value):
         return "-"
 
     if isinstance(value, datetime):
-        return value.strftime("%d-%m-%Y %H:%M:%S")
+        return value.strftime("%Y-%m-%d %H:%M:%S")
 
     return str(value)
 
 
+def _project_roots():
+    """
+    Folder-folder yang mungkin menjadi root project. URL browser
+    '/static/captures/x.jpg' = <root>/static/captures/x.jpg di disk.
+    Root Flask (current_app.root_path) dicoba lebih dulu, lalu folder
+    file ini, induknya, dan working directory -- supaya tetap benar
+    walau report_export.py dipindah ke subfolder.
+    """
+    roots = []
+
+    try:
+        from flask import current_app
+
+        roots.append(current_app.root_path)
+    except Exception:
+        pass
+
+    roots.append(BASE_DIR)
+    roots.append(os.path.dirname(BASE_DIR))
+    roots.append(os.getcwd())
+
+    unique = []
+
+    for root in roots:
+        root = os.path.abspath(root)
+
+        if root not in unique:
+            unique.append(root)
+
+    return unique
+
+
 def _resolve_image_path(path):
     """
-    Mencari file gambar berdasarkan path yang disimpan database.
+    Mencari file gambar dari path yang sama dengan yang dipakai website
+    (website memuat foto lewat '/' + path, mis. '/static/captures/...').
+    Mengembalikan path file lokal, atau None jika benar-benar tidak ada.
     """
     if not path:
         return None
@@ -171,45 +207,577 @@ def _resolve_image_path(path):
     if not path:
         return None
 
-    # Absolute path
-    if os.path.isabs(path) and os.path.exists(path):
+    # buang query string / fragment dan decode %20 dari URL browser
+    path = unquote(path.split("?", 1)[0].split("#", 1)[0])
+    path = path.replace("\\", "/")
+
+    # path absolut di disk
+    if os.path.isabs(path) and os.path.isfile(path):
         return path
 
-    # Normalisasi slash
-    normalized = path.replace("/", os.sep).lstrip("\\/")
+    relative = path.lstrip("/")
+    normalized = relative.replace("/", os.sep)
 
-    candidates = [
-        os.path.join(BASE_DIR, normalized),
-        os.path.join(BASE_DIR, "static", normalized),
-        os.path.join(BASE_DIR, "captures", normalized),
-        os.path.join(BASE_DIR, "static", "captures", normalized),
-        os.path.join(BASE_DIR, "static", "captures", "plates", normalized),
-        os.path.join(BASE_DIR, "static", "captures", "faces", normalized),
+    subfolders = [
+        "",
+        "static",
+        "captures",
+        os.path.join("static", "captures"),
+        os.path.join("static", "captures", "plates"),
+        os.path.join("static", "captures", "faces"),
+        os.path.join("static", "captures", "vehicles"),
     ]
 
-    for candidate in candidates:
-        if os.path.exists(candidate):
-            return candidate
+    roots = _project_roots()
 
-    # Jika hanya basename yang tersimpan
+    for root in roots:
+        for sub in subfolders:
+            candidate = os.path.join(root, sub, normalized)
+
+            if os.path.isfile(candidate):
+                return candidate
+
+    # jika yang tersimpan hanya nama file
     basename = os.path.basename(normalized)
 
     if basename:
-        search_dirs = [
-            os.path.join(BASE_DIR, "captures"),
-            os.path.join(BASE_DIR, "static"),
-            os.path.join(BASE_DIR, "static", "captures"),
-            os.path.join(BASE_DIR, "static", "captures", "plates"),
-            os.path.join(BASE_DIR, "static", "captures", "faces"),
-        ]
+        for root in roots:
+            for sub in subfolders:
+                if not sub:
+                    continue
 
-        for directory in search_dirs:
-            candidate = os.path.join(directory, basename)
+                candidate = os.path.join(root, sub, basename)
 
-            if os.path.exists(candidate):
-                return candidate
+                if os.path.isfile(candidate):
+                    return candidate
 
     return None
+
+
+# ============================================================
+# HELPER DATA WEBSITE  (PATCH: data export = data website)
+#
+# Semua nama field di bawah DIAMBIL dari kode render website
+# (static/js/app.js), bukan tebakan:
+#   loadDetections()   -> GET /api/detections
+#   loadPlateHistory() -> GET /api/plate/history
+#   loadRecap()        -> GET /api/analytics  (summary, cameras, daily)
+#   loadEnterpriseStatistics() -> GET /api/analytics
+#                                 (summary, cameras, hourly, top_plates)
+# ============================================================
+
+def _text(value, default="-"):
+    """Teks apa adanya dari data. '-' hanya jika data memang kosong."""
+    if value is None:
+        return default
+
+    text = str(value).strip()
+
+    return text if text else default
+
+
+def _num(value):
+    """Angka float atau None (mengerti '74.6' dan '74.6%')."""
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+
+    try:
+        return float(str(value).replace("%", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _int(value, default=0):
+    number = _num(value)
+
+    return int(round(number)) if number is not None else default
+
+
+def _pct_text(percent):
+    """Angka skala 0-100 -> '74.6%'. None -> '-'."""
+    if percent is None:
+        return "-"
+
+    return f"{percent:.1f}%"
+
+
+def _time_text(value):
+    """
+    Waktu deteksi ASLI dari data (website menampilkan item.timestamp
+    apa adanya, contoh: 2026-09-21 09:49:19). Bukan waktu export.
+    """
+    if value is None or value == "":
+        return "-"
+
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+
+    return str(value)
+
+
+def _confidence_percent(item):
+    """
+    Confidence dalam skala 0-100 -- sama dengan item.confidence_percent
+    yang dicetak website (`${item.confidence_percent}%`).
+
+    Hanya jika field itu tidak ada, jatuh ke item.confidence dengan
+    deteksi skala: 0-1 dikali 100, sisanya dianggap sudah persen.
+    Tidak ada threshold / hitung ulang.
+    """
+    if not isinstance(item, dict):
+        return None
+
+    for key in (
+        "confidence_percent",
+        "vehicle_confidence_percent",
+        "person_confidence_percent",
+        "plate_confidence_percent",
+    ):
+        number = _num(item.get(key))
+
+        if number is not None:
+            return number
+
+    raw = _num(item.get("confidence"))
+
+    if raw is None:
+        return None
+
+    return raw * 100 if 0 <= raw <= 1 else raw
+
+
+def _status_label(item):
+    """
+    Status persis seperti badge website: status_code 1 = Terbaca,
+    2 = Perlu Cek, selain itu Gagal. Jika status_code tidak ada,
+    pakai teks item.status apa adanya.
+    """
+    code = _num(item.get("status_code")) if isinstance(item, dict) else None
+
+    if code is not None:
+        code = int(code)
+
+        if code == 1:
+            return "Terbaca"
+
+        if code == 2:
+            return "Perlu Cek"
+
+        return "Gagal"
+
+    return _text(item.get("status") if isinstance(item, dict) else None)
+
+
+def _detection_fields(item):
+    """
+    Salinan logika loadDetections() di app.js:
+
+      isVehicle = object_type == 'vehicle' || type in
+                  (vehicle, vehicle_with_plate, plate)
+      isPlate   = type == 'vehicle_with_plate' || (isVehicle && has_plate)
+      Target    = isVehicle ? (isPlate ? plate : 'Kendaraan') : 'Orang'
+      Tipe      = isPlate ? 'Kendaraan / Plat Nomor'
+                          : (isVehicle ? 'Kendaraan' : 'Orang')
+      Foto      = isVehicle ? vehicle_image_path || plate_image_path
+                            : face_image_path
+    """
+    object_type = item.get("object_type")
+    type_ = item.get("type")
+
+    is_vehicle = (
+        object_type == "vehicle"
+        or type_ in ("vehicle", "vehicle_with_plate", "plate")
+    )
+
+    is_plate = type_ == "vehicle_with_plate" or (
+        is_vehicle and bool(item.get("has_plate"))
+    )
+
+    plate = _text(item.get("plate"), default="")
+
+    if is_vehicle:
+        target = plate if (is_plate and plate not in ("", "-")) else "Kendaraan"
+    else:
+        target = "Orang"
+
+    if is_plate:
+        kind = "Kendaraan / Plat Nomor"
+    elif is_vehicle:
+        kind = "Kendaraan"
+    else:
+        kind = "Orang"
+
+    if is_vehicle:
+        photo = (
+            item.get("vehicle_image_path")
+            or item.get("vehicleImagePath")
+            or item.get("plate_image_path")
+            or item.get("plateImagePath")
+            or ""
+        )
+    else:
+        photo = (
+            item.get("face_image_path")
+            or item.get("faceImagePath")
+            or ""
+        )
+
+    confidence = _confidence_percent(item)
+
+    return {
+        "target": target,
+        "kind": kind,
+        "camera": _text(item.get("camera")),
+        "confidence": confidence,
+        "confidence_text": _pct_text(confidence),
+        "time": _time_text(item.get("timestamp")),
+        "status": _status_label(item),
+        "photo": photo,
+    }
+
+
+def _plate_fields(item):
+    """
+    Salinan logika loadPlateHistory() di app.js:
+    plate, camera, confidence_percent, timestamp, status_code,
+    crop = item.image_path
+    """
+    confidence = _confidence_percent(item)
+
+    return {
+        "plate": _text(item.get("plate")),
+        "camera": _text(item.get("camera")),
+        "confidence": confidence,
+        "confidence_text": _pct_text(confidence),
+        "time": _time_text(item.get("timestamp")),
+        "status": _status_label(item),
+        "photo": item.get("image_path") or "",
+    }
+
+
+PERIOD_LABELS = {
+    "today": "Hari Ini",
+    "2d": "2 Hari Terakhir",
+    "7d": "7 Hari Terakhir",
+    "30d": "30 Hari Terakhir",
+    "all": "Semua Waktu",
+}
+
+
+def _period_label(period):
+    if not period:
+        return ""
+
+    return PERIOD_LABELS.get(str(period), str(period))
+
+
+def _now_text():
+    return datetime.now().strftime("%d-%m-%Y %H:%M:%S")
+
+
+def _analytics_parts(analytics):
+    """summary / cameras / daily / hourly / top_plates dari /api/analytics."""
+    data = analytics if isinstance(analytics, dict) else {}
+
+    return (
+        data.get("summary") or {},
+        data.get("cameras") or [],
+        data.get("daily") or [],
+        data.get("hourly") or [],
+        data.get("top_plates") or [],
+    )
+
+
+def _peak_hour(hourly):
+    """Sama dengan `peak` di loadEnterpriseStatistics(): jam dengan
+    kendaraan terbanyak (yang pertama jika seri)."""
+    best = None
+
+    for item in hourly or []:
+        vehicles = _num(item.get("vehicles")) or 0
+
+        if best is None or vehicles > (_num(best.get("vehicles")) or 0):
+            best = item
+
+    return best
+
+
+def _peak_label(item):
+    label = _text(item.get("label"), default="")
+    hour = _num(item.get("hour"))
+
+    if hour is not None:
+        return f"{label} - {(int(hour) + 1) % 24:02d}:00"
+
+    return label or "-"
+
+
+# ------------------------------------------------------------
+# EXCEL - helper patch
+# ------------------------------------------------------------
+
+def _excel_table_sheet(
+    ws,
+    title,
+    subtitle,
+    headers,
+    rows,
+    widths,
+    row_height=None,
+    print_setup=False,
+):
+    """
+    Pola sheet yang sama dengan export sebelumnya: title (baris 1),
+    subtitle (baris 2), header (baris 4), data mulai baris 5,
+    freeze panes, autofilter, lebar kolom, border.
+    Data kosong -> header tetap dibuat.
+    """
+    columns = len(headers)
+
+    _add_excel_title(ws, title, subtitle, columns)
+
+    for col, value in enumerate(headers, start=1):
+        ws.cell(row=4, column=col, value=value)
+
+    _apply_excel_header(ws, 4, 1, columns)
+
+    for index, row in enumerate(rows, start=1):
+        row_number = 4 + index
+
+        for col, value in enumerate(row, start=1):
+            ws.cell(row=row_number, column=col, value=value)
+
+        if row_height:
+            ws.row_dimensions[row_number].height = row_height
+
+    last_row = max(5, 4 + len(rows))
+
+    _set_widths(ws, widths)
+
+    _style_excel_sheet(ws)
+
+    ws.auto_filter.ref = f"A4:{get_column_letter(columns)}{last_row}"
+
+    if print_setup:
+        ws.print_title_rows = "1:4"
+        ws.page_setup.orientation = "landscape"
+        ws.page_setup.fitToWidth = 1
+        ws.page_setup.fitToHeight = 0
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+
+    return last_row
+
+
+def _excel_percent_cell(cell, percent):
+    """Confidence sebagai angka persen asli (0.746 -> tampil 74.6%)."""
+    if percent is None:
+        cell.value = "-"
+        return
+
+    cell.value = round(percent / 100, 6)
+    cell.number_format = "0.0%"
+
+    _confidence_excel_fill(cell, percent / 100)
+
+
+def _excel_section_title(ws, row, text, columns):
+    ws.merge_cells(
+        start_row=row,
+        start_column=1,
+        end_row=row,
+        end_column=columns,
+    )
+
+    cell = ws.cell(row=row, column=1, value=text)
+
+    cell.font = Font(bold=True, size=12, color=WHITE)
+    cell.fill = PatternFill("solid", fgColor=DARK)
+    cell.alignment = Alignment(horizontal="left", vertical="center")
+
+    ws.row_dimensions[row].height = 22
+
+
+def _excel_block(ws, start_row, headers, rows):
+    """Tulis header + baris data mulai start_row. Return baris kosong berikutnya."""
+    columns = len(headers)
+
+    for col, value in enumerate(headers, start=1):
+        ws.cell(row=start_row, column=col, value=value)
+
+    _apply_excel_header(ws, start_row, 1, columns)
+
+    for offset, row in enumerate(rows, start=1):
+        for col, value in enumerate(row, start=1):
+            ws.cell(row=start_row + offset, column=col, value=value)
+
+    return start_row + len(rows) + 1
+
+
+# ------------------------------------------------------------
+# PDF - helper patch
+# ------------------------------------------------------------
+
+EMPTY_MESSAGE = "Tidak ada data pada periode yang dipilih."
+
+
+def _p(value, style):
+    """Paragraph aman: karakter & < > pada nama kamera/plat tidak merusak PDF."""
+    return Paragraph(escape(str(value)), style)
+
+
+def _p_bold(value, style):
+    return Paragraph(f"<b>{escape(str(value))}</b>", style)
+
+
+def _pdf_styles():
+    styles = getSampleStyleSheet()
+
+    return {
+        "title": ParagraphStyle(
+            "PatchTitle",
+            parent=styles["Title"],
+            fontSize=17,
+            leading=21,
+            alignment=TA_CENTER,
+            spaceAfter=3 * mm,
+        ),
+        "subtitle": ParagraphStyle(
+            "PatchSubtitle",
+            parent=styles["Normal"],
+            fontSize=9,
+            leading=12,
+            alignment=TA_CENTER,
+            spaceAfter=6 * mm,
+        ),
+        "section": ParagraphStyle(
+            "PatchSection",
+            parent=styles["Heading2"],
+            fontSize=12,
+            leading=15,
+            spaceBefore=5 * mm,
+            spaceAfter=3 * mm,
+        ),
+        "cell": ParagraphStyle(
+            "PatchCell",
+            parent=styles["Normal"],
+            fontSize=8,
+            leading=10,
+            alignment=TA_LEFT,
+        ),
+        "head": ParagraphStyle(
+            "PatchHead",
+            parent=styles["Normal"],
+            fontSize=8,
+            leading=10,
+            alignment=TA_CENTER,
+            textColor=colors.white,
+            fontName="Helvetica-Bold",
+        ),
+        "empty": ParagraphStyle(
+            "PatchEmpty",
+            parent=styles["Normal"],
+            fontSize=10,
+            leading=14,
+            alignment=TA_CENTER,
+            textColor=colors.HexColor("#6B7280"),
+            spaceBefore=8 * mm,
+        ),
+    }
+
+
+def _pdf_head(labels, style):
+    return [_p(label, style) for label in labels]
+
+
+def _pdf_table(data, col_widths, extra=None):
+    """Tabel standar: header biru berulang tiap halaman, grid, zebra."""
+    table = Table(data, colWidths=col_widths, repeatRows=1)
+
+    style = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2563EB")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#D1D5DB")),
+        (
+            "ROWBACKGROUNDS",
+            (0, 1),
+            (-1, -1),
+            [colors.white, colors.HexColor("#F9FAFB")],
+        ),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]
+
+    style.extend(extra or [])
+
+    table.setStyle(TableStyle(style))
+
+    return table
+
+
+def _pdf_footer(canvas, doc):
+    canvas.saveState()
+    canvas.setFont("Helvetica", 8)
+    canvas.setFillColor(colors.HexColor("#6B7280"))
+    canvas.drawRightString(
+        doc.pagesize[0] - doc.rightMargin,
+        8 * mm,
+        f"PlateVision - Halaman {canvas.getPageNumber()}",
+    )
+    canvas.restoreState()
+
+
+def _pdf_build(doc, story):
+    doc.build(story, onFirstPage=_pdf_footer, onLaterPages=_pdf_footer)
+
+
+def _pdf_photo(path, cell_style, max_w, max_h, missing_text):
+    """
+    Gambar capture asli untuk sel tabel PDF.
+
+    Path dari database/website (mis. 'static/captures/...') diubah lebih
+    dulu menjadi path FILE LOKAL oleh _resolve_image_path(), karena
+    reportlab tidak bisa membuka URL browser. Gambar diperkecil supaya
+    PDF tidak membengkak. Teks 'tidak tersedia' hanya muncul jika file
+    memang tidak ditemukan / tidak bisa dibaca.
+    """
+    resolved = _resolve_image_path(path)
+
+    if not resolved:
+        return _p(missing_text, cell_style)
+
+    try:
+        source = resolved
+
+        try:
+            from PIL import Image as PILImage
+
+            with PILImage.open(resolved) as img:
+                img.load()
+                width, height = img.size
+
+                if img.mode not in ("RGB", "L"):
+                    img = img.convert("RGB")
+
+                # cukup ~ 300 dpi untuk sel kecil
+                limit = 500
+                if max(width, height) > limit:
+                    img = img.copy()
+                    img.thumbnail((limit, limit))
+
+                data = io.BytesIO()
+                img.save(data, format="JPEG", quality=85)
+                data.seek(0)
+                source = data
+        except ImportError:
+            reader = ImageReader(resolved)
+            width, height = reader.getSize()
+
+        ratio = min(max_w / width, max_h / height)
+
+        return Image(source, width=width * ratio, height=height * ratio)
+    except Exception:
+        return _p(missing_text, cell_style)
 
 
 # ============================================================
@@ -218,18 +786,12 @@ def _resolve_image_path(path):
 
 def _apply_excel_header(ws, row, start_col, end_col):
     fill = PatternFill("solid", fgColor=HEADER)
-    header_border = Border(
-        left=Side(style="thin", color="1E40AF"),
-        right=Side(style="thin", color="1E40AF"),
-        top=Side(style="thin", color="1E40AF"),
-        bottom=Side(style="thin", color="1E40AF"),
-    )
 
     for col in range(start_col, end_col + 1):
         cell = ws.cell(row=row, column=col)
+
         cell.fill = fill
         cell.font = Font(
-            name="Calibri",
             color=WHITE,
             bold=True,
             size=11,
@@ -239,126 +801,45 @@ def _apply_excel_header(ws, row, start_col, end_col):
             vertical="center",
             wrap_text=True,
         )
-        cell.border = header_border
 
-    ws.row_dimensions[row].height = 26
-
-
-def _apply_section_header(ws, row, title, end_col):
-    fill = PatternFill("solid", fgColor="334155")
-    section_border = Border(
-        left=Side(style="thin", color="1E293B"),
-        right=Side(style="thin", color="1E293B"),
-        top=Side(style="thin", color="1E293B"),
-        bottom=Side(style="thin", color="1E293B"),
-    )
-
-    for col in range(1, end_col + 1):
-        c = ws.cell(row=row, column=col)
-        c.fill = fill
-        c.border = section_border
-
-    ws.merge_cells(
-        start_row=row,
-        start_column=1,
-        end_row=row,
-        end_column=end_col,
-    )
-    cell = ws.cell(row=row, column=1)
-    cell.value = title
-    cell.font = Font(
-        name="Calibri",
-        size=11,
-        bold=True,
-        color=WHITE,
-    )
-    cell.alignment = Alignment(
-        horizontal="left",
-        vertical="center",
-        indent=1,
-    )
-    ws.row_dimensions[row].height = 24
+        cell.border = Border(
+            bottom=Side(
+                style="thin",
+                color=BORDER_COLOR,
+            )
+        )
 
 
-def _style_excel_sheet(ws, header_row=4, data_start_row=None, data_end_row=None, freeze=True):
-    if freeze and header_row:
-        ws.freeze_panes = f"A{header_row + 1}"
+def _style_excel_sheet(ws):
+    ws.freeze_panes = "A4"
+    ws.sheet_view.showGridLines = False
 
-    try:
-        ws.sheet_view.showGridLines = True
-    except Exception:
-        pass
-    try:
-        if hasattr(ws, "views") and ws.views and ws.views.sheetView:
-            ws.views.sheetView[0].showGridLines = True
-    except Exception:
-        pass
-
-    border_thin = Border(
-        left=Side(style="thin", color=BORDER_COLOR),
-        right=Side(style="thin", color=BORDER_COLOR),
-        top=Side(style="thin", color=BORDER_COLOR),
-        bottom=Side(style="thin", color=BORDER_COLOR),
-    )
-
-    start_r = data_start_row if data_start_row is not None else (header_row + 1 if header_row else 1)
-    end_r = data_end_row if data_end_row is not None else ws.max_row
-
-    if end_r >= start_r:
-        for r in range(start_r, end_r + 1):
-            is_odd = (r - start_r) % 2 == 1
-            row_default_fill = PatternFill("solid", fgColor="F8FAFC") if is_odd else PatternFill("solid", fgColor="FFFFFF")
-
-            for c in range(1, ws.max_column + 1):
-                cell = ws.cell(row=r, column=c)
-
-                # Keep custom fills (e.g. status green/yellow/red)
-                has_custom_fill = False
-                if cell.fill and getattr(cell.fill, "fill_type", None) == "solid":
-                    fg = getattr(cell.fill, "fgColor", None)
-                    rgb = getattr(fg, "rgb", None) if fg else None
-                    if rgb and rgb not in ["00000000", "00FFFFFF", "FFFFFFFF", "00F8FAFC", None]:
-                        has_custom_fill = True
-
-                if not has_custom_fill:
-                    cell.fill = row_default_fill
-
+    for row in ws.iter_rows():
+        for cell in row:
+            # title / header / judul seksi (bold atau italic) tetap
+            # memakai font yang sudah diberi _add_excel_title / _apply_excel_header
+            if not (cell.font and (cell.font.bold or cell.font.italic)):
                 cell.font = Font(
                     name="Calibri",
                     size=10,
                     color=TEXT,
                 )
-                cell.border = border_thin
 
-                # Alignments
-                if c == 1:
-                    cell.alignment = Alignment(
-                        horizontal="center",
-                        vertical="center",
-                    )
-                elif cell.alignment and cell.alignment.horizontal:
-                    cell.alignment = Alignment(
-                        horizontal=cell.alignment.horizontal,
-                        vertical="center",
-                        wrap_text=True,
-                    )
-                else:
-                    cell.alignment = Alignment(
-                        vertical="center",
-                        wrap_text=True,
-                    )
+            cell.alignment = Alignment(
+                horizontal=cell.alignment.horizontal,
+                vertical="center",
+                wrap_text=True,
+            )
 
-            if ws.row_dimensions[r].height is None or ws.row_dimensions[r].height < 20:
-                ws.row_dimensions[r].height = 22
+            cell.border = Border(
+                left=Side(style="thin", color=BORDER_COLOR),
+                right=Side(style="thin", color=BORDER_COLOR),
+                top=Side(style="thin", color=BORDER_COLOR),
+                bottom=Side(style="thin", color=BORDER_COLOR),
+            )
 
 
 def _add_excel_title(ws, title, subtitle, columns):
-    for col in range(1, columns + 1):
-        c1 = ws.cell(row=1, column=col)
-        c1.fill = PatternFill("solid", fgColor=DARK)
-        c2 = ws.cell(row=2, column=col)
-        c2.fill = PatternFill("solid", fgColor=LIGHT_GRAY)
-
     ws.merge_cells(
         start_row=1,
         start_column=1,
@@ -369,10 +850,13 @@ def _add_excel_title(ws, title, subtitle, columns):
     title_cell = ws.cell(row=1, column=1)
     title_cell.value = title
     title_cell.font = Font(
-        name="Calibri",
-        size=15,
+        size=16,
         bold=True,
         color=WHITE,
+    )
+    title_cell.fill = PatternFill(
+        "solid",
+        fgColor=DARK,
     )
     title_cell.alignment = Alignment(
         horizontal="center",
@@ -391,18 +875,20 @@ def _add_excel_title(ws, title, subtitle, columns):
     subtitle_cell = ws.cell(row=2, column=1)
     subtitle_cell.value = subtitle
     subtitle_cell.font = Font(
-        name="Calibri",
-        size=9,
-        color="475569",
+        size=10,
+        color=TEXT,
         italic=True,
+    )
+    subtitle_cell.fill = PatternFill(
+        "solid",
+        fgColor=LIGHT_GRAY,
     )
     subtitle_cell.alignment = Alignment(
         horizontal="center",
         vertical="center",
     )
 
-    ws.row_dimensions[2].height = 20
-    ws.row_dimensions[3].height = 10
+    ws.row_dimensions[2].height = 22
 
 
 def _set_widths(ws, widths):
@@ -420,23 +906,11 @@ def _status_excel_fill(cell, status):
             "solid",
             fgColor=LIGHT_GREEN,
         )
-        cell.font = Font(
-            name="Calibri",
-            size=10,
-            color="166534",
-            bold=True,
-        )
 
     elif "dicek" in text or "unclear" in text or "gagal" in text:
         cell.fill = PatternFill(
             "solid",
             fgColor=LIGHT_YELLOW,
-        )
-        cell.font = Font(
-            name="Calibri",
-            size=10,
-            color="92400E",
-            bold=True,
         )
 
 
@@ -448,28 +922,30 @@ def _confidence_excel_fill(cell, confidence):
             "solid",
             fgColor=LIGHT_GREEN,
         )
-        cell.font = Font(
-            name="Calibri",
-            size=10,
-            color="166534",
-            bold=True,
-        )
     else:
         cell.fill = PatternFill(
             "solid",
             fgColor=LIGHT_YELLOW,
         )
-        cell.font = Font(
-            name="Calibri",
-            size=10,
-            color="92400E",
-            bold=True,
-        )
 
 
 def _add_excel_table(ws, ref, name):
     try:
-        ws.auto_filter.ref = ref
+        table = Table(
+            displayName=name,
+            ref=ref,
+        )
+
+        style = TableStyleInfo(
+            name="TableStyleMedium2",
+            showFirstColumn=False,
+            showLastColumn=False,
+            showRowStripes=True,
+            showColumnStripes=False,
+        )
+
+        table.tableStyleInfo = style
+        ws.add_table(table)
     except Exception:
         pass
 
@@ -486,6 +962,10 @@ def _finalize_excel(wb):
 
 # ============================================================
 # 1. HASIL DETEKSI - EXCEL
+#    Kolom: No | Target / Nilai | Jenis Deteksi | Area CCTV |
+#           Confidence | Waktu Deteksi | Status
+#    Tanpa Keterangan, tanpa Foto, tanpa Aksi.
+#    Sumber field: lihat _detection_fields() (= loadDetections()).
 # ============================================================
 
 def build_detections_excel(items):
@@ -494,166 +974,57 @@ def build_detections_excel(items):
     ws = wb.active
     ws.title = "Hasil Deteksi"
 
-    columns = 8
-
-    _add_excel_title(
-        ws,
-        "HASIL DETEKSI CCTV",
-        "Laporan hasil deteksi wajah dan plat nomor kendaraan",
-        columns,
-    )
-
     headers = [
         "No",
-        "Target",
+        "Target / Nilai",
         "Jenis Deteksi",
         "Area CCTV",
         "Confidence",
         "Waktu Deteksi",
         "Status",
-        "Keterangan",
     ]
 
-    header_row = 4
+    fields = [_detection_fields(item) for item in (items or [])]
 
-    for col, value in enumerate(headers, start=1):
-        ws.cell(
-            row=header_row,
-            column=col,
-            value=value,
-        )
-
-    _apply_excel_header(
-        ws,
-        header_row,
-        1,
-        columns,
-    )
-
-    for index, item in enumerate(items or [], start=1):
-        target = _value(
-            item,
-            "target",
-            "plate_number",
-            "plate",
-            "object_type",
-            "type",
-            default="Objek",
-        )
-
-        detection_type = _value(
-            item,
-            "type",
-            "object_type",
-            "detection_type",
-            default="Deteksi",
-        )
-
-        location = _value(
-            item,
-            "camera_name",
-            "camera",
-            "location",
-            "area",
-            default="-",
-        )
-
-        confidence = _value(
-            item,
-            "plate_confidence",
-            "face_confidence",
-            "person_confidence",
-            "confidence",
-            default=0,
-        )
-
-        detected_at = _value(
-            item,
-            "detected_at",
-            "detection_time",
-            "created_at",
-            "timestamp",
-            default="-",
-        )
-
-        status = _status(
-            _value(
-                item,
-                "plate_status",
-                "face_status",
-                "status",
-                default="Perlu dicek",
-            )
-        )
-
-        note = _value(
-            item,
-            "description",
-            "keterangan",
-            "message",
-            default="-",
-        )
-
-        values = [
+    rows = [
+        [
             index,
-            _safe_text(target),
-            _safe_text(detection_type),
-            _safe_text(location),
-            _confidence_text(confidence),
-            _format_datetime(detected_at),
-            status,
-            _safe_text(note),
+            f["target"],
+            f["kind"],
+            f["camera"],
+            None,  # confidence: diisi sebagai persen numerik di bawah
+            f["time"],
+            f["status"],
         ]
+        for index, f in enumerate(fields, start=1)
+    ]
 
-        row_number = header_row + index
-
-        for col, value in enumerate(values, start=1):
-            ws.cell(
-                row=row_number,
-                column=col,
-                value=value,
-            )
-
-        _confidence_excel_fill(
-            ws.cell(row=row_number, column=5),
-            confidence,
-        )
-
-        _status_excel_fill(
-            ws.cell(row=row_number, column=7),
-            status,
-        )
-
-        ws.row_dimensions[row_number].height = 30
-
-    last_row = max(header_row + len(items or []), header_row + 1)
-
-    _add_excel_table(
+    _excel_table_sheet(
         ws,
-        f"A4:H{last_row}",
-        "DetectionsTable",
+        "HASIL DETEKSI CCTV",
+        "Laporan hasil deteksi wajah dan plat nomor kendaraan "
+        f"— Diekspor: {_now_text()} — Jumlah data: {len(rows)}",
+        headers,
+        rows,
+        [8, 24, 26, 28, 15, 22, 16],
+        row_height=24,
+        print_setup=True,
     )
 
-    _set_widths(
-        ws,
-        [8, 20, 18, 25, 15, 22, 18, 30],
-    )
+    for index, f in enumerate(fields, start=1):
+        row_number = 4 + index
 
-    _style_excel_sheet(ws)
+        _excel_percent_cell(ws.cell(row=row_number, column=5), f["confidence"])
 
-    ws.auto_filter.ref = f"A4:H{last_row}"
-
-    ws.print_title_rows = "1:4"
-    ws.page_setup.orientation = "landscape"
-    ws.page_setup.fitToWidth = 1
-    ws.page_setup.fitToHeight = 0
-    ws.sheet_properties.pageSetUpPr.fitToPage = True
+        _status_excel_fill(ws.cell(row=row_number, column=7), f["status"])
 
     return _finalize_excel(wb)
 
 
 # ============================================================
 # 2. HASIL DETEKSI - PDF
+#    Kolom: No | Foto | Target / Nilai | Jenis Deteksi | Area CCTV |
+#           Confidence | Waktu Deteksi | Status   (tanpa Keterangan)
 # ============================================================
 
 def build_detections_pdf(items):
@@ -665,309 +1036,111 @@ def build_detections_pdf(items):
         rightMargin=12 * mm,
         leftMargin=12 * mm,
         topMargin=12 * mm,
-        bottomMargin=12 * mm,
+        bottomMargin=14 * mm,
     )
 
-    styles = getSampleStyleSheet()
+    s = _pdf_styles()
 
-    title_style = ParagraphStyle(
-        "DetectionTitle",
-        parent=styles["Title"],
-        fontSize=17,
-        leading=21,
-        alignment=TA_CENTER,
-        spaceAfter=4 * mm,
-    )
+    fields = [_detection_fields(item) for item in (items or [])]
 
-    subtitle_style = ParagraphStyle(
-        "DetectionSubtitle",
-        parent=styles["Normal"],
-        fontSize=9,
-        alignment=TA_CENTER,
-        spaceAfter=6 * mm,
-    )
-
-    cell_style = ParagraphStyle(
-        "DetectionCell",
-        parent=styles["Normal"],
-        fontSize=8,
-        leading=10,
-        alignment=TA_LEFT,
-    )
-
-    story = []
-
-    story.append(
+    story = [
+        Paragraph("HASIL DETEKSI CCTV", s["title"]),
         Paragraph(
-            "HASIL DETEKSI CCTV",
-            title_style,
-        )
-    )
-
-    story.append(
-        Paragraph(
-            "Laporan hasil deteksi wajah dan plat nomor kendaraan",
-            subtitle_style,
-        )
-    )
-
-    table_data = [
-        [
-            Paragraph("<b>No</b>", cell_style),
-            Paragraph("<b>Foto</b>", cell_style),
-            Paragraph("<b>Target</b>", cell_style),
-            Paragraph("<b>Jenis</b>", cell_style),
-            Paragraph("<b>Area CCTV</b>", cell_style),
-            Paragraph("<b>Confidence</b>", cell_style),
-            Paragraph("<b>Waktu</b>", cell_style),
-            Paragraph("<b>Status</b>", cell_style),
-        ]
+            "Laporan hasil deteksi wajah dan plat nomor kendaraan"
+            f"<br/>Dicetak: {_now_text()} — Jumlah data: {len(fields)}",
+            s["subtitle"],
+        ),
     ]
 
-    image_rows = []
+    if not fields:
+        story.append(Paragraph(EMPTY_MESSAGE, s["empty"]))
+        _pdf_build(doc, story)
+        buffer.seek(0)
+        return buffer
 
-    for index, item in enumerate(items or [], start=1):
-        target = _value(
-            item,
-            "target",
-            "plate_number",
-            "plate",
-            "object_type",
-            default="Objek",
+    data = [
+        _pdf_head(
+            [
+                "No",
+                "Foto",
+                "Target / Nilai",
+                "Jenis Deteksi",
+                "Area CCTV",
+                "Confidence",
+                "Waktu Deteksi",
+                "Status",
+            ],
+            s["head"],
         )
+    ]
 
-        detection_type = _value(
-            item,
-            "type",
-            "object_type",
-            "detection_type",
-            default="Deteksi",
-        )
+    extra = [
+        ("ALIGN", (0, 1), (0, -1), "CENTER"),
+        ("ALIGN", (1, 1), (1, -1), "CENTER"),
+    ]
 
-        location = _value(
-            item,
-            "camera_name",
-            "camera",
-            "location",
-            "area",
-            default="-",
-        )
-
-        confidence = _value(
-            item,
-            "plate_confidence",
-            "face_confidence",
-            "person_confidence",
-            "confidence",
-            default=0,
-        )
-
-        detected_at = _value(
-            item,
-            "detected_at",
-            "detection_time",
-            "created_at",
-            default="-",
-        )
-
-        status = _status(
-            _value(
-                item,
-                "plate_status",
-                "face_status",
-                "status",
-                default="Perlu dicek",
-            )
-        )
-
-        image_path = _value(
-            item,
-            "image_path",
-            "capture_path",
-            "photo",
-            "photo_path",
-            "plate_image_path",
-            "face_image_path",
-            default="",
-        )
-
-        resolved = _resolve_image_path(image_path)
-
-        photo = Paragraph(
-            "Tidak ada foto",
-            cell_style,
-        )
-
-        if resolved:
-            try:
-                reader = ImageReader(resolved)
-                width, height = reader.getSize()
-
-                max_width = 32 * mm
-                max_height = 22 * mm
-
-                ratio = min(
-                    max_width / width,
-                    max_height / height,
-                )
-
-                photo = Image(
-                    resolved,
-                    width=width * ratio,
-                    height=height * ratio,
-                )
-            except Exception:
-                pass
-
-        table_data.append(
+    for index, f in enumerate(fields, start=1):
+        data.append(
             [
                 str(index),
-                photo,
-                Paragraph(_safe_text(target), cell_style),
-                Paragraph(_safe_text(detection_type), cell_style),
-                Paragraph(_safe_text(location), cell_style),
-                Paragraph(
-                    _confidence_text(confidence),
-                    cell_style,
+                _pdf_photo(
+                    f["photo"],
+                    s["cell"],
+                    30 * mm,
+                    18 * mm,
+                    "Foto tidak tersedia",
                 ),
-                Paragraph(
-                    _format_datetime(detected_at),
-                    cell_style,
-                ),
-                Paragraph(
-                    status,
-                    cell_style,
-                ),
+                _p(f["target"], s["cell"]),
+                _p(f["kind"], s["cell"]),
+                _p(f["camera"], s["cell"]),
+                _p(f["confidence_text"], s["cell"]),
+                _p(f["time"], s["cell"]),
+                _p(f["status"], s["cell"]),
             ]
         )
 
-        image_rows.append(
-            {
-                "row": len(table_data) - 1,
-                "confidence": _confidence(confidence),
-                "status": status,
-            }
+        row = len(data) - 1
+
+        confident = (f["confidence"] or 0) >= 70
+
+        extra.append(
+            (
+                "BACKGROUND",
+                (5, row),
+                (5, row),
+                colors.HexColor("#DCFCE7" if confident else "#FEF3C7"),
+            )
         )
 
-    table = Table(
-        table_data,
-        colWidths=[
-            10 * mm,
-            38 * mm,
-            30 * mm,
-            25 * mm,
-            40 * mm,
-            27 * mm,
-            37 * mm,
-            28 * mm,
-        ],
-        repeatRows=1,
+        extra.append(
+            (
+                "BACKGROUND",
+                (7, row),
+                (7, row),
+                colors.HexColor(
+                    "#DCFCE7" if f["status"] == "Terbaca" else "#FEF3C7"
+                ),
+            )
+        )
+
+    story.append(
+        _pdf_table(
+            data,
+            [
+                10 * mm,
+                40 * mm,
+                38 * mm,
+                40 * mm,
+                44 * mm,
+                26 * mm,
+                40 * mm,
+                28 * mm,
+            ],
+            extra,
+        )
     )
 
-    table_style = [
-        (
-            "BACKGROUND",
-            (0, 0),
-            (-1, 0),
-            colors.HexColor("#2563EB"),
-        ),
-        (
-            "TEXTCOLOR",
-            (0, 0),
-            (-1, 0),
-            colors.white,
-        ),
-        (
-            "FONTNAME",
-            (0, 0),
-            (-1, 0),
-            "Helvetica-Bold",
-        ),
-        (
-            "ALIGN",
-            (0, 0),
-            (-1, 0),
-            "CENTER",
-        ),
-        (
-            "VALIGN",
-            (0, 0),
-            (-1, -1),
-            "MIDDLE",
-        ),
-        (
-            "GRID",
-            (0, 0),
-            (-1, -1),
-            0.4,
-            colors.HexColor("#D1D5DB"),
-        ),
-        (
-            "ROWBACKGROUNDS",
-            (0, 1),
-            (-1, -1),
-            [
-                colors.white,
-                colors.HexColor("#F9FAFB"),
-            ],
-        ),
-        (
-            "ALIGN",
-            (0, 1),
-            (0, -1),
-            "CENTER",
-        ),
-    ]
-
-    for info in image_rows:
-        row = info["row"]
-
-        if (
-            "terbaca" in info["status"].lower()
-            or info["confidence"] >= 0.70
-        ):
-            table_style.append(
-                (
-                    "BACKGROUND",
-                    (5, row),
-                    (5, row),
-                    colors.HexColor("#DCFCE7"),
-                )
-            )
-        else:
-            table_style.append(
-                (
-                    "BACKGROUND",
-                    (5, row),
-                    (5, row),
-                    colors.HexColor("#FEF3C7"),
-                )
-            )
-
-        if "terbaca" in info["status"].lower():
-            table_style.append(
-                (
-                    "BACKGROUND",
-                    (7, row),
-                    (7, row),
-                    colors.HexColor("#DCFCE7"),
-                )
-            )
-        else:
-            table_style.append(
-                (
-                    "BACKGROUND",
-                    (7, row),
-                    (7, row),
-                    colors.HexColor("#FEF3C7"),
-                )
-            )
-
-    table.setStyle(TableStyle(table_style))
-
-    story.append(table)
-
-    doc.build(story)
+    _pdf_build(doc, story)
 
     buffer.seek(0)
 
@@ -976,6 +1149,9 @@ def build_detections_pdf(items):
 
 # ============================================================
 # 3. RIWAYAT PLAT - EXCEL
+#    Kolom: No | Nomor Plat | Area CCTV | Confidence |
+#           Waktu Deteksi | Status   (tanpa Keterangan, tanpa crop)
+#    Sumber field: lihat _plate_fields() (= loadPlateHistory()).
 # ============================================================
 
 def build_plates_excel(items):
@@ -984,15 +1160,6 @@ def build_plates_excel(items):
     ws = wb.active
     ws.title = "Riwayat Plat"
 
-    columns = 7
-
-    _add_excel_title(
-        ws,
-        "RIWAYAT PLAT NOMOR",
-        "Riwayat hasil pembacaan plat kendaraan dari CCTV",
-        columns,
-    )
-
     headers = [
         "No",
         "Nomor Plat",
@@ -1000,133 +1167,48 @@ def build_plates_excel(items):
         "Confidence",
         "Waktu Deteksi",
         "Status",
-        "Keterangan",
     ]
 
-    for col, value in enumerate(headers, start=1):
-        ws.cell(
-            row=4,
-            column=col,
-            value=value,
-        )
+    fields = [_plate_fields(item) for item in (items or [])]
 
-    _apply_excel_header(
+    rows = [
+        [
+            index,
+            f["plate"],
+            f["camera"],
+            None,
+            f["time"],
+            f["status"],
+        ]
+        for index, f in enumerate(fields, start=1)
+    ]
+
+    _excel_table_sheet(
         ws,
-        4,
-        1,
-        columns,
+        "RIWAYAT PLAT NOMOR",
+        "Riwayat hasil pembacaan plat kendaraan dari CCTV "
+        f"— Diekspor: {_now_text()} — Jumlah data: {len(rows)}",
+        headers,
+        rows,
+        [8, 22, 32, 16, 23, 16],
+        row_height=24,
+        print_setup=True,
     )
 
-    for index, item in enumerate(items or [], start=1):
-        plate = _value(
-            item,
-            "plate_number",
-            "plate",
-            "formatted_text",
-            "text",
-            default="-",
-        )
-
-        location = _value(
-            item,
-            "camera_name",
-            "camera",
-            "location",
-            "area",
-            default="-",
-        )
-
-        confidence = _value(
-            item,
-            "plate_confidence",
-            "confidence",
-            default=0,
-        )
-
-        detected_at = _value(
-            item,
-            "detected_at",
-            "detection_time",
-            "created_at",
-            default="-",
-        )
-
-        status = _status(
-            _value(
-                item,
-                "plate_status",
-                "status",
-                default="Perlu dicek",
-            )
-        )
-
-        note = _value(
-            item,
-            "description",
-            "keterangan",
-            "message",
-            default="-",
-        )
-
-        values = [
-            index,
-            _safe_text(plate),
-            _safe_text(location),
-            _confidence_text(confidence),
-            _format_datetime(detected_at),
-            status,
-            _safe_text(note),
-        ]
-
+    for index, f in enumerate(fields, start=1):
         row_number = 4 + index
 
-        for col, value in enumerate(values, start=1):
-            ws.cell(
-                row=row_number,
-                column=col,
-                value=value,
-            )
+        _excel_percent_cell(ws.cell(row=row_number, column=4), f["confidence"])
 
-        _confidence_excel_fill(
-            ws.cell(row=row_number, column=4),
-            confidence,
-        )
-
-        _status_excel_fill(
-            ws.cell(row=row_number, column=6),
-            status,
-        )
-
-        ws.row_dimensions[row_number].height = 28
-
-    last_row = max(5, 4 + len(items or []))
-
-    _add_excel_table(
-        ws,
-        f"A4:G{last_row}",
-        "PlateHistoryTable",
-    )
-
-    _set_widths(
-        ws,
-        [8, 20, 30, 16, 23, 18, 30],
-    )
-
-    _style_excel_sheet(ws)
-
-    ws.auto_filter.ref = f"A4:G{last_row}"
-
-    ws.print_title_rows = "1:4"
-    ws.page_setup.orientation = "landscape"
-    ws.page_setup.fitToWidth = 1
-    ws.page_setup.fitToHeight = 0
-    ws.sheet_properties.pageSetUpPr.fitToPage = True
+        _status_excel_fill(ws.cell(row=row_number, column=6), f["status"])
 
     return _finalize_excel(wb)
 
 
 # ============================================================
 # 4. RIWAYAT PLAT - PDF
+#    Kolom: No | Crop / Foto Plat | Nomor Plat | Area CCTV |
+#           Confidence | Waktu Deteksi | Status  (tanpa Keterangan)
 # ============================================================
 
 def build_plates_pdf(items):
@@ -1138,291 +1220,108 @@ def build_plates_pdf(items):
         rightMargin=12 * mm,
         leftMargin=12 * mm,
         topMargin=12 * mm,
-        bottomMargin=12 * mm,
+        bottomMargin=14 * mm,
     )
 
-    styles = getSampleStyleSheet()
+    s = _pdf_styles()
 
-    title_style = ParagraphStyle(
-        "PlateTitle",
-        parent=styles["Title"],
-        fontSize=17,
-        alignment=TA_CENTER,
-        spaceAfter=4 * mm,
-    )
-
-    subtitle_style = ParagraphStyle(
-        "PlateSubtitle",
-        parent=styles["Normal"],
-        fontSize=9,
-        alignment=TA_CENTER,
-        spaceAfter=6 * mm,
-    )
-
-    cell_style = ParagraphStyle(
-        "PlateCell",
-        parent=styles["Normal"],
-        fontSize=8,
-        leading=10,
-    )
+    fields = [_plate_fields(item) for item in (items or [])]
 
     story = [
+        Paragraph("RIWAYAT PLAT NOMOR", s["title"]),
         Paragraph(
-            "RIWAYAT PLAT NOMOR",
-            title_style,
-        ),
-        Paragraph(
-            "Riwayat hasil pembacaan plat kendaraan dari CCTV",
-            subtitle_style,
+            "Riwayat hasil pembacaan plat kendaraan dari CCTV"
+            f"<br/>Dicetak: {_now_text()} — Jumlah data: {len(fields)}",
+            s["subtitle"],
         ),
     ]
+
+    if not fields:
+        story.append(Paragraph(EMPTY_MESSAGE, s["empty"]))
+        _pdf_build(doc, story)
+        buffer.seek(0)
+        return buffer
 
     data = [
-        [
-            Paragraph("<b>No</b>", cell_style),
-            Paragraph("<b>Foto Plat</b>", cell_style),
-            Paragraph("<b>Nomor Plat</b>", cell_style),
-            Paragraph("<b>Area CCTV</b>", cell_style),
-            Paragraph("<b>Confidence</b>", cell_style),
-            Paragraph("<b>Waktu Deteksi</b>", cell_style),
-            Paragraph("<b>Status</b>", cell_style),
-        ]
+        _pdf_head(
+            [
+                "No",
+                "Crop / Foto Plat",
+                "Nomor Plat",
+                "Area CCTV",
+                "Confidence",
+                "Waktu Deteksi",
+                "Status",
+            ],
+            s["head"],
+        )
     ]
 
-    rows_info = []
+    extra = [
+        ("ALIGN", (0, 1), (0, -1), "CENTER"),
+        ("ALIGN", (1, 1), (1, -1), "CENTER"),
+    ]
 
-    for index, item in enumerate(items or [], start=1):
-        plate = _value(
-            item,
-            "plate_number",
-            "plate",
-            "formatted_text",
-            "text",
-            default="-",
-        )
-
-        location = _value(
-            item,
-            "camera_name",
-            "camera",
-            "location",
-            "area",
-            default="-",
-        )
-
-        confidence = _value(
-            item,
-            "plate_confidence",
-            "confidence",
-            default=0,
-        )
-
-        detected_at = _value(
-            item,
-            "detected_at",
-            "detection_time",
-            "created_at",
-            default="-",
-        )
-
-        status = _status(
-            _value(
-                item,
-                "plate_status",
-                "status",
-                default="Perlu dicek",
-            )
-        )
-
-        image_path = _value(
-            item,
-            "plate_image_path",
-            "image_path",
-            "crop_path",
-            "crop",
-            "photo",
-            "photo_path",
-            default="",
-        )
-
-        resolved = _resolve_image_path(image_path)
-
-        photo = Paragraph(
-            "Tidak ada foto",
-            cell_style,
-        )
-
-        if resolved:
-            try:
-                reader = ImageReader(resolved)
-                width, height = reader.getSize()
-
-                max_width = 38 * mm
-                max_height = 22 * mm
-
-                ratio = min(
-                    max_width / width,
-                    max_height / height,
-                )
-
-                photo = Image(
-                    resolved,
-                    width=width * ratio,
-                    height=height * ratio,
-                )
-            except Exception:
-                pass
-
+    for index, f in enumerate(fields, start=1):
         data.append(
             [
                 str(index),
-                photo,
-                Paragraph(
-                    f"<b>{_safe_text(plate)}</b>",
-                    cell_style,
+                _pdf_photo(
+                    f["photo"],
+                    s["cell"],
+                    38 * mm,
+                    16 * mm,
+                    "Crop tidak tersedia",
                 ),
-                Paragraph(
-                    _safe_text(location),
-                    cell_style,
-                ),
-                Paragraph(
-                    _confidence_text(confidence),
-                    cell_style,
-                ),
-                Paragraph(
-                    _format_datetime(detected_at),
-                    cell_style,
-                ),
-                Paragraph(
-                    status,
-                    cell_style,
-                ),
+                _p_bold(f["plate"], s["cell"]),
+                _p(f["camera"], s["cell"]),
+                _p(f["confidence_text"], s["cell"]),
+                _p(f["time"], s["cell"]),
+                _p(f["status"], s["cell"]),
             ]
         )
 
-        rows_info.append(
-            {
-                "row": len(data) - 1,
-                "confidence": _confidence(confidence),
-                "status": status,
-            }
+        row = len(data) - 1
+
+        confident = (f["confidence"] or 0) >= 70
+
+        extra.append(
+            (
+                "BACKGROUND",
+                (4, row),
+                (4, row),
+                colors.HexColor("#DCFCE7" if confident else "#FEF3C7"),
+            )
         )
 
-    table = Table(
-        data,
-        colWidths=[
-            10 * mm,
-            45 * mm,
-            35 * mm,
-            45 * mm,
-            28 * mm,
-            42 * mm,
-            30 * mm,
-        ],
-        repeatRows=1,
+        extra.append(
+            (
+                "BACKGROUND",
+                (6, row),
+                (6, row),
+                colors.HexColor(
+                    "#DCFCE7" if f["status"] == "Terbaca" else "#FEF3C7"
+                ),
+            )
+        )
+
+    story.append(
+        _pdf_table(
+            data,
+            [
+                10 * mm,
+                48 * mm,
+                42 * mm,
+                50 * mm,
+                30 * mm,
+                48 * mm,
+                34 * mm,
+            ],
+            extra,
+        )
     )
 
-    table_style = [
-        (
-            "BACKGROUND",
-            (0, 0),
-            (-1, 0),
-            colors.HexColor("#2563EB"),
-        ),
-        (
-            "TEXTCOLOR",
-            (0, 0),
-            (-1, 0),
-            colors.white,
-        ),
-        (
-            "FONTNAME",
-            (0, 0),
-            (-1, 0),
-            "Helvetica-Bold",
-        ),
-        (
-            "ALIGN",
-            (0, 0),
-            (-1, 0),
-            "CENTER",
-        ),
-        (
-            "VALIGN",
-            (0, 0),
-            (-1, -1),
-            "MIDDLE",
-        ),
-        (
-            "GRID",
-            (0, 0),
-            (-1, -1),
-            0.4,
-            colors.HexColor("#D1D5DB"),
-        ),
-        (
-            "ROWBACKGROUNDS",
-            (0, 1),
-            (-1, -1),
-            [
-                colors.white,
-                colors.HexColor("#F9FAFB"),
-            ],
-        ),
-        (
-            "ALIGN",
-            (0, 1),
-            (0, -1),
-            "CENTER",
-        ),
-    ]
-
-    for info in rows_info:
-        row = info["row"]
-
-        if info["confidence"] >= 0.70:
-            table_style.append(
-                (
-                    "BACKGROUND",
-                    (4, row),
-                    (4, row),
-                    colors.HexColor("#DCFCE7"),
-                )
-            )
-        else:
-            table_style.append(
-                (
-                    "BACKGROUND",
-                    (4, row),
-                    (4, row),
-                    colors.HexColor("#FEF3C7"),
-                )
-            )
-
-        if "terbaca" in info["status"].lower():
-            table_style.append(
-                (
-                    "BACKGROUND",
-                    (6, row),
-                    (6, row),
-                    colors.HexColor("#DCFCE7"),
-                )
-            )
-        else:
-            table_style.append(
-                (
-                    "BACKGROUND",
-                    (6, row),
-                    (6, row),
-                    colors.HexColor("#FEF3C7"),
-                )
-            )
-
-    table.setStyle(TableStyle(table_style))
-
-    story.append(table)
-
-    doc.build(story)
+    _pdf_build(doc, story)
 
     buffer.seek(0)
 
@@ -1430,15 +1329,74 @@ def build_plates_pdf(items):
 
 
 # ============================================================
-# 5. REKAPITULASI - EXCEL
+# 5. REKAPITULASI - EXCEL   (1 file, 3 sheet)
+#    Sheet 1 Ringkasan    : Kendaraan/Orang Masuk, Keluar, Total
+#    Sheet 2 Rekap CCTV   : CCTV / Gerbang | Arah | Kendaraan |
+#                           Orang | Plat Unik | Status
+#    Sheet 3 Total Harian : Tanggal | Kendaraan | Plat Unik |
+#                           Masuk | Keluar | Orang
+#    Sumber field: loadRecap() -> /api/analytics
 # ============================================================
 
-def build_recap_excel(analytics):
+def _recap_summary_rows(summary):
+    return [
+        ["Kendaraan Masuk", _int(summary.get("vehicle_entry"))],
+        ["Kendaraan Keluar", _int(summary.get("vehicle_exit"))],
+        ["Total Kendaraan", _int(summary.get("vehicles"))],
+        ["Orang Masuk", _int(summary.get("people_entry"))],
+        ["Orang Keluar", _int(summary.get("people_exit"))],
+        ["Total Orang", _int(summary.get("people"))],
+    ]
+
+
+def _recap_camera_rows(cameras):
+    return [
+        [
+            _text(c.get("camera")),
+            _text(c.get("direction")),
+            _int(c.get("vehicles")),
+            _int(c.get("people")),
+            _int(c.get("unique_plates")),
+            _text(c.get("status")),
+        ]
+        for c in cameras
+    ]
+
+
+def _recap_daily_rows(daily):
+    return [
+        [
+            _text(d.get("date")),
+            _int(d.get("vehicles")),
+            _int(d.get("unique_plates")),
+            _int(d.get("entry")),
+            _int(d.get("exit")),
+            _int(d.get("people")),
+        ]
+        for d in daily
+    ]
+
+
+def _recap_subtitle(analytics, period, text):
+    label = _period_label(
+        period
+        or (analytics.get("period") if isinstance(analytics, dict) else "")
+    )
+
+    parts = [text]
+
+    if label:
+        parts.append(f"Periode: {label}")
+
+    parts.append(f"Diekspor: {_now_text()}")
+
+    return " — ".join(parts)
+
+
+def build_recap_excel(analytics, period=None):
     wb = Workbook()
 
-    summary = analytics.get("summary", {}) if isinstance(analytics, dict) else {}
-    daily = analytics.get("daily", []) if isinstance(analytics, dict) else []
-    cameras = analytics.get("cameras", []) if isinstance(analytics, dict) else []
+    summary, cameras, daily, _hourly, _top = _analytics_parts(analytics)
 
     # --------------------------------------------------------
     # SHEET 1 - RINGKASAN
@@ -1447,78 +1405,22 @@ def build_recap_excel(analytics):
     ws = wb.active
     ws.title = "Ringkasan"
 
-    _add_excel_title(
+    _excel_table_sheet(
         ws,
         "REKAPITULASI MONITORING CCTV",
-        "Ringkasan hasil pemantauan dan deteksi CCTV",
-        4,
+        _recap_subtitle(
+            analytics, period, "Ringkasan aktivitas kendaraan dan orang"
+        ),
+        ["Indikator", "Jumlah"],
+        _recap_summary_rows(summary),
+        [30, 18],
     )
 
-    headers = [
-        "Indikator",
-        "Jumlah",
-        "Keterangan",
-        "Periode",
-    ]
+    for row in range(5, 5 + 6):
+        ws.cell(row=row, column=2).number_format = "#,##0"
+        ws.cell(row=row, column=2).alignment = Alignment(horizontal="center")
 
-    for col, value in enumerate(headers, start=1):
-        ws.cell(row=4, column=col, value=value)
-
-    _apply_excel_header(ws, 4, 1, 4)
-
-    period = _value(
-        analytics,
-        "period",
-        default="Semua periode",
-    )
-
-    summary_rows = [
-        [
-            "Total Kendaraan",
-            summary.get("vehicles", 0),
-            "Objek kendaraan terdeteksi",
-            period,
-        ],
-        [
-            "Total Wajah/Orang",
-            summary.get("people", 0),
-            "Objek wajah/orang terdeteksi",
-            period,
-        ],
-        [
-            "Total Plat",
-            summary.get("plates", 0),
-            "Plat nomor yang terbaca",
-            period,
-        ],
-        [
-            "Kamera Aktif",
-            summary.get("active_cameras", 0),
-            "Kamera dengan status aktif",
-            period,
-        ],
-        [
-            "Total Kamera",
-            summary.get("total_cameras", 0),
-            "Seluruh kamera terdaftar",
-            period,
-        ],
-    ]
-
-    for row_index, row_data in enumerate(summary_rows, start=5):
-        for col, value in enumerate(row_data, start=1):
-            ws.cell(
-                row=row_index,
-                column=col,
-                value=value,
-            )
-
-    _set_widths(
-        ws,
-        [25, 16, 40, 20],
-    )
-
-    _style_excel_sheet(ws)
+    ws.auto_filter.ref = None
 
     # --------------------------------------------------------
     # SHEET 2 - REKAP CCTV
@@ -1526,92 +1428,35 @@ def build_recap_excel(analytics):
 
     ws_camera = wb.create_sheet("Rekap CCTV")
 
-    _add_excel_title(
+    camera_rows = _recap_camera_rows(cameras)
+
+    _excel_table_sheet(
         ws_camera,
-        "REKAPITULASI PER CCTV",
-        "Ringkasan aktivitas deteksi berdasarkan lokasi kamera",
-        6,
+        "REKAP PER CCTV / GERBANG",
+        _recap_subtitle(
+            analytics,
+            period,
+            "Agregasi event deteksi per CCTV / gerbang",
+        ),
+        [
+            "CCTV / Gerbang",
+            "Arah",
+            "Kendaraan",
+            "Orang",
+            "Plat Unik",
+            "Status",
+        ],
+        camera_rows,
+        [34, 20, 14, 14, 14, 14],
     )
 
-    camera_headers = [
-        "No",
-        "CCTV / Lokasi",
-        "Kendaraan",
-        "Wajah/Orang",
-        "Plat Unik",
-        "Total Deteksi",
-    ]
+    for index, row in enumerate(camera_rows, start=1):
+        cell = ws_camera.cell(row=4 + index, column=6)
 
-    for col, value in enumerate(camera_headers, start=1):
-        ws_camera.cell(
-            row=4,
-            column=col,
-            value=value,
+        cell.fill = PatternFill(
+            "solid",
+            fgColor=LIGHT_GREEN if row[5] == "Aktif" else LIGHT_YELLOW,
         )
-
-    _apply_excel_header(
-        ws_camera,
-        4,
-        1,
-        6,
-    )
-
-    for index, camera in enumerate(cameras or [], start=1):
-        vehicles = _safe_number(
-            _value(camera, "vehicles", default=0)
-        )
-
-        people = _safe_number(
-            _value(camera, "people", default=0)
-        )
-
-        unique_plates = _safe_number(
-            _value(camera, "unique_plates", default=0)
-        )
-
-        total = vehicles + people
-
-        values = [
-            index,
-            _value(
-                camera,
-                "camera",
-                "camera_name",
-                "location",
-                default="-",
-            ),
-            int(vehicles),
-            int(people),
-            int(unique_plates),
-            int(total),
-        ]
-
-        row_number = 4 + index
-
-        for col, value in enumerate(values, start=1):
-            ws_camera.cell(
-                row=row_number,
-                column=col,
-                value=value,
-            )
-
-    last_row = max(
-        5,
-        4 + len(cameras or []),
-    )
-
-    _add_excel_table(
-        ws_camera,
-        f"A4:F{last_row}",
-        "RecapCameraTable",
-    )
-
-    _set_widths(
-        ws_camera,
-        [8, 30, 18, 18, 18, 20],
-    )
-
-    _style_excel_sheet(ws_camera)
 
     # --------------------------------------------------------
     # SHEET 3 - TOTAL HARIAN
@@ -1619,93 +1464,35 @@ def build_recap_excel(analytics):
 
     ws_daily = wb.create_sheet("Total Harian")
 
-    _add_excel_title(
+    _excel_table_sheet(
         ws_daily,
-        "TOTAL DETEKSI HARIAN",
-        "Rekap jumlah kendaraan dan wajah/orang berdasarkan tanggal",
-        4,
+        "TOTAL PER HARI",
+        _recap_subtitle(
+            analytics,
+            period,
+            "Kendaraan, plat unik, masuk/keluar, dan orang per tanggal",
+        ),
+        [
+            "Tanggal",
+            "Kendaraan",
+            "Plat Unik",
+            "Masuk",
+            "Keluar",
+            "Orang",
+        ],
+        _recap_daily_rows(daily),
+        [16, 14, 14, 14, 14, 14],
     )
-
-    daily_headers = [
-        "No",
-        "Tanggal",
-        "Kendaraan",
-        "Wajah/Orang",
-    ]
-
-    for col, value in enumerate(daily_headers, start=1):
-        ws_daily.cell(
-            row=4,
-            column=col,
-            value=value,
-        )
-
-    _apply_excel_header(
-        ws_daily,
-        4,
-        1,
-        4,
-    )
-
-    for index, row in enumerate(daily or [], start=1):
-        values = [
-            index,
-            _value(
-                row,
-                "date",
-                "tanggal",
-                default="-",
-            ),
-            _value(
-                row,
-                "vehicles",
-                "vehicle",
-                default=0,
-            ),
-            _value(
-                row,
-                "people",
-                "persons",
-                "faces",
-                default=0,
-            ),
-        ]
-
-        row_number = 4 + index
-
-        for col, value in enumerate(values, start=1):
-            ws_daily.cell(
-                row=row_number,
-                column=col,
-                value=value,
-            )
-
-    last_row = max(
-        5,
-        4 + len(daily or []),
-    )
-
-    _add_excel_table(
-        ws_daily,
-        f"A4:D{last_row}",
-        "DailyRecapTable",
-    )
-
-    _set_widths(
-        ws_daily,
-        [8, 22, 20, 20],
-    )
-
-    _style_excel_sheet(ws_daily)
 
     return _finalize_excel(wb)
 
 
 # ============================================================
 # 6. REKAPITULASI - PDF
+#    Sumber data identik dengan build_recap_excel().
 # ============================================================
 
-def build_recap_pdf(analytics):
+def build_recap_pdf(analytics, period=None):
     buffer = io.BytesIO()
 
     doc = SimpleDocTemplate(
@@ -1717,393 +1504,143 @@ def build_recap_pdf(analytics):
         bottomMargin=15 * mm,
     )
 
-    styles = getSampleStyleSheet()
+    s = _pdf_styles()
 
-    title_style = ParagraphStyle(
-        "RecapTitle",
-        parent=styles["Title"],
-        fontSize=17,
-        alignment=TA_CENTER,
-        spaceAfter=4 * mm,
+    summary, cameras, daily, _hourly, _top = _analytics_parts(analytics)
+
+    label = _period_label(
+        period
+        or (analytics.get("period") if isinstance(analytics, dict) else "")
     )
 
-    subtitle_style = ParagraphStyle(
-        "RecapSubtitle",
-        parent=styles["Normal"],
-        fontSize=9,
-        alignment=TA_CENTER,
-        spaceAfter=8 * mm,
-    )
+    subtitle = "Ringkasan hasil pemantauan dan deteksi CCTV"
 
-    section_style = ParagraphStyle(
-        "RecapSection",
-        parent=styles["Heading2"],
-        fontSize=12,
-        spaceBefore=5 * mm,
-        spaceAfter=3 * mm,
-    )
+    if label:
+        subtitle += f"<br/>Periode: {escape(label)}"
 
-    cell_style = ParagraphStyle(
-        "RecapCell",
-        parent=styles["Normal"],
-        fontSize=8,
-        leading=10,
-    )
-
-    summary = analytics.get("summary", {})
-    cameras = analytics.get("cameras", [])
-    daily = analytics.get("daily", [])
+    subtitle += f"<br/>Dicetak: {_now_text()}"
 
     story = [
-        Paragraph(
-            "REKAPITULASI MONITORING CCTV",
-            title_style,
-        ),
-        Paragraph(
-            "Ringkasan hasil pemantauan dan deteksi CCTV",
-            subtitle_style,
-        ),
+        Paragraph("REKAPITULASI MONITORING CCTV", s["title"]),
+        Paragraph(subtitle, s["subtitle"]),
     ]
 
-    # --------------------------------------------------------
-    # SUMMARY
-    # --------------------------------------------------------
+    # ---- 1. Ringkasan ----
+    story.append(Paragraph("Ringkasan", s["section"]))
+
+    summary_data = [_pdf_head(["Indikator", "Jumlah"], s["head"])]
+
+    for name, value in _recap_summary_rows(summary):
+        summary_data.append([_p(name, s["cell"]), str(value)])
 
     story.append(
-        Paragraph(
-            "Ringkasan",
-            section_style,
+        _pdf_table(
+            summary_data,
+            [100 * mm, 50 * mm],
+            [("ALIGN", (1, 1), (1, -1), "CENTER")],
         )
     )
 
-    summary_data = [
-        ["Indikator", "Jumlah"],
-        [
-            "Total Kendaraan",
-            str(summary.get("vehicles", 0)),
-        ],
-        [
-            "Total Wajah/Orang",
-            str(summary.get("people", 0)),
-        ],
-        [
-            "Total Plat",
-            str(summary.get("plates", 0)),
-        ],
-        [
-            "Kamera Aktif",
-            str(summary.get("active_cameras", 0)),
-        ],
-        [
-            "Total Kamera",
-            str(summary.get("total_cameras", 0)),
-        ],
-    ]
+    # ---- 2. Rekap per CCTV / Gerbang ----
+    story.append(Paragraph("Rekap per CCTV / Gerbang", s["section"]))
 
-    summary_table = Table(
-        summary_data,
-        colWidths=[
-            100 * mm,
-            45 * mm,
-        ],
-    )
+    camera_rows = _recap_camera_rows(cameras)
 
-    summary_table.setStyle(
-        TableStyle(
-            [
-                (
-                    "BACKGROUND",
-                    (0, 0),
-                    (-1, 0),
-                    colors.HexColor("#2563EB"),
-                ),
-                (
-                    "TEXTCOLOR",
-                    (0, 0),
-                    (-1, 0),
-                    colors.white,
-                ),
-                (
-                    "FONTNAME",
-                    (0, 0),
-                    (-1, 0),
-                    "Helvetica-Bold",
-                ),
-                (
-                    "GRID",
-                    (0, 0),
-                    (-1, -1),
-                    0.4,
-                    colors.HexColor("#D1D5DB"),
-                ),
-                (
-                    "ROWBACKGROUNDS",
-                    (0, 1),
-                    (-1, -1),
-                    [
-                        colors.white,
-                        colors.HexColor("#F9FAFB"),
-                    ],
-                ),
-                (
-                    "ALIGN",
-                    (1, 0),
-                    (1, -1),
-                    "CENTER",
-                ),
-                (
-                    "VALIGN",
-                    (0, 0),
-                    (-1, -1),
-                    "MIDDLE",
-                ),
-            ]
-        )
-    )
-
-    story.append(summary_table)
-
-    # --------------------------------------------------------
-    # REKAP CCTV
-    # --------------------------------------------------------
-
-    story.append(
-        Paragraph(
-            "Rekapitulasi CCTV",
-            section_style,
-        )
-    )
-
-    camera_data = [
-        [
-            Paragraph("<b>No</b>", cell_style),
-            Paragraph("<b>CCTV / Lokasi</b>", cell_style),
-            Paragraph("<b>Kendaraan</b>", cell_style),
-            Paragraph("<b>Wajah/Orang</b>", cell_style),
-            Paragraph("<b>Plat Unik</b>", cell_style),
-            Paragraph("<b>Total</b>", cell_style),
+    if not camera_rows:
+        story.append(Paragraph(EMPTY_MESSAGE, s["empty"]))
+    else:
+        camera_data = [
+            _pdf_head(
+                [
+                    "CCTV / Gerbang",
+                    "Arah",
+                    "Kendaraan",
+                    "Orang",
+                    "Plat Unik",
+                    "Status",
+                ],
+                s["head"],
+            )
         ]
-    ]
 
-    for index, camera in enumerate(cameras or [], start=1):
-        vehicles = int(
-            _safe_number(
-                _value(camera, "vehicles", default=0)
+        extra = [("ALIGN", (2, 1), (5, -1), "CENTER")]
+
+        for row in camera_rows:
+            camera_data.append(
+                [
+                    _p(row[0], s["cell"]),
+                    _p(row[1], s["cell"]),
+                    str(row[2]),
+                    str(row[3]),
+                    str(row[4]),
+                    _p(row[5], s["cell"]),
+                ]
             )
-        )
 
-        people = int(
-            _safe_number(
-                _value(camera, "people", default=0)
-            )
-        )
+            index = len(camera_data) - 1
 
-        unique_plates = int(
-            _safe_number(
-                _value(camera, "unique_plates", default=0)
-            )
-        )
-
-        camera_data.append(
-            [
-                str(index),
-                _safe_text(
-                    _value(
-                        camera,
-                        "camera",
-                        "camera_name",
-                        "location",
-                        default="-",
-                    )
-                ),
-                str(vehicles),
-                str(people),
-                str(unique_plates),
-                str(vehicles + people),
-            ]
-        )
-
-    camera_table = Table(
-        camera_data,
-        colWidths=[
-            12 * mm,
-            60 * mm,
-            25 * mm,
-            25 * mm,
-            25 * mm,
-            25 * mm,
-        ],
-        repeatRows=1,
-    )
-
-    camera_table.setStyle(
-        TableStyle(
-            [
+            extra.append(
                 (
                     "BACKGROUND",
-                    (0, 0),
-                    (-1, 0),
-                    colors.HexColor("#2563EB"),
-                ),
-                (
-                    "TEXTCOLOR",
-                    (0, 0),
-                    (-1, 0),
-                    colors.white,
-                ),
-                (
-                    "FONTNAME",
-                    (0, 0),
-                    (-1, 0),
-                    "Helvetica-Bold",
-                ),
-                (
-                    "GRID",
-                    (0, 0),
-                    (-1, -1),
-                    0.4,
-                    colors.HexColor("#D1D5DB"),
-                ),
-                (
-                    "ROWBACKGROUNDS",
-                    (0, 1),
-                    (-1, -1),
-                    [
-                        colors.white,
-                        colors.HexColor("#F9FAFB"),
-                    ],
-                ),
-                (
-                    "ALIGN",
-                    (0, 0),
-                    (-1, -1),
-                    "CENTER",
-                ),
-                (
-                    "VALIGN",
-                    (0, 0),
-                    (-1, -1),
-                    "MIDDLE",
-                ),
-            ]
+                    (5, index),
+                    (5, index),
+                    colors.HexColor(
+                        "#DCFCE7" if row[5] == "Aktif" else "#FEF3C7"
+                    ),
+                )
+            )
+
+        story.append(
+            _pdf_table(
+                camera_data,
+                [
+                    50 * mm,
+                    32 * mm,
+                    24 * mm,
+                    20 * mm,
+                    24 * mm,
+                    26 * mm,
+                ],
+                extra,
+            )
         )
-    )
 
-    story.append(camera_table)
+    # ---- 3. Total per Hari ----
+    story.append(Paragraph("Total per Hari", s["section"]))
 
-    # --------------------------------------------------------
-    # TOTAL HARIAN
-    # --------------------------------------------------------
+    daily_rows = _recap_daily_rows(daily)
 
-    story.append(
-        Paragraph(
-            "Total Harian",
-            section_style,
-        )
-    )
-
-    daily_data = [
-        [
-            Paragraph("<b>No</b>", cell_style),
-            Paragraph("<b>Tanggal</b>", cell_style),
-            Paragraph("<b>Kendaraan</b>", cell_style),
-            Paragraph("<b>Wajah/Orang</b>", cell_style),
+    if not daily_rows:
+        story.append(Paragraph(EMPTY_MESSAGE, s["empty"]))
+    else:
+        daily_data = [
+            _pdf_head(
+                [
+                    "Tanggal",
+                    "Kendaraan",
+                    "Plat Unik",
+                    "Masuk",
+                    "Keluar",
+                    "Orang",
+                ],
+                s["head"],
+            )
         ]
-    ]
 
-    for index, row in enumerate(daily or [], start=1):
-        daily_data.append(
-            [
-                str(index),
-                _safe_text(
-                    _value(
-                        row,
-                        "date",
-                        "tanggal",
-                        default="-",
-                    )
-                ),
-                str(
-                    _value(
-                        row,
-                        "vehicles",
-                        "vehicle",
-                        default=0,
-                    )
-                ),
-                str(
-                    _value(
-                        row,
-                        "people",
-                        "persons",
-                        "faces",
-                        default=0,
-                    )
-                ),
-            ]
+        for row in daily_rows:
+            daily_data.append(
+                [_p(row[0], s["cell"])] + [str(value) for value in row[1:]]
+            )
+
+        story.append(
+            _pdf_table(
+                daily_data,
+                [34 * mm, 28 * mm, 28 * mm, 28 * mm, 28 * mm, 28 * mm],
+                [("ALIGN", (1, 1), (-1, -1), "CENTER")],
+            )
         )
 
-    daily_table = Table(
-        daily_data,
-        colWidths=[
-            15 * mm,
-            65 * mm,
-            45 * mm,
-            45 * mm,
-        ],
-        repeatRows=1,
-    )
-
-    daily_table.setStyle(
-        TableStyle(
-            [
-                (
-                    "BACKGROUND",
-                    (0, 0),
-                    (-1, 0),
-                    colors.HexColor("#2563EB"),
-                ),
-                (
-                    "TEXTCOLOR",
-                    (0, 0),
-                    (-1, 0),
-                    colors.white,
-                ),
-                (
-                    "FONTNAME",
-                    (0, 0),
-                    (-1, 0),
-                    "Helvetica-Bold",
-                ),
-                (
-                    "GRID",
-                    (0, 0),
-                    (-1, -1),
-                    0.4,
-                    colors.HexColor("#D1D5DB"),
-                ),
-                (
-                    "ROWBACKGROUNDS",
-                    (0, 1),
-                    (-1, -1),
-                    [
-                        colors.white,
-                        colors.HexColor("#F9FAFB"),
-                    ],
-                ),
-                (
-                    "ALIGN",
-                    (0, 0),
-                    (-1, -1),
-                    "CENTER",
-                ),
-            ]
-        )
-    )
-
-    story.append(daily_table)
-
-    doc.build(story)
+    _pdf_build(doc, story)
 
     buffer.seek(0)
 
@@ -2111,19 +1648,94 @@ def build_recap_pdf(analytics):
 
 
 # ============================================================
-# 7. STATISTIK - EXCEL
-#    1 FILE = 2 SHEET
-#    Sheet 1: Statistik
-#    Sheet 2: Top 10
+# 7. STATISTIK - EXCEL   (1 file, 2 sheet: Statistik & Top 10)
+#    Sumber field: loadEnterpriseStatistics() -> /api/analytics
+#    (summary, cameras, hourly, top_plates). TIDAK memakai
+#    struktur / fungsi Rekapitulasi.
 # ============================================================
+
+def _stats_summary_rows(summary):
+    """Kartu KPI halaman Statistik."""
+    vehicles = _num(summary.get("vehicles")) or 0
+    plates = _num(summary.get("plates")) or 0
+
+    read_rate = int(plates / vehicles * 100 + 0.5) if vehicles else 0
+
+    return [
+        ["Total Deteksi (Kendaraan)", _int(summary.get("vehicles"))],
+        ["Deteksi Plat", _int(summary.get("plates"))],
+        ["Read Rate Plat", f"{read_rate}%"],
+        ["Wajah / Orang", _int(summary.get("people"))],
+        [
+            "Ketersediaan CCTV (aktif / total)",
+            f"{_int(summary.get('active_cameras'))} / "
+            f"{_int(summary.get('total_cameras'))}",
+        ],
+    ]
+
+
+def _stats_camera_rows(cameras):
+    return [
+        [
+            _text(c.get("camera")),
+            _int(c.get("vehicles")),
+            _int(c.get("people")),
+            _int(c.get("unique_plates")),
+        ]
+        for c in cameras
+    ]
+
+
+def _stats_hourly_rows(hourly):
+    return [
+        [
+            _text(h.get("label")),
+            _int(h.get("vehicles")),
+            _int(h.get("people")),
+        ]
+        for h in hourly
+    ]
+
+
+def _stats_top_rows(top_plates):
+    """Top 10. Mengenali dua bentuk data yang sama-sama dipakai website."""
+    rows = []
+
+    for plate in (top_plates or [])[:10]:
+        confidence = _num(
+            plate.get("confidence")
+            if plate.get("confidence") is not None
+            else plate.get("avg_confidence_percent")
+        )
+
+        rows.append(
+            [
+                _text(plate.get("plate") or plate.get("plate_number")),
+                _int(
+                    plate.get("count")
+                    if plate.get("count") is not None
+                    else plate.get("total_seen")
+                ),
+                _text(plate.get("camera") or plate.get("last_camera")),
+                _time_text(plate.get("last_seen")),
+                confidence,  # skala persen, sama seperti `${p.confidence}%`
+                _status_label(plate),  # status_code/status record terakhir
+            ]
+        )
+
+    return rows
+
+
+def _stats_subtitle(period):
+    label = _period_label(period)
+
+    return f"Periode: {label}" if label else "Periode statistik"
+
 
 def build_statistics_excel(analytics, period="today"):
     wb = Workbook()
 
-    summary = analytics.get("summary", {})
-    hourly = analytics.get("hourly", [])
-    cameras = analytics.get("cameras", [])
-    top_plates = analytics.get("top_plates", [])
+    summary, cameras, _daily, hourly, top_plates = _analytics_parts(analytics)
 
     # --------------------------------------------------------
     # SHEET STATISTIK
@@ -2135,234 +1747,66 @@ def build_statistics_excel(analytics, period="today"):
     _add_excel_title(
         ws,
         "STATISTIK MONITORING CCTV",
-        f"Periode statistik: {period}",
-        5,
+        f"{_stats_subtitle(period)} — Diekspor: {_now_text()}",
+        4,
     )
 
-    headers = [
-        "Indikator",
-        "Jumlah",
-        "Keterangan",
-        "Periode",
-        "Sumber",
-    ]
+    row = 4
 
-    for col, value in enumerate(headers, start=1):
-        ws.cell(row=4, column=col, value=value)
+    # Ringkasan Statistik
+    _excel_section_title(ws, row, "RINGKASAN STATISTIK", 4)
+    row = _excel_block(
+        ws, row + 1, ["Indikator", "Nilai"], _stats_summary_rows(summary)
+    )
 
-    _apply_excel_header(ws, 4, 1, 5)
+    # Beban Lalu Lintas per CCTV
+    row += 1
+    _excel_section_title(ws, row, "BEBAN LALU LINTAS PER TITIK CCTV", 4)
 
-    rows = [
-        [
-            "Total Kendaraan",
-            summary.get("vehicles", 0),
-            "Jumlah kendaraan terdeteksi",
-            period,
-            "Sistem CCTV",
-        ],
-        [
-            "Total Wajah/Orang",
-            summary.get("people", 0),
-            "Jumlah wajah/orang terdeteksi",
-            period,
-            "Sistem CCTV",
-        ],
-        [
-            "Total Plat",
-            summary.get("plates", 0),
-            "Jumlah plat terdeteksi",
-            period,
-            "OCR Plat",
-        ],
-        [
-            "Kamera Aktif",
-            summary.get("active_cameras", 0),
-            "Kamera aktif",
-            period,
-            "Manajemen Kamera",
-        ],
-        [
-            "Total Kamera",
-            summary.get("total_cameras", 0),
-            "Seluruh kamera",
-            period,
-            "Manajemen Kamera",
-        ],
-    ]
+    camera_rows = _stats_camera_rows(cameras)
 
-    for index, row in enumerate(rows, start=5):
-        for col, value in enumerate(row, start=1):
-            ws.cell(
-                row=index,
-                column=col,
-                value=value,
-            )
-
-    _set_widths(
+    row = _excel_block(
         ws,
-        [25, 16, 40, 18, 25],
+        row + 1,
+        ["CCTV", "Kendaraan", "Orang", "Plat Unik"],
+        camera_rows,
     )
 
-    _style_excel_sheet(
-        ws,
-        header_row=4,
-        data_start_row=5,
-        data_end_row=4 + len(rows),
-        freeze=False,
-    )
+    # Analisis Jam Sibuk
+    row += 1
+    _excel_section_title(ws, row, "ANALISIS JAM SIBUK (PEAK HOURS)", 4)
 
-    # --------------------------------------------------------
-    # JAM SIBUK
-    # --------------------------------------------------------
+    peak = _peak_hour(hourly)
 
-    start_row = 12
+    row += 1
 
-    _apply_section_header(
-        ws,
-        start_row,
-        "BEBAN LALU LINTAS PER JAM",
-        3,
-    )
-
-    hourly_header = start_row + 1
-
-    hourly_headers = [
-        "Jam",
-        "Kendaraan",
-        "Keterangan",
-    ]
-
-    for col, value in enumerate(hourly_headers, start=1):
+    if peak:
+        ws.cell(row=row, column=1, value="Jam puncak")
+        ws.cell(row=row, column=2, value=_peak_label(peak))
         ws.cell(
-            row=hourly_header,
-            column=col,
-            value=value,
-        )
-
-    _apply_excel_header(
-        ws,
-        hourly_header,
-        1,
-        3,
-    )
-
-    for index, hour in enumerate(hourly or [], start=1):
-        vehicles = _value(
-            hour,
-            "vehicles",
-            "count",
-            "total",
-            default=0,
-        )
-
-        label = _value(
-            hour,
-            "label",
-            "hour",
-            "jam",
-            default="-",
-        )
-
-        values = [
-            label,
-            vehicles,
-            "Aktivitas kendaraan",
-        ]
-
-        row_number = hourly_header + index
-
-        for col, value in enumerate(values, start=1):
-            ws.cell(
-                row=row_number,
-                column=col,
-                value=value,
-            )
-
-    hourly_last_row = hourly_header + len(hourly or [])
-    if len(hourly or []) > 0:
-        _style_excel_sheet(
-            ws,
-            header_row=hourly_header,
-            data_start_row=hourly_header + 1,
-            data_end_row=hourly_last_row,
-            freeze=False,
-        )
-
-    # --------------------------------------------------------
-    # PERFORMA CCTV
-    # --------------------------------------------------------
-
-    camera_start = hourly_header + len(hourly or []) + 3
-
-    _apply_section_header(
-        ws,
-        camera_start,
-        "PERFORMA CCTV",
-        5,
-    )
-
-    camera_header = camera_start + 1
-
-    camera_headers = [
-        "No",
-        "CCTV",
-        "Kendaraan",
-        "Wajah/Orang",
-        "Plat Unik",
-    ]
-
-    for col, value in enumerate(camera_headers, start=1):
-        ws.cell(
-            row=camera_header,
-            column=col,
-            value=value,
-        )
-
-    _apply_excel_header(
-        ws,
-        camera_header,
-        1,
-        5,
-    )
-
-    for index, camera in enumerate(cameras or [], start=1):
-        row_number = camera_header + index
-
-        values = [
-            index,
-            _value(
-                camera,
-                "camera",
-                "camera_name",
-                "location",
-                default="-",
+            row=row,
+            column=3,
+            value=(
+                f"{_int(peak.get('vehicles'))} kendaraan · "
+                f"{_int(peak.get('people'))} orang"
             ),
-            _value(camera, "vehicles", default=0),
-            _value(camera, "people", default=0),
-            _value(camera, "unique_plates", default=0),
-        ]
-
-        for col, value in enumerate(values, start=1):
-            ws.cell(
-                row=row_number,
-                column=col,
-                value=value,
-            )
-
-    camera_last_row = camera_header + len(cameras or [])
-    if len(cameras or []) > 0:
-        _style_excel_sheet(
-            ws,
-            header_row=camera_header,
-            data_start_row=camera_header + 1,
-            data_end_row=camera_last_row,
-            freeze=False,
         )
+        ws.merge_cells(start_row=row, start_column=3, end_row=row, end_column=4)
+    else:
+        ws.cell(row=row, column=1, value="Belum ada data.")
 
-    try:
-        ws.sheet_view.showGridLines = True
-    except Exception:
-        pass
+    row += 2
+
+    row = _excel_block(
+        ws,
+        row,
+        ["Jam", "Kendaraan", "Orang"],
+        _stats_hourly_rows(hourly),
+    )
+
+    _set_widths(ws, [36, 22, 22, 18])
+
+    _style_excel_sheet(ws)
 
     # --------------------------------------------------------
     # SHEET TOP 10
@@ -2370,119 +1814,53 @@ def build_statistics_excel(analytics, period="today"):
 
     ws_top = wb.create_sheet("Top 10")
 
-    _add_excel_title(
-        ws_top,
-        "TOP 10 PLAT TERBANYAK TERDETEKSI",
-        f"Daftar plat berdasarkan jumlah kemunculan — periode {period}",
-        6,
-    )
+    top_rows = _stats_top_rows(top_plates)
 
-    top_headers = [
-        "Ranking",
-        "Nomor Plat",
-        "Jumlah Deteksi",
-        "CCTV",
-        "Terakhir Terlihat",
-        "Confidence",
+    rows = [
+        [index, plate, count, camera, seen, None, status]
+        for index, (plate, count, camera, seen, _conf, status) in enumerate(
+            top_rows, start=1
+        )
     ]
 
-    for col, value in enumerate(top_headers, start=1):
-        ws_top.cell(
-            row=4,
-            column=col,
-            value=value,
-        )
-
-    _apply_excel_header(
+    _excel_table_sheet(
         ws_top,
-        4,
-        1,
-        6,
+        "TOP 10 KENDARAAN / PLAT PALING SERING TERDETEKSI",
+        f"{_stats_subtitle(period)} — Diekspor: {_now_text()}",
+        [
+            "Ranking",
+            "Nomor Plat",
+            "Jumlah Terdeteksi",
+            "CCTV",
+            "Terakhir Terlihat",
+            "Confidence",
+            "Status Terakhir",
+        ],
+        rows,
+        [10, 22, 20, 30, 24, 14, 18],
     )
 
-    for index, plate in enumerate(
-        (top_plates or [])[:10],
-        start=1,
+    for index, (_p1, _c, _cam, _seen, confidence, status) in enumerate(
+        top_rows, start=1
     ):
-        values = [
-            index,
-            _value(
-                plate,
-                "plate",
-                "plate_number",
-                default="-",
-            ),
-            _value(
-                plate,
-                "count",
-                "total",
-                "frequency",
-                default=0,
-            ),
-            _value(
-                plate,
-                "camera",
-                "camera_name",
-                "location",
-                default="-",
-            ),
-            _format_datetime(
-                _value(
-                    plate,
-                    "last_seen",
-                    "detected_at",
-                    default="-",
-                )
-            ),
-            _confidence_text(
-                _value(
-                    plate,
-                    "confidence",
-                    "plate_confidence",
-                    default=0,
-                )
-            ),
-        ]
+        _excel_percent_cell(ws_top.cell(row=4 + index, column=6), confidence)
 
-        row_number = 4 + index
-
-        for col, value in enumerate(values, start=1):
-            ws_top.cell(
-                row=row_number,
-                column=col,
-                value=value,
+        if status == "Terbaca":
+            ws_top.cell(row=4 + index, column=7).fill = PatternFill(
+                "solid", fgColor=LIGHT_GREEN
             )
-
-        _confidence_excel_fill(
-            ws_top.cell(
-                row=row_number,
-                column=6,
-            ),
-            _value(
-                plate,
-                "confidence",
-                "plate_confidence",
-                default=0,
-            ),
-        )
-
-    _set_widths(
-        ws_top,
-        [12, 22, 20, 30, 25, 18],
-    )
-
-    _style_excel_sheet(ws_top)
+        elif status in ("Perlu Cek", "Gagal"):
+            ws_top.cell(row=4 + index, column=7).fill = PatternFill(
+                "solid", fgColor=LIGHT_YELLOW
+            )
 
     return _finalize_excel(wb)
 
 
 # ============================================================
-# 8. STATISTIK - PDF
-#    SATU DOKUMEN
-#    Statistik utama
-#    Beban lalu lintas
-#    Jam sibuk
-#    Top 10
+# 8. STATISTIK - PDF   (backend reportlab + send_file, tanpa print)
+#    Urutan: Judul, Periode, Tanggal cetak, Ringkasan Statistik,
+#            Beban Lalu Lintas per CCTV, Analisis Jam Sibuk, Top 10
 # ============================================================
 
 def build_statistics_pdf(analytics, period="today"):
@@ -2497,515 +1875,180 @@ def build_statistics_pdf(analytics, period="today"):
         bottomMargin=15 * mm,
     )
 
-    styles = getSampleStyleSheet()
+    s = _pdf_styles()
 
-    title_style = ParagraphStyle(
-        "StatisticsTitle",
-        parent=styles["Title"],
-        fontSize=17,
-        leading=21,
-        alignment=TA_CENTER,
-        spaceAfter=4 * mm,
-    )
-
-    subtitle_style = ParagraphStyle(
-        "StatisticsSubtitle",
-        parent=styles["Normal"],
-        fontSize=9,
-        alignment=TA_CENTER,
-        spaceAfter=8 * mm,
-    )
-
-    section_style = ParagraphStyle(
-        "StatisticsSection",
-        parent=styles["Heading2"],
-        fontSize=12,
-        leading=15,
-        spaceBefore=5 * mm,
-        spaceAfter=3 * mm,
-    )
-
-    cell_style = ParagraphStyle(
-        "StatisticsCell",
-        parent=styles["Normal"],
-        fontSize=8,
-        leading=10,
-    )
-
-    summary = analytics.get("summary", {})
-    hourly = analytics.get("hourly", [])
-    cameras = analytics.get("cameras", [])
-    top_plates = analytics.get("top_plates", [])
+    summary, cameras, _daily, hourly, top_plates = _analytics_parts(analytics)
 
     story = [
+        Paragraph("STATISTIK MONITORING CCTV", s["title"]),
         Paragraph(
-            "STATISTIK MONITORING CCTV",
-            title_style,
-        ),
-        Paragraph(
-            f"Periode statistik: {period}",
-            subtitle_style,
+            f"{escape(_stats_subtitle(period))}"
+            f"<br/>Tanggal cetak: {_now_text()}",
+            s["subtitle"],
         ),
     ]
 
-    # --------------------------------------------------------
-    # STATISTIK UTAMA
-    # --------------------------------------------------------
+    # ---- 1. Ringkasan Statistik ----
+    story.append(Paragraph("Ringkasan Statistik", s["section"]))
+
+    summary_data = [_pdf_head(["Indikator", "Nilai"], s["head"])]
+
+    for name, value in _stats_summary_rows(summary):
+        summary_data.append([_p(name, s["cell"]), str(value)])
 
     story.append(
-        Paragraph(
-            "Statistik Utama",
-            section_style,
+        _pdf_table(
+            summary_data,
+            [105 * mm, 50 * mm],
+            [("ALIGN", (1, 1), (1, -1), "CENTER")],
         )
     )
 
-    summary_data = [
-        [
-            "Indikator",
-            "Jumlah",
-        ],
-        [
-            "Total Kendaraan",
-            str(summary.get("vehicles", 0)),
-        ],
-        [
-            "Total Wajah/Orang",
-            str(summary.get("people", 0)),
-        ],
-        [
-            "Total Plat",
-            str(summary.get("plates", 0)),
-        ],
-        [
-            "Kamera Aktif",
-            str(summary.get("active_cameras", 0)),
-        ],
-        [
-            "Total Kamera",
-            str(summary.get("total_cameras", 0)),
-        ],
-    ]
+    # ---- 2. Beban Lalu Lintas per CCTV ----
+    story.append(Paragraph("Beban Lalu Lintas per Titik CCTV", s["section"]))
 
-    summary_table = Table(
-        summary_data,
-        colWidths=[
-            105 * mm,
-            50 * mm,
-        ],
-    )
+    camera_rows = _stats_camera_rows(cameras)
 
-    summary_table.setStyle(
-        TableStyle(
-            [
-                (
-                    "BACKGROUND",
-                    (0, 0),
-                    (-1, 0),
-                    colors.HexColor("#2563EB"),
-                ),
-                (
-                    "TEXTCOLOR",
-                    (0, 0),
-                    (-1, 0),
-                    colors.white,
-                ),
-                (
-                    "FONTNAME",
-                    (0, 0),
-                    (-1, 0),
-                    "Helvetica-Bold",
-                ),
-                (
-                    "GRID",
-                    (0, 0),
-                    (-1, -1),
-                    0.4,
-                    colors.HexColor("#D1D5DB"),
-                ),
-                (
-                    "ROWBACKGROUNDS",
-                    (0, 1),
-                    (-1, -1),
-                    [
-                        colors.white,
-                        colors.HexColor("#F9FAFB"),
-                    ],
-                ),
-                (
-                    "ALIGN",
-                    (1, 0),
-                    (1, -1),
-                    "CENTER",
-                ),
-            ]
-        )
-    )
-
-    story.append(summary_table)
-
-    # --------------------------------------------------------
-    # BEBAN LALU LINTAS
-    # --------------------------------------------------------
-
-    story.append(
-        Paragraph(
-            "Beban Lalu Lintas per Jam",
-            section_style,
-        )
-    )
-
-    hourly_data = [
-        [
-            Paragraph("<b>Jam</b>", cell_style),
-            Paragraph("<b>Jumlah Kendaraan</b>", cell_style),
-            Paragraph("<b>Keterangan</b>", cell_style),
+    if not camera_rows:
+        story.append(Paragraph(EMPTY_MESSAGE, s["empty"]))
+    else:
+        camera_data = [
+            _pdf_head(
+                ["CCTV", "Kendaraan", "Orang", "Plat Unik"], s["head"]
+            )
         ]
-    ]
 
-    for hour in hourly or []:
-        hourly_data.append(
-            [
-                _safe_text(
-                    _value(
-                        hour,
-                        "label",
-                        "hour",
-                        "jam",
-                        default="-",
-                    )
-                ),
-                str(
-                    _value(
-                        hour,
-                        "vehicles",
-                        "count",
-                        "total",
-                        default=0,
-                    )
-                ),
-                "Aktivitas kendaraan",
-            ]
+        for row in camera_rows:
+            camera_data.append(
+                [_p(row[0], s["cell"])] + [str(value) for value in row[1:]]
+            )
+
+        story.append(
+            _pdf_table(
+                camera_data,
+                [75 * mm, 35 * mm, 35 * mm, 35 * mm],
+                [("ALIGN", (1, 1), (-1, -1), "CENTER")],
+            )
         )
 
-    hourly_table = Table(
-        hourly_data,
-        colWidths=[
-            40 * mm,
-            55 * mm,
-            70 * mm,
-        ],
-        repeatRows=1,
-    )
+    # ---- 3. Analisis Jam Sibuk ----
+    story.append(Paragraph("Analisis Jam Sibuk (Peak Hours)", s["section"]))
 
-    hourly_table.setStyle(
-        TableStyle(
-            [
-                (
-                    "BACKGROUND",
-                    (0, 0),
-                    (-1, 0),
-                    colors.HexColor("#2563EB"),
-                ),
-                (
-                    "TEXTCOLOR",
-                    (0, 0),
-                    (-1, 0),
-                    colors.white,
-                ),
-                (
-                    "FONTNAME",
-                    (0, 0),
-                    (-1, 0),
-                    "Helvetica-Bold",
-                ),
-                (
-                    "GRID",
-                    (0, 0),
-                    (-1, -1),
-                    0.4,
-                    colors.HexColor("#D1D5DB"),
-                ),
-                (
-                    "ROWBACKGROUNDS",
-                    (0, 1),
-                    (-1, -1),
-                    [
-                        colors.white,
-                        colors.HexColor("#F9FAFB"),
-                    ],
-                ),
-                (
-                    "ALIGN",
-                    (0, 0),
-                    (1, -1),
-                    "CENTER",
-                ),
-            ]
+    peak = _peak_hour(hourly)
+
+    if not peak:
+        story.append(Paragraph(EMPTY_MESSAGE, s["empty"]))
+    else:
+        story.append(
+            Paragraph(
+                f"<b>Jam puncak: {escape(_peak_label(peak))}</b> — "
+                f"{_int(peak.get('vehicles'))} kendaraan · "
+                f"{_int(peak.get('people'))} orang",
+                s["cell"],
+            )
         )
-    )
 
-    story.append(hourly_table)
+        story.append(Spacer(1, 3 * mm))
 
-    # --------------------------------------------------------
-    # PERFORMA CCTV
-    # --------------------------------------------------------
-
-    story.append(
-        Paragraph(
-            "Performa CCTV",
-            section_style,
-        )
-    )
-
-    camera_data = [
-        [
-            Paragraph("<b>No</b>", cell_style),
-            Paragraph("<b>CCTV</b>", cell_style),
-            Paragraph("<b>Kendaraan</b>", cell_style),
-            Paragraph("<b>Wajah/Orang</b>", cell_style),
-            Paragraph("<b>Plat Unik</b>", cell_style),
+        hourly_data = [
+            _pdf_head(["Jam", "Kendaraan", "Orang"], s["head"])
         ]
-    ]
 
-    for index, camera in enumerate(cameras or [], start=1):
-        camera_data.append(
-            [
-                str(index),
-                _safe_text(
-                    _value(
-                        camera,
-                        "camera",
-                        "camera_name",
-                        "location",
-                        default="-",
+        extra = [("ALIGN", (0, 1), (-1, -1), "CENTER")]
+
+        for row in _stats_hourly_rows(hourly):
+            hourly_data.append([str(value) for value in row])
+
+            if _text(peak.get("label")) == row[0]:
+                extra.append(
+                    (
+                        "BACKGROUND",
+                        (0, len(hourly_data) - 1),
+                        (-1, len(hourly_data) - 1),
+                        colors.HexColor("#FEF3C7"),
                     )
-                ),
-                str(
-                    _value(
-                        camera,
-                        "vehicles",
-                        default=0,
-                    )
-                ),
-                str(
-                    _value(
-                        camera,
-                        "people",
-                        default=0,
-                    )
-                ),
-                str(
-                    _value(
-                        camera,
-                        "unique_plates",
-                        default=0,
-                    )
-                ),
-            ]
+                )
+
+        story.append(
+            _pdf_table(
+                hourly_data,
+                [50 * mm, 50 * mm, 50 * mm],
+                extra,
+            )
         )
 
-    camera_table = Table(
-        camera_data,
-        colWidths=[
-            15 * mm,
-            60 * mm,
-            35 * mm,
-            35 * mm,
-            35 * mm,
-        ],
-        repeatRows=1,
-    )
-
-    camera_table.setStyle(
-        TableStyle(
-            [
-                (
-                    "BACKGROUND",
-                    (0, 0),
-                    (-1, 0),
-                    colors.HexColor("#2563EB"),
-                ),
-                (
-                    "TEXTCOLOR",
-                    (0, 0),
-                    (-1, 0),
-                    colors.white,
-                ),
-                (
-                    "FONTNAME",
-                    (0, 0),
-                    (-1, 0),
-                    "Helvetica-Bold",
-                ),
-                (
-                    "GRID",
-                    (0, 0),
-                    (-1, -1),
-                    0.4,
-                    colors.HexColor("#D1D5DB"),
-                ),
-                (
-                    "ROWBACKGROUNDS",
-                    (0, 1),
-                    (-1, -1),
-                    [
-                        colors.white,
-                        colors.HexColor("#F9FAFB"),
-                    ],
-                ),
-                (
-                    "ALIGN",
-                    (0, 0),
-                    (-1, -1),
-                    "CENTER",
-                ),
-            ]
-        )
-    )
-
-    story.append(camera_table)
-
-    # --------------------------------------------------------
-    # TOP 10
-    # --------------------------------------------------------
-
+    # ---- 4. Top 10 (paling bawah) ----
     story.append(
-        Paragraph(
-            "Top 10 Plat Terbanyak Terdeteksi",
-            section_style,
-        )
+        Paragraph("Top 10 Kendaraan / Plat Paling Sering Terdeteksi", s["section"])
     )
 
-    top_data = [
-        [
-            Paragraph("<b>Ranking</b>", cell_style),
-            Paragraph("<b>Nomor Plat</b>", cell_style),
-            Paragraph("<b>Jumlah</b>", cell_style),
-            Paragraph("<b>CCTV</b>", cell_style),
-            Paragraph("<b>Terakhir Terlihat</b>", cell_style),
-            Paragraph("<b>Confidence</b>", cell_style),
+    top_rows = _stats_top_rows(top_plates)
+
+    if not top_rows:
+        story.append(Paragraph(EMPTY_MESSAGE, s["empty"]))
+    else:
+        top_data = [
+            _pdf_head(
+                [
+                    "Ranking",
+                    "Nomor Plat",
+                    "Jumlah",
+                    "CCTV",
+                    "Terakhir Terlihat",
+                    "Confidence",
+                    "Status Terakhir",
+                ],
+                s["head"],
+            )
         ]
-    ]
 
-    for index, plate in enumerate(
-        (top_plates or [])[:10],
-        start=1,
-    ):
-        top_data.append(
-            [
-                str(index),
-                _safe_text(
-                    _value(
-                        plate,
-                        "plate",
-                        "plate_number",
-                        default="-",
-                    )
-                ),
-                str(
-                    _value(
-                        plate,
-                        "count",
-                        "total",
-                        "frequency",
-                        default=0,
-                    )
-                ),
-                _safe_text(
-                    _value(
-                        plate,
-                        "camera",
-                        "camera_name",
-                        "location",
-                        default="-",
-                    )
-                ),
-                _format_datetime(
-                    _value(
-                        plate,
-                        "last_seen",
-                        "detected_at",
-                        default="-",
-                    )
-                ),
-                _confidence_text(
-                    _value(
-                        plate,
-                        "confidence",
-                        "plate_confidence",
-                        default=0,
-                    )
-                ),
-            ]
+        top_extra = [
+            ("ALIGN", (0, 1), (0, -1), "CENTER"),
+            ("ALIGN", (2, 1), (2, -1), "CENTER"),
+            ("ALIGN", (5, 1), (5, -1), "CENTER"),
+        ]
+
+        for index, (plate, count, camera, seen, confidence, status) in enumerate(
+            top_rows, start=1
+        ):
+            top_data.append(
+                [
+                    str(index),
+                    _p_bold(plate, s["cell"]),
+                    f"{count} kali",
+                    _p(camera, s["cell"]),
+                    _p(seen, s["cell"]),
+                    _pct_text(confidence),
+                    _p(status, s["cell"]),
+                ]
+            )
+
+            if status == "Terbaca":
+                top_extra.append(
+                    ("BACKGROUND", (6, index), (6, index), colors.HexColor("#DCFCE7"))
+                )
+            elif status in ("Perlu Cek", "Gagal"):
+                top_extra.append(
+                    ("BACKGROUND", (6, index), (6, index), colors.HexColor("#FEF3C7"))
+                )
+
+        story.append(
+            _pdf_table(
+                top_data,
+                [
+                    16 * mm,
+                    28 * mm,
+                    20 * mm,
+                    29 * mm,
+                    36 * mm,
+                    23 * mm,
+                    28 * mm,
+                ],
+                top_extra,
+            )
         )
 
-    top_table = Table(
-        top_data,
-        colWidths=[
-            18 * mm,
-            32 * mm,
-            20 * mm,
-            35 * mm,
-            40 * mm,
-            28 * mm,
-        ],
-        repeatRows=1,
-    )
-
-    top_style = [
-        (
-            "BACKGROUND",
-            (0, 0),
-            (-1, 0),
-            colors.HexColor("#2563EB"),
-        ),
-        (
-            "TEXTCOLOR",
-            (0, 0),
-            (-1, 0),
-            colors.white,
-        ),
-        (
-            "FONTNAME",
-            (0, 0),
-            (-1, 0),
-            "Helvetica-Bold",
-        ),
-        (
-            "GRID",
-            (0, 0),
-            (-1, -1),
-            0.4,
-            colors.HexColor("#D1D5DB"),
-        ),
-        (
-            "ROWBACKGROUNDS",
-            (0, 1),
-            (-1, -1),
-            [
-                colors.white,
-                colors.HexColor("#F9FAFB"),
-            ],
-        ),
-        (
-            "ALIGN",
-            (0, 0),
-            (-1, -1),
-            "CENTER",
-        ),
-        (
-            "VALIGN",
-            (0, 0),
-            (-1, -1),
-            "MIDDLE",
-        ),
-    ]
-
-    top_table.setStyle(TableStyle(top_style))
-
-    story.append(top_table)
-
-    doc.build(story)
+    _pdf_build(doc, story)
 
     buffer.seek(0)
 

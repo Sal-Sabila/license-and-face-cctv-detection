@@ -1105,22 +1105,19 @@ def _analytics_filters(args=None):
     start_date = args.get("start_date")
     end_date = args.get("end_date")
 
-    has_custom_dates = bool(start_date or end_date) and period == "custom"
-    if period == "today":
+    has_custom_dates = bool(start_date or end_date)
+    if period == "today" and not has_custom_dates:
         start_date = end_date = datetime.now().strftime("%Y-%m-%d")
-    elif period == "7d":
+    elif period == "7d" and not has_custom_dates:
         start_date = (datetime.now() - timedelta(days=6)).strftime("%Y-%m-%d")
         end_date = datetime.now().strftime("%Y-%m-%d")
-    elif period == "30d":
+    elif period == "30d" and not has_custom_dates:
         start_date = (datetime.now() - timedelta(days=29)).strftime("%Y-%m-%d")
         end_date = datetime.now().strftime("%Y-%m-%d")
-    elif period == "all":
+    elif period == "all" and not has_custom_dates:
         start_date = end_date = None
-    elif period == "custom" or has_custom_dates:
+    elif period not in ("today", "7d", "30d", "all"):
         period = "custom"
-    else:
-        # Default fallback to today
-        start_date = end_date = datetime.now().strftime("%Y-%m-%d")
 
     clauses = ["1=1"]
     params = []
@@ -1142,13 +1139,10 @@ def _analytics_filters(args=None):
     if args.get("direction") in ("entry", "exit"):
         clauses.append("COALESCE(c.direction, 'unknown') = %s")
         params.append(args["direction"])
-    obj_type = str(args.get("object_type") or "").lower()
-    if obj_type == "vehicle":
+    if args.get("object_type") == "vehicle":
         clauses.append("fd.object_type = 'vehicle'")
-    elif obj_type in ("person", "face"):
+    elif args.get("object_type") == "person":
         clauses.append("fd.object_type = 'person'")
-    elif obj_type in ("plate", "license_plate"):
-        clauses.append("fd.object_type = 'vehicle' AND fd.has_plate = 1")
     return " AND ".join(clauses), params, period, start_date, end_date
 
 
@@ -1234,9 +1228,28 @@ def get_analytics(args=None):
                     AND p.plate_number IS NOT NULL AND p.plate_number != ''
                 GROUP BY p.plate_number ORDER BY total_seen DESC, last_seen DESC LIMIT 10
             """)
-            top_plates = [{"plate": r["plate_number"], "count": int(r["total_seen"] or 0),
-                           "confidence": round(float(r.get("avg_confidence") or 0) * 100, 1),
-                           "last_seen": str(r.get("last_seen") or ""), "camera": r.get("last_camera") or "CCTV"} for r in top_rows]
+            top_plates = []
+            for r in top_rows:
+                # STATUS TERAKHIR = plate.detection_status dari record TERBARU plat ini
+                # (record dengan waktu terakhir terlihat). Sumber & arti status sama
+                # dengan Riwayat Plat / Hasil Deteksi; filter periode/CCTV yang sama.
+                cur.execute(f"""
+                    SELECT p.detection_status AS last_status
+                    FROM full_detection fd JOIN plate p ON p.plate_id = fd.plate_id
+                    LEFT JOIN cameras c ON c.camera_id = fd.camera_id
+                    WHERE {where_sql} AND p.plate_number = %s
+                    ORDER BY fd.created_at DESC, fd.detection_id DESC LIMIT 1
+                """, params + [r["plate_number"]])
+                last_row = cur.fetchone() or {}
+                last_code = last_row.get("last_status")
+                if last_code is None:
+                    last_text = "Tidak tersedia"
+                else:
+                    last_text = "Terbaca" if last_code == 1 else ("Perlu cek" if last_code == 2 else "Gagal")
+                top_plates.append({"plate": r["plate_number"], "count": int(r["total_seen"] or 0),
+                                   "confidence": round(float(r.get("avg_confidence") or 0) * 100, 1),
+                                   "last_seen": str(r.get("last_seen") or ""), "camera": r.get("last_camera") or "CCTV",
+                                   "status_code": last_code, "status": last_text})
 
             recent_rows = query_rows(f"""
                 SELECT fd.detection_id AS id, p.plate_number AS plate, fd.created_at AS detected_at,
@@ -1398,13 +1411,10 @@ def get_all_detections_paginated(
     where_clauses = ["1=1"]
     params = []
 
-    tf = str(type_filter or "all").lower()
-    if tf in ("plate", "license_plate"):
+    if type_filter == "plate":
         where_clauses.append("fd.object_type = 'vehicle' AND fd.has_plate = 1")
-    elif tf in ("face", "person"):
+    elif type_filter == "face":
         where_clauses.append("fd.object_type = 'person'")
-    elif tf == "vehicle":
-        where_clauses.append("fd.object_type = 'vehicle'")
 
     if status_filter in ("0", "1", "2"):
         where_clauses.append("fd.detection_status = %s")
