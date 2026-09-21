@@ -26,14 +26,94 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CAPTURE_DIR = os.path.join(BASE_DIR, "static", "captures")
 PLATE_DIR = os.path.join(CAPTURE_DIR, "plates")
 FACE_DIR = os.path.join(CAPTURE_DIR, "faces")
+VEHICLE_DIR = os.path.join(CAPTURE_DIR, "vehicles")
 
 os.makedirs(PLATE_DIR, exist_ok=True)
 os.makedirs(FACE_DIR, exist_ok=True)
+os.makedirs(VEHICLE_DIR, exist_ok=True)
 
 
 def get_db():
     """Mendapatkan koneksi aktif ke database MySQL."""
     return pymysql.connect(**DB_CONFIG)
+
+
+def ensure_event_schema():
+    """Add event fields to the active legacy schema without deleting old data."""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                columns = {
+                    "cameras": [("direction", "ENUM('entry','exit','unknown') NOT NULL DEFAULT 'unknown'")],
+                    "full_detection": [
+                        ("track_id", "BIGINT NULL"), ("object_type", "ENUM('vehicle','person') NOT NULL DEFAULT 'person'"),
+                        ("vehicle_type", "ENUM('car','motorcycle','truck','bus','unknown') NOT NULL DEFAULT 'unknown'"),
+                        ("has_plate", "TINYINT(1) NOT NULL DEFAULT 0"), ("has_driver", "TINYINT(1) NOT NULL DEFAULT 0"),
+                        ("vehicle_confidence", "DECIMAL(6,5) NULL"), ("plate_detection_confidence", "DECIMAL(6,5) NULL"),
+                        ("ocr_confidence", "DECIMAL(6,5) NULL"), ("person_confidence", "DECIMAL(6,5) NULL"),
+                        ("face_confidence", "DECIMAL(6,5) NULL"), ("direction", "ENUM('entry','exit','unknown') NOT NULL DEFAULT 'unknown'"),
+                        ("driver_track_id", "BIGINT NULL"), ("driver_face_path", "VARCHAR(500) NULL"),
+                        ("vehicle_image_path", "VARCHAR(500) NULL"), ("event_key", "VARCHAR(160) NULL")
+                    ],
+                    "plate": [("raw_ocr_text", "VARCHAR(100) NULL"), ("normalized_plate_number", "VARCHAR(30) NULL")]
+                }
+                for table, table_columns in columns.items():
+                    for column, definition in table_columns:
+                        cur.execute("""SELECT COUNT(*) AS count FROM INFORMATION_SCHEMA.COLUMNS
+                            WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND COLUMN_NAME = %s""",
+                                    (DB_CONFIG["database"], table, column))
+                        if not cur.fetchone()["count"]:
+                            cur.execute(f"ALTER TABLE `{table}` ADD COLUMN `{column}` {definition}")
+                indexes = [
+                    ("cameras", "idx_cameras_direction", "(`direction`)"),
+                    ("full_detection", "idx_detection_event_type", "(`object_type`, `created_at`)"),
+                    ("full_detection", "idx_detection_track", "(`camera_id`, `track_id`, `direction`, `created_at`)"),
+                    ("full_detection", "idx_detection_event_key", "(`event_key`)")
+                ]
+                for table, index, definition in indexes:
+                    cur.execute("""SELECT COUNT(*) AS count FROM INFORMATION_SCHEMA.STATISTICS
+                        WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND INDEX_NAME = %s""",
+                                (DB_CONFIG["database"], table, index))
+                    if not cur.fetchone()["count"]:
+                        cur.execute(f"ALTER TABLE `{table}` ADD INDEX `{index}` {definition}")
+                cur.execute("""
+                    UPDATE cameras SET direction = CASE
+                        WHEN LOWER(COALESCE(location, '')) LIKE '%%masuk%%' THEN 'entry'
+                        WHEN LOWER(COALESCE(location, '')) LIKE '%%keluar%%' THEN 'exit'
+                        ELSE 'unknown' END
+                    WHERE direction = 'unknown' OR direction IS NULL
+                """)
+                cur.execute("""
+                    UPDATE full_detection
+                    SET object_type = CASE WHEN plate_id IS NOT NULL THEN 'vehicle' ELSE 'person' END,
+                        has_plate = CASE WHEN plate_id IS NOT NULL THEN 1 ELSE 0 END,
+                        vehicle_confidence = CASE WHEN plate_id IS NOT NULL THEN detection_confidence ELSE NULL END,
+                        plate_detection_confidence = CASE WHEN plate_id IS NOT NULL THEN detection_confidence ELSE NULL END,
+                        ocr_confidence = CASE WHEN plate_id IS NOT NULL THEN (SELECT p.ocr_confidence FROM plate p WHERE p.plate_id = full_detection.plate_id) ELSE NULL END
+                    WHERE object_type = 'person' AND (plate_id IS NOT NULL OR face_image_path IS NULL)
+                """)
+    except Exception as exc:
+        print(f"[DB WARNING] event schema migration unavailable: {exc}")
+
+
+def get_camera_direction(camera_id: int) -> str:
+    """Return configured camera direction, with legacy name fallback."""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT direction, location FROM cameras WHERE camera_id = %s", (camera_id,))
+                row = cur.fetchone() or {}
+        direction = row.get("direction")
+        if direction in ("entry", "exit"):
+            return direction
+        location = str(row.get("location") or "").lower()
+        if "masuk" in location:
+            return "entry"
+        if "keluar" in location:
+            return "exit"
+    except Exception:
+        pass
+    return "unknown"
 
 
 # ============================================================
@@ -81,6 +161,13 @@ def compute_face_status(face_conf: float) -> int:
         return 0
 
 
+def normalize_plate_number(text: str) -> str:
+    """Normalize OCR spacing/case without changing ambiguous characters."""
+    if not text:
+        return ""
+    return re.sub(r"\s+", " ", str(text).strip().upper())
+
+
 # ============================================================
 # HELPER PENYIMPANAN FOTO CAPTURE LOKAL
 # ============================================================
@@ -93,12 +180,20 @@ def save_crop_locally(image, folder_path, prefix="cap", camera_id=1, track_id=No
     if image is None or image.size == 0:
         return None
 
-    now_str = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:19]
+    os.makedirs(folder_path, exist_ok=True)
+    now_str = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
     tid_str = f"_{track_id}" if track_id is not None else ""
     filename = f"{prefix}_cam{camera_id}_{now_str}{tid_str}.jpg"
     abs_path = os.path.join(folder_path, filename)
 
-    cv2.imwrite(abs_path, image)
+    try:
+        written = cv2.imwrite(abs_path, image)
+    except Exception as exc:
+        print(f"[CAPTURE ERROR] {abs_path}: {exc}")
+        return None
+    if not written or not os.path.isfile(abs_path):
+        print(f"[CAPTURE ERROR] cv2.imwrite failed: {abs_path}")
+        return None
 
     # Path relatif untuk web (static/captures/...)
     rel_path = os.path.relpath(abs_path, BASE_DIR).replace("\\", "/")
@@ -113,7 +208,7 @@ def get_all_cameras():
     """Mengambil semua daftar kamera di database."""
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT camera_id, location, stream_url, stream_type, status FROM cameras ORDER BY camera_id ASC;")
+            cur.execute("SELECT camera_id, location, stream_url, stream_type, status, direction FROM cameras ORDER BY camera_id ASC;")
             return cur.fetchall()
 
 
@@ -121,7 +216,7 @@ def get_active_cameras():
     """Mengambil daftar kamera yang berstatus aktif (status = 1)."""
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT camera_id, location, stream_url, stream_type, status FROM cameras WHERE status = 1 ORDER BY camera_id ASC;")
+            cur.execute("SELECT camera_id, location, stream_url, stream_type, status, direction FROM cameras WHERE status = 1 ORDER BY camera_id ASC;")
             return cur.fetchall()
 
 
@@ -132,18 +227,18 @@ def update_camera_status(camera_id: int, status: int):
             cur.execute("UPDATE cameras SET status = %s WHERE camera_id = %s;", (status, camera_id))
 
 
-def add_camera(location: str, stream_url: str, stream_type: int = 1, status: int = 1):
+def add_camera(location: str, stream_url: str, stream_type: int = 1, status: int = 1, direction: str = "unknown"):
     """Menambahkan kamera baru ke database."""
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO cameras (location, stream_url, stream_type, status) VALUES (%s, %s, %s, %s);",
-                (location, stream_url, stream_type, status)
+                "INSERT INTO cameras (location, stream_url, stream_type, status, direction) VALUES (%s, %s, %s, %s, %s);",
+                (location, stream_url, stream_type, status, direction if direction in ("entry", "exit", "unknown") else "unknown")
             )
             return cur.lastrowid
 
 
-def update_camera(camera_id: int, location: str = None, stream_url: str = None, status: int = None):
+def update_camera(camera_id: int, location: str = None, stream_url: str = None, status: int = None, direction: str = None):
     """Memperbarui informasi kamera di database."""
     fields = []
     params = []
@@ -156,6 +251,9 @@ def update_camera(camera_id: int, location: str = None, stream_url: str = None, 
     if status is not None:
         fields.append("status = %s")
         params.append(status)
+    if direction in ("entry", "exit", "unknown"):
+        fields.append("direction = %s")
+        params.append(direction)
 
     if not fields:
         return False
@@ -175,6 +273,79 @@ def delete_camera(camera_id: int):
             return cur.rowcount > 0
 
 
+def _delete_capture_file(path):
+    """Menghapus file capture lokal tanpa menggagalkan penghapusan database."""
+    if not path:
+        return
+    absolute_path = os.path.join(BASE_DIR, str(path).replace("/", os.sep))
+    try:
+        if os.path.isfile(absolute_path):
+            os.remove(absolute_path)
+    except OSError:
+        pass
+
+
+def delete_detection(detection_id: int) -> bool:
+    """Menghapus satu event deteksi beserta plat/log dan capture terkait."""
+    with get_db() as conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT fd.plate_id, fd.face_image_path, fd.vehicle_image_path, p.plate_image_path
+                    FROM full_detection fd
+                    LEFT JOIN plate p ON p.plate_id = fd.plate_id
+                    WHERE fd.detection_id = %s
+                """, (detection_id,))
+                event = cur.fetchone()
+                if not event:
+                    return False
+
+                cur.execute("DELETE FROM full_detection WHERE detection_id = %s", (detection_id,))
+                if event["plate_id"] is not None:
+                    cur.execute("DELETE FROM plate_logs WHERE plate_id = %s", (event["plate_id"],))
+                    cur.execute("DELETE FROM suspicious_plates WHERE plate_id = %s", (event["plate_id"],))
+                    cur.execute("DELETE FROM plate WHERE plate_id = %s", (event["plate_id"],))
+                conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    _delete_capture_file(event.get("face_image_path"))
+    _delete_capture_file(event.get("vehicle_image_path"))
+    _delete_capture_file(event.get("plate_image_path"))
+    return True
+
+
+def delete_plate(plate_id: int) -> bool:
+    """Menghapus satu plat beserta event, log, dan capture terkait."""
+    with get_db() as conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT plate_image_path FROM plate WHERE plate_id = %s", (plate_id,))
+                plate = cur.fetchone()
+                if not plate:
+                    return False
+
+                cur.execute("""
+                    SELECT face_image_path, vehicle_image_path FROM full_detection WHERE plate_id = %s
+                """, (plate_id,))
+                face_paths = cur.fetchall()
+                cur.execute("DELETE FROM full_detection WHERE plate_id = %s", (plate_id,))
+                cur.execute("DELETE FROM plate_logs WHERE plate_id = %s", (plate_id,))
+                cur.execute("DELETE FROM suspicious_plates WHERE plate_id = %s", (plate_id,))
+                cur.execute("DELETE FROM plate WHERE plate_id = %s", (plate_id,))
+                conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    _delete_capture_file(plate.get("plate_image_path"))
+    for face in face_paths:
+        _delete_capture_file(face.get("face_image_path"))
+        _delete_capture_file(face.get("vehicle_image_path"))
+    return True
+
+
 # ============================================================
 # FUNGSI INSERT DETEKSI (PRODUCER / AI WORKER)
 # ============================================================
@@ -182,81 +353,731 @@ def delete_camera(camera_id: int):
 def save_detection_event(
     camera_id: int,
     plate_number: str = None,
-    plate_crop = None,
+    plate_crop=None,
     plate_conf: float = 0.0,
     ocr_conf: float = 0.0,
-    face_crop = None,
+    face_crop=None,
     face_conf: float = 0.0,
-    track_id: int = None
+    track_id: int = None,
+    object_type: str = "vehicle",
+    vehicle_type: str = "unknown",
+    vehicle_confidence: float = 0.0,
+    has_driver: bool = False,
+    driver_track_id: int = None,
+    direction: str = "unknown",
+    event_key: str = None,
+    raw_ocr_text: str = None,
+    vehicle_crop=None
 ) -> dict:
     """
-    Menyimpan hasil deteksi lengkap ke database `real_cctv`:
-    - Menyimpan foto crop plat & wajah ke disk lokal
-    - Memasukkan ke tabel `plate` jika ada plat
-    - Memasukkan ke tabel `full_detection` (plate_id diisi jika ada, atau NULL jika pejalan kaki)
-    - Memasukkan log ke tabel `plate_logs`
+    Simpan satu event deteksi secara konsisten.
+
+    Perbaikan utama:
+    1. Cek event_key SEBELUM membuat capture/row plate baru.
+    2. Duplicate tidak membuat row full_detection baru.
+    3. Duplicate yang belum lengkap hanya melakukan enrichment:
+       - vehicle event: tambahkan plate/vehicle image/driver bila tersedia.
+       - person event: tambahkan face image bila event lama belum punya.
+    4. Jika event lama sudah mempunyai plate, jangan membuat row plate baru.
+       Data plate lama cukup diperbarui bila OCR/confidence baru lebih baik.
+    5. Capture yang benar-benar tidak dipakai selalu dihapus.
+    6. Event baru tetap dibuat dengan INSERT penuh.
     """
+
+    object_type = object_type if object_type in ("vehicle", "person") else "vehicle"
+    vehicle_type = (
+        vehicle_type
+        if vehicle_type in ("car", "motorcycle", "truck", "bus", "unknown")
+        else "unknown"
+    )
+    direction = direction if direction in ("entry", "exit", "unknown") else "unknown"
+
+    normalized_plate = normalize_plate_number(plate_number)
+    has_plate_input = bool(plate_crop is not None or normalized_plate)
+
+    vehicle_confidence = float(vehicle_confidence or 0.0)
+    plate_conf = float(plate_conf or 0.0)
+    ocr_conf = float(ocr_conf or 0.0)
+    face_conf = float(face_conf or 0.0)
+
     conn = get_db()
+
+    # Capture yang benar-benar dibuat oleh pemanggilan ini.
+    vehicle_rel_path = None
+    plate_rel_path = None
+    face_rel_path = None
+
     try:
         with conn.cursor() as cur:
+
+            # ======================================================
+            # 1. CEK EVENT EXISTING TERLEBIH DAHULU
+            # ======================================================
+            existing = None
+
+            if event_key:
+                cur.execute(
+                    """
+                    SELECT
+                        fd.detection_id,
+                        fd.plate_id,
+                        fd.object_type,
+                        fd.vehicle_type,
+                        fd.has_plate,
+                        fd.has_driver,
+                        fd.vehicle_confidence,
+                        fd.plate_detection_confidence,
+                        fd.ocr_confidence AS event_ocr_confidence,
+                        fd.person_confidence,
+                        fd.face_confidence,
+                        fd.direction,
+                        fd.driver_track_id,
+                        fd.driver_face_path,
+                        fd.face_image_path,
+                        fd.vehicle_image_path,
+                        fd.detection_status,
+                        fd.detection_confidence,
+                        fd.created_at,
+                        p.plate_number,
+                        p.raw_ocr_text,
+                        p.normalized_plate_number,
+                        p.detection_status AS plate_status,
+                        p.detection_confidence AS plate_confidence,
+                        p.ocr_confidence AS plate_ocr_confidence,
+                        p.plate_image_path
+                    FROM full_detection fd
+                    LEFT JOIN plate p ON p.plate_id = fd.plate_id
+                    WHERE fd.event_key = %s
+                    ORDER BY fd.detection_id DESC
+                    LIMIT 1
+                    """,
+                    (event_key,)
+                )
+                existing = cur.fetchone()
+
+            # ------------------------------------------------------
+            # 1b. DEDUPLIKASI PLAT BERBASIS NOMOR KENDARAAN
+            # Jika kendaraan memiliki nomor plat yang sama pada kamera
+            # yang sama dalam jendela waktu 10 detik terakhir:
+            # ------------------------------------------------------
+
+            if not existing and normalized_plate:
+                cur.execute(
+                    """
+                    SELECT
+                        fd.detection_id,
+                        fd.plate_id,
+                        fd.object_type,
+                        fd.vehicle_type,
+                        fd.has_plate,
+                        fd.has_driver,
+                        fd.vehicle_confidence,
+                        fd.plate_detection_confidence,
+                        fd.ocr_confidence AS event_ocr_confidence,
+                        fd.person_confidence,
+                        fd.face_confidence,
+                        fd.direction,
+                        fd.driver_track_id,
+                        fd.driver_face_path,
+                        fd.face_image_path,
+                        fd.vehicle_image_path,
+                        fd.detection_status,
+                        fd.detection_confidence,
+                        fd.created_at,
+                        p.plate_number,
+                        p.raw_ocr_text,
+                        p.normalized_plate_number,
+                        p.detection_status AS plate_status,
+                        p.detection_confidence AS plate_confidence,
+                        p.ocr_confidence AS plate_ocr_confidence,
+                        p.plate_image_path
+                    FROM full_detection fd
+                    JOIN plate p ON p.plate_id = fd.plate_id
+                    WHERE fd.camera_id = %s
+                      AND (p.normalized_plate_number = %s OR p.plate_number = %s)
+                      AND fd.created_at >= NOW() - INTERVAL 15 SECOND
+                    ORDER BY fd.detection_id DESC
+                    LIMIT 1
+                    """,
+                    (camera_id, normalized_plate, normalized_plate)
+                )
+                existing = cur.fetchone()
+
+            # ======================================================
+            # 2. DUPLICATE / ENRICHMENT
+            # ======================================================
+            if existing:
+                existing_id = existing["detection_id"]
+                existing_plate_id = existing.get("plate_id")
+                existing_vehicle_path = existing.get("vehicle_image_path")
+                existing_face_path = existing.get("face_image_path")
+
+                # --------------------------------------------------
+                # EVENT VEHICLE
+                # --------------------------------------------------
+                if object_type == "vehicle":
+
+                    # Capture kendaraan hanya dibuat jika event lama
+                    # belum mempunyai capture kendaraan.
+                    if vehicle_crop is not None and not existing_vehicle_path:
+                        vehicle_rel_path = save_crop_locally(
+                            vehicle_crop,
+                            VEHICLE_DIR,
+                            prefix="vehicle",
+                            camera_id=camera_id,
+                            track_id=track_id
+                        )
+
+                    # ----------------------------------------------
+                    # Jika event belum mempunyai plate:
+                    # buat row plate baru dan hubungkan ke event.
+                    # ----------------------------------------------
+                    new_plate_id = None
+
+                    if has_plate_input and not existing_plate_id:
+                        if plate_crop is not None:
+                            plate_rel_path = save_crop_locally(
+                                plate_crop,
+                                PLATE_DIR,
+                                prefix="plate",
+                                camera_id=camera_id,
+                                track_id=track_id
+                            )
+
+                        plate_status = compute_plate_status(
+                            normalized_plate,
+                            ocr_conf
+                        )
+
+                        cur.execute(
+                            """
+                            INSERT INTO plate (
+                                plate_number,
+                                raw_ocr_text,
+                                normalized_plate_number,
+                                detection_status,
+                                detection_confidence,
+                                ocr_confidence,
+                                plate_image_path
+                            )
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            """,
+                            (
+                                normalized_plate or None,
+                                raw_ocr_text or plate_number,
+                                normalized_plate or None,
+                                plate_status,
+                                plate_conf,
+                                ocr_conf,
+                                plate_rel_path
+                            )
+                        )
+                        new_plate_id = cur.lastrowid
+
+                        cur.execute(
+                            """
+                            INSERT INTO plate_logs (plate_id, camera_id, status)
+                            VALUES (%s, %s, %s)
+                            """,
+                            (
+                                new_plate_id,
+                                camera_id,
+                                plate_status
+                            )
+                        )
+
+                    # ----------------------------------------------
+                    # Jika event SUDAH punya plate, jangan membuat
+                    # plate_id baru. Update hanya jika data baru
+                    # lebih baik / lebih lengkap.
+                    # ----------------------------------------------
+                    elif has_plate_input and existing_plate_id:
+
+                        old_ocr_conf = float(
+                            existing.get("plate_ocr_confidence") or 0.0
+                        )
+
+                        should_update_plate = (
+                            normalized_plate
+                            and (
+                                not existing.get("plate_number")
+                                or ocr_conf > old_ocr_conf
+                            )
+                        )
+
+                        if should_update_plate:
+                            plate_status = compute_plate_status(
+                                normalized_plate,
+                                ocr_conf
+                            )
+
+                            cur.execute(
+                                """
+                                UPDATE plate
+                                SET
+                                    plate_number = %s,
+                                    raw_ocr_text = %s,
+                                    normalized_plate_number = %s,
+                                    detection_status = %s,
+                                    detection_confidence = %s,
+                                    ocr_confidence = %s
+                                WHERE plate_id = %s
+                                """,
+                                (
+                                    normalized_plate,
+                                    raw_ocr_text or plate_number,
+                                    normalized_plate,
+                                    plate_status,
+                                    plate_conf,
+                                    ocr_conf,
+                                    existing_plate_id
+                                )
+                            )
+
+                    final_plate_id = new_plate_id or existing_plate_id
+
+                    # ----------------------------------------------
+                    # Tentukan apakah memang ada enrichment.
+                    # ----------------------------------------------
+                    should_update_event = (
+                        bool(vehicle_rel_path)
+                        or bool(new_plate_id)
+                        or (
+                            has_driver
+                            and not bool(existing.get("has_driver"))
+                        )
+                        or (
+                            vehicle_confidence
+                            > float(existing.get("vehicle_confidence") or 0.0)
+                        )
+                        or (
+                            has_plate_input
+                            and ocr_conf
+                            > float(existing.get("event_ocr_confidence") or 0.0)
+                        )
+                    )
+
+                    if should_update_event:
+                        final_has_plate = bool(final_plate_id)
+
+                        if final_has_plate:
+                            final_plate_conf = plate_conf
+                            final_ocr_conf = ocr_conf
+                        else:
+                            final_plate_conf = None
+                            final_ocr_conf = None
+
+                        # Status event menggunakan plate bila tersedia,
+                        # jika tidak menggunakan confidence kendaraan.
+                        if final_has_plate:
+                            status_val = compute_plate_status(
+                                normalized_plate
+                                if normalized_plate
+                                else existing.get("plate_number"),
+                                final_ocr_conf or existing.get(
+                                    "event_ocr_confidence"
+                                ) or 0.0
+                            )
+                            conf_val = (
+                                final_ocr_conf
+                                or existing.get("event_ocr_confidence")
+                                or 0.0
+                            )
+                        else:
+                            conf_val = max(
+                                vehicle_confidence,
+                                float(existing.get("vehicle_confidence") or 0.0)
+                            )
+                            status_val = (
+                                1 if conf_val >= 0.70
+                                else 2 if conf_val >= 0.40
+                                else 0
+                            )
+
+                        cur.execute(
+                            """
+                            UPDATE full_detection
+                            SET
+                                object_type = 'vehicle',
+                                vehicle_type = %s,
+                                has_plate = %s,
+                                has_driver = %s,
+                                detection_status = %s,
+                                detection_confidence = %s,
+                                vehicle_confidence = %s,
+                                plate_detection_confidence = %s,
+                                ocr_confidence = %s,
+                                direction = %s,
+                                driver_track_id = %s,
+                                vehicle_image_path = COALESCE(
+                                    vehicle_image_path,
+                                    %s
+                                )
+                            WHERE detection_id = %s
+                            """,
+                            (
+                                vehicle_type,
+                                int(final_has_plate),
+                                int(bool(has_driver or existing.get("has_driver"))),
+                                status_val,
+                                conf_val,
+                                max(
+                                    vehicle_confidence,
+                                    float(existing.get("vehicle_confidence") or 0.0)
+                                ),
+                                (
+                                    max(
+                                        plate_conf,
+                                        float(existing.get("plate_detection_confidence") or 0.0)
+                                    )
+                                    if final_has_plate
+                                    else None
+                                ),
+                                (
+                                    max(
+                                        ocr_conf,
+                                        float(existing.get("event_ocr_confidence") or 0.0)
+                                    )
+                                    if final_has_plate
+                                    else None
+                                ),
+                                direction,
+                                driver_track_id or existing.get("driver_track_id"),
+                                vehicle_rel_path,
+                                existing_id
+                            )
+                        )
+
+                    # Capture kendaraan baru tidak terpakai.
+                    if vehicle_rel_path and existing_vehicle_path:
+                        _delete_capture_file(vehicle_rel_path)
+                        vehicle_rel_path = None
+
+                    return {
+                        "plate_id": final_plate_id,
+                        "detection_id": existing_id,
+                        "duplicate": True,
+                        "enriched": bool(should_update_event),
+                        "plate_image_path": (
+                            plate_rel_path
+                            or existing.get("plate_image_path")
+                        ),
+                        "face_image_path": existing_face_path,
+                        "vehicle_image_path": (
+                            existing_vehicle_path
+                            or vehicle_rel_path
+                        ),
+                        "plate_number": (
+                            normalized_plate
+                            or existing.get("plate_number")
+                            or None
+                        ),
+                        "object_type": "vehicle",
+                        "vehicle_type": vehicle_type,
+                        "has_plate": bool(final_plate_id),
+                        "has_driver": bool(
+                            has_driver or existing.get("has_driver")
+                        )
+                    }
+
+                # --------------------------------------------------
+                # EVENT PERSON
+                # --------------------------------------------------
+                if object_type == "person":
+
+                    # Hanya buat face capture jika event lama belum punya.
+                    if face_crop is not None and not existing_face_path:
+                        face_rel_path = save_crop_locally(
+                            face_crop,
+                            FACE_DIR,
+                            prefix="face",
+                            camera_id=camera_id,
+                            track_id=track_id
+                        )
+
+                    if face_rel_path:
+                        cur.execute(
+                            """
+                            UPDATE full_detection
+                            SET
+                                object_type = 'person',
+                                person_confidence = %s,
+                                face_confidence = %s,
+                                detection_confidence = %s,
+                                detection_status = %s,
+                                direction = %s,
+                                face_image_path = %s
+                            WHERE detection_id = %s
+                            """,
+                            (
+                                max(
+                                    face_conf,
+                                    float(existing.get("person_confidence") or 0.0),
+                                ),
+                                max(
+                                    face_conf,
+                                    float(existing.get("face_confidence") or 0.0),
+                                ),
+                                max(
+                                    face_conf,
+                                    float(existing.get("detection_confidence") or 0.0),
+                                ),
+                                compute_face_status(
+                                    max(
+                                        face_conf,
+                                        float(existing.get("face_confidence") or 0.0),
+                                    )
+                                ),
+                                direction,
+                                face_rel_path,
+                                existing_id
+                            )
+                        )
+                    else:
+                        # Tidak ada face baru -> tidak perlu UPDATE DB.
+                        face_rel_path = None
+
+                    # Person tidak boleh mempunyai plate.
+                    if existing_plate_id:
+                        # Jangan hapus plate lama secara otomatis karena
+                        # mungkin dipakai event lain pada legacy database.
+                        pass
+
+                    return {
+                        "plate_id": None,
+                        "detection_id": existing_id,
+                        "duplicate": True,
+                        "enriched": bool(face_rel_path),
+                        "plate_image_path": None,
+                        "face_image_path": (
+                            face_rel_path or existing_face_path
+                        ),
+                        "vehicle_image_path": None,
+                        "plate_number": None,
+                        "object_type": "person",
+                        "vehicle_type": "unknown",
+                        "has_plate": False,
+                        "has_driver": False
+                    }
+
+            # ======================================================
+            # 3. EVENT BARU
+            # ======================================================
+
             plate_id = None
             plate_rel_path = None
             face_rel_path = None
+            vehicle_rel_path = None
 
-            # 1. Simpan dan catat Plat Nomor (jika terdeteksi)
-            if plate_crop is not None or plate_number:
+            # ----------------------------------------------
+            # CAPTURE KENDARAAN
+            # ----------------------------------------------
+            if object_type == "vehicle" and vehicle_crop is not None:
+                vehicle_rel_path = save_crop_locally(
+                    vehicle_crop,
+                    VEHICLE_DIR,
+                    prefix="vehicle",
+                    camera_id=camera_id,
+                    track_id=track_id
+                )
+
+            # ----------------------------------------------
+            # CAPTURE + ROW PLATE
+            # ----------------------------------------------
+            plate_status = 0
+
+            if object_type == "vehicle" and has_plate_input:
+
                 if plate_crop is not None:
-                    plate_rel_path = save_crop_locally(plate_crop, PLATE_DIR, prefix="plate", camera_id=camera_id, track_id=track_id)
+                    plate_rel_path = save_crop_locally(
+                        plate_crop,
+                        PLATE_DIR,
+                        prefix="plate",
+                        camera_id=camera_id,
+                        track_id=track_id
+                    )
 
-                plate_status = compute_plate_status(plate_number, ocr_conf)
+                plate_status = compute_plate_status(
+                    normalized_plate,
+                    ocr_conf
+                )
+
                 cur.execute(
                     """
-                    INSERT INTO plate (plate_number, detection_status, detection_confidence, ocr_confidence, plate_image_path)
-                    VALUES (%s, %s, %s, %s, %s);
+                    INSERT INTO plate (
+                        plate_number,
+                        raw_ocr_text,
+                        normalized_plate_number,
+                        detection_status,
+                        detection_confidence,
+                        ocr_confidence,
+                        plate_image_path
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     """,
-                    (plate_number, plate_status, plate_conf, ocr_conf, plate_rel_path)
+                    (
+                        normalized_plate or None,
+                        raw_ocr_text or plate_number,
+                        normalized_plate or None,
+                        plate_status,
+                        plate_conf,
+                        ocr_conf,
+                        plate_rel_path
+                    )
                 )
                 plate_id = cur.lastrowid
 
-                # Catat ke plate_logs
-                log_status = 1 if plate_status == 1 else (2 if plate_status == 2 else 0)
                 cur.execute(
                     """
                     INSERT INTO plate_logs (plate_id, camera_id, status)
-                    VALUES (%s, %s, %s);
+                    VALUES (%s, %s, %s)
                     """,
-                    (plate_id, camera_id, log_status)
+                    (
+                        plate_id,
+                        camera_id,
+                        plate_status
+                    )
                 )
 
-            # 2. Simpan dan catat Orang / Wajah / Deteksi Terintegrasi
-            detection_id = None
-            if face_crop is not None or face_conf > 0 or plate_id is not None:
-                if face_crop is not None:
-                    face_rel_path = save_crop_locally(face_crop, FACE_DIR, prefix="face", camera_id=camera_id, track_id=track_id)
+            # ----------------------------------------------
+            # CAPTURE PERSON
+            # ----------------------------------------------
+            if object_type == "person" and face_crop is not None:
+                face_rel_path = save_crop_locally(
+                    face_crop,
+                    FACE_DIR,
+                    prefix="face",
+                    camera_id=camera_id,
+                    track_id=track_id
+                )
 
-                if face_crop is not None or face_conf > 0:
-                    status_val = compute_face_status(face_conf)
-                    conf_val = face_conf
-                else:
+            # ----------------------------------------------
+            # STATUS EVENT BARU
+            # ----------------------------------------------
+            if object_type == "person":
+                status_val = compute_face_status(face_conf)
+                conf_val = face_conf
+            else:
+                if plate_id:
                     status_val = plate_status
-                    conf_val = plate_conf
+                    conf_val = ocr_conf
+                else:
+                    status_val = (
+                        1 if vehicle_confidence >= 0.70
+                        else 2 if vehicle_confidence >= 0.40
+                        else 0
+                    )
+                    conf_val = vehicle_confidence
 
-                cur.execute(
-                    """
-                    INSERT INTO full_detection (plate_id, camera_id, detection_status, detection_confidence, face_image_path)
-                    VALUES (%s, %s, %s, %s, %s);
-                    """,
-                    (plate_id, camera_id, status_val, conf_val, face_rel_path)
+            # ----------------------------------------------
+            # INSERT FULL DETECTION
+            # ----------------------------------------------
+            cur.execute(
+                """
+                INSERT INTO full_detection (
+                    plate_id,
+                    camera_id,
+                    track_id,
+                    object_type,
+                    vehicle_type,
+                    has_plate,
+                    has_driver,
+                    detection_status,
+                    detection_confidence,
+                    vehicle_confidence,
+                    plate_detection_confidence,
+                    ocr_confidence,
+                    person_confidence,
+                    face_confidence,
+                    direction,
+                    driver_track_id,
+                    face_image_path,
+                    vehicle_image_path,
+                    event_key
                 )
-                detection_id = cur.lastrowid
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                """,
+                (
+                    plate_id,
+                    camera_id,
+                    track_id,
+                    object_type,
+                    vehicle_type,
+                    int(has_plate_input) if object_type == "vehicle" else 0,
+                    int(bool(has_driver)) if object_type == "vehicle" else 0,
+                    status_val,
+                    conf_val,
+                    vehicle_confidence if object_type == "vehicle" else None,
+                    plate_conf if object_type == "vehicle" and plate_id else None,
+                    ocr_conf if object_type == "vehicle" and plate_id else None,
+                    face_conf if object_type == "person" else None,
+                    face_conf if object_type == "person" else None,
+                    direction,
+                    driver_track_id if object_type == "vehicle" else None,
+                    face_rel_path if object_type == "person" else None,
+                    vehicle_rel_path if object_type == "vehicle" else None,
+                    event_key
+                )
+            )
+
+            detection_id = cur.lastrowid
+
+            print(
+                f"[DB EVENT] detection_id={detection_id} "
+                f"camera={camera_id} type={object_type} "
+                f"track_id={track_id} "
+                f"vehicle_image={vehicle_rel_path or '-'} "
+                f"plate_image={plate_rel_path or '-'} "
+                f"face_image={face_rel_path or '-'} "
+                f"event_key={event_key or '-'}"
+            )
 
             return {
                 "plate_id": plate_id,
                 "detection_id": detection_id,
                 "plate_image_path": plate_rel_path,
                 "face_image_path": face_rel_path,
-                "plate_number": plate_number
+                "vehicle_image_path": vehicle_rel_path,
+                "plate_number": normalized_plate or None,
+                "object_type": object_type,
+                "vehicle_type": vehicle_type,
+                "has_plate": (
+                    has_plate_input
+                    if object_type == "vehicle"
+                    else False
+                ),
+                "has_driver": (
+                    bool(has_driver)
+                    if object_type == "vehicle"
+                    else False
+                ),
+                "duplicate": False,
+                "enriched": False
             }
+
+    except Exception as exc:
+        # Jangan meninggalkan capture orphan bila transaksi gagal.
+        if vehicle_rel_path:
+            _delete_capture_file(vehicle_rel_path)
+        if plate_rel_path:
+            _delete_capture_file(plate_rel_path)
+        if face_rel_path:
+            _delete_capture_file(face_rel_path)
+
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
+        print(
+            f"[DB SAVE ERROR] camera={camera_id} "
+            f"track_id={track_id} type={object_type}: {exc}"
+        )
+        raise
+
     finally:
         conn.close()
 
@@ -277,21 +1098,31 @@ def get_recent_detections(limit: int = 50):
                     fd.detection_id,
                     fd.plate_id,
                     fd.camera_id,
+                    fd.track_id,
+                    fd.object_type,
+                    fd.vehicle_type,
+                    fd.has_plate,
+                    fd.has_driver,
+                    fd.vehicle_confidence,
+                    fd.plate_detection_confidence,
+                    fd.ocr_confidence AS event_ocr_confidence,
+                    fd.person_confidence,
+                    COALESCE(fd.face_confidence, fd.person_confidence) AS face_confidence,
+                    fd.direction,
                     fd.detection_status AS face_status,
-                    fd.detection_confidence AS face_confidence,
+                    fd.detection_confidence AS legacy_detection_confidence,
                     fd.face_image_path,
+                    fd.vehicle_image_path,
                     fd.created_at AS detected_at,
                     p.plate_number,
                     p.detection_status AS plate_status,
                     p.detection_confidence AS plate_confidence,
                     p.ocr_confidence,
                     p.plate_image_path,
-                    COALESCE(c1.location, c2.location, 'CCTV') AS camera_name
+                    COALESCE(c1.location, 'CCTV') AS camera_name
                 FROM full_detection fd
                 LEFT JOIN plate p ON fd.plate_id = p.plate_id
                 LEFT JOIN cameras c1 ON fd.camera_id = c1.camera_id
-                LEFT JOIN plate_logs pl ON p.plate_id = pl.plate_id
-                LEFT JOIN cameras c2 ON pl.camera_id = c2.camera_id
                 ORDER BY fd.created_at DESC
                 LIMIT %s;
             """
@@ -301,37 +1132,200 @@ def get_recent_detections(limit: int = 50):
 
 def get_dashboard_stats():
     """Mengambil ringkasan statistik komprehensif untuk widget dashboard."""
+    summary = get_analytics({"period": "today"})["summary"]
+    return {
+        "total_plates": summary["plates"],
+        "unique_plates": summary["unique_plates"],
+        "total_full_detections": summary["vehicles"] + summary["people"],
+        "today_detections": summary["vehicles"],
+        "active_cameras": summary["active_cameras"],
+        "total_cameras": summary["total_cameras"],
+        "plate_success": summary["plates"],
+        "need_check": 0,
+        **summary
+    }
+
+
+def _analytics_filters(args=None):
+    """Build the shared legacy-schema filter used by all analytics queries."""
+    args = args or {}
+    period = str(args.get("period") or "today").lower()
+    start_date = args.get("start_date")
+    end_date = args.get("end_date")
+
+    has_custom_dates = bool(start_date or end_date)
+    if period == "today" and not has_custom_dates:
+        start_date = end_date = datetime.now().strftime("%Y-%m-%d")
+    elif period == "7d" and not has_custom_dates:
+        start_date = (datetime.now() - timedelta(days=6)).strftime("%Y-%m-%d")
+        end_date = datetime.now().strftime("%Y-%m-%d")
+    elif period == "30d" and not has_custom_dates:
+        start_date = (datetime.now() - timedelta(days=29)).strftime("%Y-%m-%d")
+        end_date = datetime.now().strftime("%Y-%m-%d")
+    elif period == "all" and not has_custom_dates:
+        start_date = end_date = None
+    elif period not in ("today", "7d", "30d", "all"):
+        period = "custom"
+
+    clauses = ["1=1"]
+    params = []
+    if start_date:
+        clauses.append("DATE(fd.created_at) >= %s")
+        params.append(str(start_date))
+    if end_date:
+        clauses.append("DATE(fd.created_at) <= %s")
+        params.append(str(end_date))
+    if str(args.get("camera_id") or "").isdigit():
+        clauses.append("fd.camera_id = %s")
+        params.append(int(args["camera_id"]))
+    if args.get("region"):
+        clauses.append("c.location LIKE %s")
+        params.append(f"%{str(args['region']).strip()}%")
+    if args.get("gate"):
+        clauses.append("c.location LIKE %s")
+        params.append(f"%{str(args['gate']).strip()}%")
+    if args.get("direction") in ("entry", "exit"):
+        clauses.append("COALESCE(c.direction, 'unknown') = %s")
+        params.append(args["direction"])
+    if args.get("object_type") == "vehicle":
+        clauses.append("fd.object_type = 'vehicle'")
+    elif args.get("object_type") in ("person", "face"):
+        clauses.append("fd.object_type = 'person'")
+    elif args.get("object_type") == "plate":
+        clauses.append("fd.object_type = 'vehicle' AND fd.has_plate = 1")
+    return " AND ".join(clauses), params, period, start_date, end_date
+
+
+def get_analytics(args=None):
+    """Return dashboard, recap and chart data from the active legacy schema."""
+    where_sql, params, period, start_date, end_date = _analytics_filters(args)
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) AS total_plates FROM plate;")
-            total_plates = cur.fetchone()["total_plates"]
-
-            cur.execute("SELECT COUNT(*) AS total_full FROM full_detection;")
-            total_full = cur.fetchone()["total_full"]
-
-            cur.execute("SELECT COUNT(*) AS today_detections FROM full_detection WHERE DATE(created_at) = CURDATE();")
-            today_detections = cur.fetchone()["today_detections"]
-
-            cur.execute("SELECT COUNT(*) AS total_cams, SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END) AS active_cams FROM cameras;")
-            cam_row = cur.fetchone()
-            total_cams = cam_row["total_cams"] or 0
-            active_cameras = cam_row["active_cams"] or 0
-
-            cur.execute("SELECT COUNT(*) AS plate_success FROM plate WHERE detection_status = 1;")
-            plate_success = cur.fetchone()["plate_success"] or 0
-
-            cur.execute("SELECT COUNT(*) AS need_check FROM full_detection WHERE detection_status = 2;")
-            need_check = cur.fetchone()["need_check"] or 0
-
-            return {
-                "total_plates": total_plates,
-                "total_full_detections": total_full,
-                "today_detections": today_detections,
-                "active_cameras": active_cameras,
-                "total_cameras": total_cams,
-                "plate_success": plate_success,
-                "need_check": need_check
+            cur.execute(f"""
+                SELECT
+                    SUM(fd.object_type = 'vehicle') AS vehicles,
+                    SUM(fd.object_type = 'vehicle' AND c.direction = 'entry') AS vehicle_entry,
+                    SUM(fd.object_type = 'vehicle' AND c.direction = 'exit') AS vehicle_exit,
+                    SUM(fd.object_type = 'person') AS people,
+                    SUM(fd.object_type = 'person' AND c.direction = 'entry') AS people_entry,
+                    SUM(fd.object_type = 'person' AND c.direction = 'exit') AS people_exit,
+                    SUM(fd.object_type = 'vehicle' AND fd.has_plate = 1) AS plates,
+                    COUNT(DISTINCT CASE WHEN fd.object_type = 'vehicle' AND fd.has_plate = 1 AND p.plate_number IS NOT NULL AND p.plate_number != '' THEN p.plate_number END) AS unique_plates
+                FROM full_detection fd LEFT JOIN plate p ON p.plate_id = fd.plate_id
+                LEFT JOIN cameras c ON c.camera_id = fd.camera_id WHERE {where_sql}
+            """, params)
+            row = cur.fetchone() or {}
+            cur.execute("SELECT COUNT(*) AS total, SUM(status = 1) AS active FROM cameras")
+            cams = cur.fetchone() or {}
+            summary = {
+                "vehicles": int(row.get("vehicles") or 0), "vehicle_entry": int(row.get("vehicle_entry") or 0),
+                "vehicle_exit": int(row.get("vehicle_exit") or 0), "people": int(row.get("people") or 0),
+                "people_entry": int(row.get("people_entry") or 0), "people_exit": int(row.get("people_exit") or 0),
+                "plates": int(row.get("plates") or 0), "unique_plates": int(row.get("unique_plates") or 0),
+                "total_cameras": int(cams.get("total") or 0), "active_cameras": int(cams.get("active") or 0)
             }
+
+            def query_rows(sql):
+                cur.execute(sql, params)
+                return cur.fetchall()
+
+            camera_rows = query_rows(f"""
+                SELECT c.camera_id, COALESCE(c.location, CONCAT('CCTV-', c.camera_id)) AS camera_name,
+                    SUM(fd.object_type = 'vehicle') AS vehicles,
+                    SUM(fd.object_type = 'person') AS people,
+                    COUNT(DISTINCT CASE WHEN fd.object_type = 'vehicle' AND fd.has_plate = 1 THEN p.plate_number END) AS unique_plates,
+                    CASE WHEN c.direction = 'entry' THEN 'Masuk'
+                        WHEN c.direction = 'exit' THEN 'Keluar' ELSE 'Tidak ditentukan' END AS direction,
+                    c.status
+                FROM full_detection fd LEFT JOIN plate p ON p.plate_id = fd.plate_id
+                LEFT JOIN cameras c ON c.camera_id = fd.camera_id WHERE {where_sql}
+                GROUP BY c.camera_id, c.location, c.status ORDER BY vehicles DESC, people DESC
+            """)
+            cameras = [{"camera_id": r.get("camera_id"), "camera": r.get("camera_name"),
+                        "vehicles": int(r.get("vehicles") or 0), "people": int(r.get("people") or 0),
+                        "unique_plates": int(r.get("unique_plates") or 0), "direction": r.get("direction"),
+                        "status": "Aktif" if r.get("status") == 1 else "Offline"} for r in camera_rows]
+
+            daily_rows = query_rows(f"""
+                SELECT DATE(fd.created_at) AS day, SUM(fd.object_type = 'vehicle') AS vehicles,
+                    COUNT(DISTINCT CASE WHEN fd.object_type = 'vehicle' AND fd.has_plate = 1 THEN p.plate_number END) AS unique_plates,
+                    SUM(fd.object_type = 'vehicle' AND c.direction = 'entry') AS entry_count,
+                    SUM(fd.object_type = 'vehicle' AND c.direction = 'exit') AS exit_count,
+                    SUM(fd.object_type = 'person') AS people
+                FROM full_detection fd LEFT JOIN plate p ON p.plate_id = fd.plate_id
+                LEFT JOIN cameras c ON c.camera_id = fd.camera_id WHERE {where_sql}
+                GROUP BY DATE(fd.created_at) ORDER BY day ASC
+            """)
+            daily = [{"date": str(r.get("day")), "vehicles": int(r.get("vehicles") or 0),
+                      "unique_plates": int(r.get("unique_plates") or 0), "entry": int(r.get("entry_count") or 0),
+                      "exit": int(r.get("exit_count") or 0), "people": int(r.get("people") or 0)} for r in daily_rows]
+
+            hourly_rows = query_rows(f"""
+                SELECT HOUR(fd.created_at) AS hour, SUM(fd.object_type = 'vehicle') AS vehicles,
+                    SUM(fd.object_type = 'person') AS people
+                FROM full_detection fd LEFT JOIN cameras c ON c.camera_id = fd.camera_id
+                WHERE {where_sql} GROUP BY HOUR(fd.created_at) ORDER BY hour ASC
+            """)
+            hourly_map = {int(r["hour"]): r for r in hourly_rows}
+            hourly = [{"hour": h, "label": f"{h:02d}:00", "vehicles": int(hourly_map.get(h, {}).get("vehicles") or 0),
+                       "people": int(hourly_map.get(h, {}).get("people") or 0)} for h in range(24)]
+
+            top_rows = query_rows(f"""
+                SELECT p.plate_number, COUNT(DISTINCT fd.detection_id) AS total_seen, AVG(p.ocr_confidence) AS avg_confidence,
+                    MAX(fd.created_at) AS last_seen, COALESCE(MAX(c.location), 'CCTV') AS last_camera
+                FROM full_detection fd JOIN plate p ON p.plate_id = fd.plate_id
+                LEFT JOIN cameras c ON c.camera_id = fd.camera_id WHERE {where_sql}
+                    AND p.plate_number IS NOT NULL AND p.plate_number != ''
+                GROUP BY p.plate_number ORDER BY total_seen DESC, last_seen DESC LIMIT 10
+            """)
+            top_plates = []
+            for r in top_rows:
+                # STATUS TERAKHIR = plate.detection_status dari record TERBARU plat ini
+                # (record dengan waktu terakhir terlihat). Sumber & arti status sama
+                # dengan Riwayat Plat / Hasil Deteksi; filter periode/CCTV yang sama.
+                cur.execute(f"""
+                    SELECT p.detection_status AS last_status
+                    FROM full_detection fd JOIN plate p ON p.plate_id = fd.plate_id
+                    LEFT JOIN cameras c ON c.camera_id = fd.camera_id
+                    WHERE {where_sql} AND p.plate_number = %s
+                    ORDER BY fd.created_at DESC, fd.detection_id DESC LIMIT 1
+                """, params + [r["plate_number"]])
+                last_row = cur.fetchone() or {}
+                last_code = last_row.get("last_status")
+                if last_code is None:
+                    last_text = "Tidak tersedia"
+                else:
+                    last_text = "Terbaca" if last_code == 1 else ("Perlu cek" if last_code == 2 else "Gagal")
+                top_plates.append({"plate": r["plate_number"], "count": int(r["total_seen"] or 0),
+                                   "confidence": round(float(r.get("avg_confidence") or 0) * 100, 1),
+                                   "last_seen": str(r.get("last_seen") or ""), "camera": r.get("last_camera") or "CCTV",
+                                   "status_code": last_code, "status": last_text})
+
+            recent_rows = query_rows(f"""
+                SELECT fd.detection_id AS id, p.plate_number AS plate, fd.created_at AS detected_at,
+                    COALESCE(c.location, 'CCTV') AS camera, fd.detection_confidence AS confidence,
+                    CASE WHEN fd.object_type = 'vehicle' THEN 'Kendaraan' ELSE 'Orang' END AS type,
+                    CASE WHEN c.direction = 'entry' THEN 'Masuk'
+                        WHEN c.direction = 'exit' THEN 'Keluar' ELSE 'Tidak ditentukan' END AS direction
+                FROM full_detection fd LEFT JOIN plate p ON p.plate_id = fd.plate_id
+                LEFT JOIN cameras c ON c.camera_id = fd.camera_id WHERE {where_sql}
+                ORDER BY fd.created_at DESC LIMIT 12
+            """)
+            recent = [{"id": r["id"], "plate": r.get("plate") or "-", "camera": r.get("camera"),
+                       "type": r.get("type"), "direction": r.get("direction"),
+                       "timestamp": str(r.get("detected_at") or ""),
+                       "confidence": round(float(r.get("confidence") or 0) * 100, 1)} for r in recent_rows]
+
+            peak = max(hourly, key=lambda item: item["vehicles"], default={"label": "-", "vehicles": 0})
+            busiest = cameras[0]["camera"] if cameras else "Belum ada data"
+            top_plate = top_plates[0]["plate"] if top_plates else "Belum ada data"
+            insights = [f"{busiest} memiliki aktivitas kendaraan tertinggi.",
+                        f"Periode terpilih mencatat {summary['vehicles']:,} kendaraan.".replace(",", "."),
+                        f"{top_plate} merupakan plat yang paling sering terdeteksi.",
+                        f"Jam {peak['label']} merupakan periode kendaraan tersibuk ({peak['vehicles']} kendaraan)."]
+            return {"period": period, "start_date": start_date, "end_date": end_date, "summary": summary,
+                    "cameras": cameras, "daily": daily, "hourly": hourly, "top_plates": top_plates,
+                    "recent": recent, "insights": insights}
 
 
 # ============================================================
@@ -348,7 +1342,7 @@ def ensure_tables_exist():
                         `setting_key` VARCHAR(100) NOT NULL PRIMARY KEY,
                         `setting_value` TEXT NULL,
                         `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
                 """)
                 cur.execute("SELECT COUNT(*) AS c FROM system_settings;")
                 if cur.fetchone()["c"] == 0:
@@ -370,6 +1364,7 @@ def ensure_tables_exist():
 
 # Inisialisasi tabel settings saat modul diimpor
 ensure_tables_exist()
+ensure_event_schema()
 
 
 def get_system_settings() -> dict:
@@ -454,8 +1449,7 @@ def get_all_detections_paginated(
     camera_id: int = None,
     search: str = None,
     start_date: str = None,
-    end_date: str = None,
-    exclude_failed: bool = False
+    end_date: str = None
 ) -> dict:
     """
     Mengambil data deteksi gabungan (Wajah & Plat) dengan filter lengkap dan paginasi.
@@ -468,13 +1462,13 @@ def get_all_detections_paginated(
     params = []
 
     if type_filter == "plate":
-        where_clauses.append("fd.plate_id IS NOT NULL")
-    elif type_filter == "face":
-        where_clauses.append("(fd.face_image_path IS NOT NULL OR fd.plate_id IS NULL)")
+        where_clauses.append("fd.object_type = 'vehicle' AND fd.has_plate = 1")
+    elif type_filter == "vehicle":
+        where_clauses.append("fd.object_type = 'vehicle'")
+    elif type_filter in ("person", "face"):
+        where_clauses.append("fd.object_type = 'person'")
 
-    if exclude_failed or status_filter == "valid":
-        where_clauses.append("fd.detection_status IN (1, 2)")
-    elif status_filter in ("0", "1", "2"):
+    if status_filter in ("0", "1", "2"):
         where_clauses.append("fd.detection_status = %s")
         params.append(int(status_filter))
 
@@ -514,9 +1508,24 @@ def get_all_detections_paginated(
                     fd.detection_id,
                     fd.plate_id,
                     fd.camera_id,
+                    fd.track_id,
+                    fd.object_type,
+                    fd.vehicle_type,
+                    fd.has_plate,
+                    fd.has_driver,
                     fd.detection_status AS status_code,
                     fd.detection_confidence,
+                    fd.vehicle_confidence,
+                    fd.plate_detection_confidence,
+                    fd.ocr_confidence AS event_ocr_confidence,
+                    fd.person_confidence,
+                    fd.face_confidence,
+                    fd.direction,
+                    fd.driver_track_id,
+                    fd.driver_face_path,
+                    fd.event_key,
                     fd.face_image_path,
+                    fd.vehicle_image_path,
                     fd.created_at AS detected_at,
                     p.plate_number,
                     p.detection_status AS plate_status,
@@ -537,35 +1546,51 @@ def get_all_detections_paginated(
             items = []
             for r in rows:
                 p_num = r.get("plate_number")
-                has_plate = bool(p_num or r.get("plate_image_path"))
-                has_face = bool(r.get("face_image_path"))
-
-                if has_plate and has_face:
-                    dtype = "combined"
-                elif has_plate:
-                    dtype = "plate"
-                else:
-                    dtype = "face"
-
-                code = r.get("status_code", 1)
+                object_type = r.get("object_type") or ("vehicle" if r.get("plate_id") else "person")
+                has_plate = bool(r.get("has_plate") or p_num or r.get("plate_image_path"))
+                dtype = "vehicle_with_plate" if object_type == "vehicle" and has_plate else object_type
+                code = r.get("plate_status") if object_type == "vehicle" and has_plate else r.get("status_code", 1)
                 stext = "Terbaca" if code == 1 else ("Perlu cek" if code == 2 else "Gagal")
-
-                conf = float(r.get("detection_confidence") or r.get("plate_confidence") or 0.0)
+                if object_type == "person":
+                    conf = float(r.get("person_confidence") or r.get("face_confidence") or r.get("detection_confidence") or 0.0)
+                elif has_plate:
+                    conf = float(r.get("plate_detection_confidence") or r.get("plate_confidence") or r.get("event_ocr_confidence") or 0.0)
+                else:
+                    conf = float(r.get("vehicle_confidence") or r.get("detection_confidence") or 0.0)
                 dt_str = r["detected_at"].strftime("%Y-%m-%d %H:%M:%S") if isinstance(r.get("detected_at"), datetime) else str(r.get("detected_at") or "")
 
                 items.append({
                     "id": r["detection_id"],
                     "type": dtype,
+                    "object_type": object_type,
+                    "vehicle_type": r.get("vehicle_type") or "unknown",
+                    "track_id": r.get("track_id"),
+                    "has_plate": has_plate,
+                    "has_driver": bool(r.get("has_driver")),
+                    "direction": r.get("direction") or "unknown",
+                    "event_key": r.get("event_key"),
+                    "driver_track_id": r.get("driver_track_id"),
                     "plate": p_num or "-",
                     "camera": r.get("camera_name") or "CCTV",
                     "camera_id": r.get("camera_id"),
                     "confidence": conf,
                     "confidence_percent": round(conf * 100, 1),
+                    "vehicle_confidence": float(r.get("vehicle_confidence") or 0),
+                    "plate_detection_confidence": float(r.get("plate_confidence") or r.get("plate_detection_confidence") or 0),
+                    "ocr_confidence": float(r.get("event_ocr_confidence") or r.get("ocr_confidence") or 0),
+                    "person_confidence": float(r.get("person_confidence") or 0),
+                    "face_confidence": float(r.get("face_confidence") or 0),
+                    "vehicle_confidence_percent": round(float(r.get("vehicle_confidence") or 0) * 100, 1),
+                    "plate_confidence_percent": round(float(r.get("plate_confidence") or r.get("plate_detection_confidence") or 0) * 100, 1),
+                    "ocr_confidence_percent": round(float(r.get("event_ocr_confidence") or r.get("ocr_confidence") or 0) * 100, 1),
+                    "person_confidence_percent": round(float(r.get("person_confidence") or r.get("face_confidence") or 0) * 100, 1),
                     "timestamp": dt_str,
                     "status": stext,
                     "status_code": code,
                     "plate_image_path": r.get("plate_image_path"),
                     "face_image_path": r.get("face_image_path")
+                    ,"driver_face_path": r.get("driver_face_path")
+                    ,"vehicle_image_path": r.get("vehicle_image_path")
                 })
 
             total_pages = max(1, (total + limit - 1) // limit)
@@ -1031,4 +2056,3 @@ def seed_demo_data(count: int = 60) -> int:
                     inserted += 1
 
     return inserted
-

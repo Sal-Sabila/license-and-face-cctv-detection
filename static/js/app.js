@@ -10,6 +10,90 @@ const esc = value => String(value ?? '')
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;');
 
+// Helper: normalize image URL paths from DB to browser-friendly URLs
+function buildCaptureUrl(path) {
+    if (!path) return null;
+    // Convert backslashes to forward slashes and trim spaces
+    let clean = String(path).trim().replace(/\\/g, '/');
+    // Remove leading slashes
+    clean = clean.replace(/^\/+/, '');
+    // Ensure it starts with "static/"
+    if (!clean.startsWith('static/')) {
+        clean = 'static/' + clean;
+    }
+    // Return as absolute URL path
+    return '/' + clean;
+}
+
+function getDateRange(period) {
+    if (period === 'all') return { start_date: '', end_date: '' };
+
+    const end = new Date();
+    const start = new Date(end);
+    const days = { today: 1, '2d': 2, '7d': 7, '30d': 30 }[period] || 1;
+    start.setDate(start.getDate() - days + 1);
+    const formatDate = date => {
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+    };
+
+    return { start_date: formatDate(start), end_date: formatDate(end) };
+}
+
+function getStateDateRange(state) {
+    if (state.start_date || state.end_date) {
+        return { start_date: state.start_date, end_date: state.end_date };
+    }
+    return getDateRange(state.period);
+}
+
+function applyCustomDateRange(state, startInputId, endInputId) {
+    const startDate = document.getElementById(startInputId)?.value || '';
+    const endDate = document.getElementById(endInputId)?.value || '';
+    const today = new Date();
+    const todayValue = [
+        today.getFullYear(),
+        String(today.getMonth() + 1).padStart(2, '0'),
+        String(today.getDate()).padStart(2, '0')
+    ].join('-');
+
+    if (!startDate && !endDate) {
+        state.start_date = '';
+        state.end_date = '';
+        state.period = 'today';
+        return true;
+    }
+    if ((startDate && endDate) && startDate > endDate) {
+        showNotification('Tanggal mulai tidak boleh lebih besar dari tanggal akhir.', 'warning');
+        return false;
+    }
+    if (startDate > todayValue || endDate > todayValue) {
+        showNotification('Tanggal tidak boleh melebihi tanggal hari ini.', 'warning');
+        return false;
+    }
+
+    state.start_date = startDate;
+    state.end_date = endDate;
+    state.period = 'custom';
+    return true;
+}
+
+function setDateFilterLimits() {
+    const today = new Date();
+    const todayValue = [
+        today.getFullYear(),
+        String(today.getMonth() + 1).padStart(2, '0'),
+        String(today.getDate()).padStart(2, '0')
+    ].join('-');
+
+    ['detStartDate', 'detEndDate', 'plateStartDate', 'plateEndDate', 'recapStart', 'recapEnd'].forEach(id => {
+        const input = document.getElementById(id);
+        if (input) input.max = todayValue;
+    });
+}
+
 // Fetch JSON helper
 async function json(url, options = {}) {
     const response = await fetch(url, options);
@@ -19,278 +103,193 @@ async function json(url, options = {}) {
     return response.json();
 }
 
+function showNotification(message, type = 'info', title = '') {
+    const toastEl = document.getElementById('appToast');
+    if (!toastEl || !window.bootstrap) return;
+
+    const presets = {
+        success: { title: 'Berhasil', icon: 'bi-check-circle-fill text-success' },
+        danger: { title: 'Terjadi Kesalahan', icon: 'bi-x-circle-fill text-danger' },
+        warning: { title: 'Perhatian', icon: 'bi-exclamation-triangle-fill text-warning' },
+        info: { title: 'Informasi', icon: 'bi-info-circle-fill text-primary' }
+    };
+    const preset = presets[type] || presets.info;
+    const icon = document.getElementById('toastIcon');
+    const titleEl = document.getElementById('toastTitle');
+    const messageEl = document.getElementById('toastMessage');
+    if (icon) icon.className = `bi ${preset.icon} me-2`;
+    if (titleEl) titleEl.textContent = title || preset.title;
+    if (messageEl) messageEl.textContent = message || '';
+    bootstrap.Toast.getOrCreateInstance(toastEl, { delay: 4200 }).show();
+}
+window.showNotification = showNotification;
+
+function askConfirmation(message, title = 'Konfirmasi') {
+    return new Promise(resolve => {
+        const modalEl = document.getElementById('appConfirmModal');
+        const acceptButton = document.getElementById('confirmAccept');
+        if (!modalEl || !acceptButton || !window.bootstrap) {
+            resolve(window.confirm(message));
+            return;
+        }
+
+        document.getElementById('confirmTitle').textContent = title;
+        document.getElementById('confirmMessage').textContent = message;
+        const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+        let settled = false;
+        const finish = value => {
+            if (settled) return;
+            settled = true;
+            resolve(value);
+        };
+        const onAccept = () => {
+            finish(true);
+            modal.hide();
+        };
+        const onHidden = () => {
+            finish(false);
+            acceptButton.removeEventListener('click', onAccept);
+            modalEl.removeEventListener('hidden.bs.modal', onHidden);
+        };
+        acceptButton.addEventListener('click', onAccept);
+        modalEl.addEventListener('hidden.bs.modal', onHidden);
+        modal.show();
+    });
+}
+window.askConfirmation = askConfirmation;
+
 // ============================================================
 // MODAL GLOBAL: PRATINJAU GAMBAR & DETAIL DETEKSI
 // ============================================================
 
-<<<<<<< Updated upstream
-function openImageModal(imgSrc, title = 'Detail Foto Tangkapan CCTV', meta = '', details = '') {
-=======
-let previewZoom = 1.0;
-let previewPanX = 0;
-let previewPanY = 0;
-let isPreviewDragging = false;
-let previewDragStartX = 0;
-let previewDragStartY = 0;
-let isZoomInitialized = false;
-
-function applyPreviewTransform(smooth = true) {
-    const srcEl = document.getElementById('imagePreviewSrc');
-    const containerEl = document.getElementById('imagePreviewContainer') || document.querySelector('#imagePreviewModal .preview-img-container');
-
-    if (!srcEl) return;
-
-    srcEl.style.transition = smooth ? 'transform 0.12s ease-out' : 'none';
-    srcEl.style.transformOrigin = 'center center';
-    srcEl.style.transform = `translate(${previewPanX}px, ${previewPanY}px) scale(${previewZoom})`;
-
-    if (containerEl) {
-        if (previewZoom > 1.0) {
-            containerEl.style.cursor = isPreviewDragging ? 'grabbing' : 'grab';
-        } else {
-            containerEl.style.cursor = 'zoom-in';
-        }
-    }
-}
-
-function resetPreviewZoom() {
-    previewZoom = 1.0;
-    previewPanX = 0;
-    previewPanY = 0;
-    isPreviewDragging = false;
-    applyPreviewTransform(true);
-}
-
-function zoomPreview(delta, centerX = null, centerY = null) {
-    const oldZoom = previewZoom;
-    let newZoom = previewZoom + delta;
-    newZoom = Math.max(1.0, Math.min(6.0, Math.round(newZoom * 100) / 100));
-
-    if (newZoom === oldZoom) return;
-
-    if (newZoom === 1.0) {
-        previewPanX = 0;
-        previewPanY = 0;
-    } else if (centerX !== null && centerY !== null) {
-        const container = document.getElementById('imagePreviewContainer') || document.querySelector('#imagePreviewModal .preview-img-container');
-        if (container) {
-            const rect = container.getBoundingClientRect();
-            const relX = centerX - rect.left - rect.width / 2;
-            const relY = centerY - rect.top - rect.height / 2;
-            const ratio = newZoom / oldZoom;
-            previewPanX = relX - (relX - previewPanX) * ratio;
-            previewPanY = relY - (relY - previewPanY) * ratio;
-
-            const maxPanX = Math.max(0, (rect.width * (newZoom - 1)) / 2 + 80);
-            const maxPanY = Math.max(0, (rect.height * (newZoom - 1)) / 2 + 80);
-            previewPanX = Math.max(-maxPanX, Math.min(maxPanX, previewPanX));
-            previewPanY = Math.max(-maxPanY, Math.min(maxPanY, previewPanY));
-        }
-    }
-
-    previewZoom = newZoom;
-    applyPreviewTransform(true);
-}
-
-function initImagePreviewZoom() {
-    if (isZoomInitialized) return;
-    isZoomInitialized = true;
-
-    const container = document.getElementById('imagePreviewContainer') || document.querySelector('#imagePreviewModal .preview-img-container');
-    const modalEl = document.getElementById('imagePreviewModal');
-
-    if (modalEl) {
-        modalEl.addEventListener('hidden.bs.modal', resetPreviewZoom);
-    }
-
-    if (container) {
-        // Mouse Wheel Zoom di area abu-abu/hitam capture
-        container.addEventListener('wheel', (e) => {
-            e.preventDefault();
-            const delta = e.deltaY < 0 ? 0.25 : -0.25;
-            zoomPreview(delta, e.clientX, e.clientY);
-        }, { passive: false });
-
-        // Klik & Drag untuk geser (pan) saat foto di-zoom
-        container.addEventListener('mousedown', (e) => {
-            if (e.button !== 0) return; // Hanya klik kiri
-            if (previewZoom <= 1.0) {
-                zoomPreview(1.0, e.clientX, e.clientY);
-                return;
-            }
-            isPreviewDragging = true;
-            previewDragStartX = e.clientX - previewPanX;
-            previewDragStartY = e.clientY - previewPanY;
-            container.style.cursor = 'grabbing';
-            applyPreviewTransform(false);
-        });
-
-        window.addEventListener('mousemove', (e) => {
-            if (!isPreviewDragging) return;
-            const containerEl = document.getElementById('imagePreviewContainer') || document.querySelector('#imagePreviewModal .preview-img-container');
-            const rect = containerEl ? containerEl.getBoundingClientRect() : { width: 600, height: 400 };
-            const maxPanX = Math.max(0, (rect.width * (previewZoom - 1)) / 2 + 80);
-            const maxPanY = Math.max(0, (rect.height * (previewZoom - 1)) / 2 + 80);
-
-            let nextPanX = e.clientX - previewDragStartX;
-            let nextPanY = e.clientY - previewDragStartY;
-            previewPanX = Math.max(-maxPanX, Math.min(maxPanX, nextPanX));
-            previewPanY = Math.max(-maxPanY, Math.min(maxPanY, nextPanY));
-
-            applyPreviewTransform(false);
-        });
-
-        window.addEventListener('mouseup', () => {
-            if (isPreviewDragging) {
-                isPreviewDragging = false;
-                if (container) {
-                    container.style.cursor = previewZoom > 1.0 ? 'grab' : 'zoom-in';
-                }
-                applyPreviewTransform(true);
-            }
-        });
-
-        // Dobel klik untuk toggle zoom (1.0x <-> 2.5x)
-        container.addEventListener('dblclick', (e) => {
-            e.preventDefault();
-            if (previewZoom > 1.0) {
-                resetPreviewZoom();
-            } else {
-                zoomPreview(1.5, e.clientX, e.clientY);
-            }
-        });
-
-        // Touch support (Mobile / Tablet)
-        let touchStartDist = 0;
-        let touchStartZoom = 1.0;
-        let touchStartX = 0;
-        let touchStartY = 0;
-
-        container.addEventListener('touchstart', (e) => {
-            if (e.touches.length === 1) {
-                isPreviewDragging = true;
-                touchStartX = e.touches[0].clientX - previewPanX;
-                touchStartY = e.touches[0].clientY - previewPanY;
-                applyPreviewTransform(false);
-            } else if (e.touches.length === 2) {
-                isPreviewDragging = false;
-                touchStartDist = Math.hypot(
-                    e.touches[0].clientX - e.touches[1].clientX,
-                    e.touches[0].clientY - e.touches[1].clientY
-                );
-                touchStartZoom = previewZoom;
-            }
-        }, { passive: true });
-
-        container.addEventListener('touchmove', (e) => {
-            if (e.touches.length === 1 && isPreviewDragging && previewZoom > 1.0) {
-                previewPanX = e.touches[0].clientX - touchStartX;
-                previewPanY = e.touches[0].clientY - touchStartY;
-                applyPreviewTransform(false);
-            } else if (e.touches.length === 2 && touchStartDist > 0) {
-                const dist = Math.hypot(
-                    e.touches[0].clientX - e.touches[1].clientX,
-                    e.touches[0].clientY - e.touches[1].clientY
-                );
-                const scale = dist / touchStartDist;
-                previewZoom = Math.max(1.0, Math.min(6.0, touchStartZoom * scale));
-                applyPreviewTransform(false);
-            }
-        }, { passive: true });
-
-        container.addEventListener('touchend', () => {
-            isPreviewDragging = false;
-            touchStartDist = 0;
-            applyPreviewTransform(true);
-        });
-    }
-}
-
 function openImageModal(imgSrc, title = 'Detail Foto Tangkapan CCTV', meta = '', details = '', objType = null) {
->>>>>>> Stashed changes
     const modalEl = document.getElementById('imagePreviewModal');
     if (!modalEl) return;
-
-    // Reset zoom ke 100% setiap kali membuka foto baru
-    resetPreviewZoom();
 
     const titleEl = document.getElementById('imagePreviewTitle');
     const metaEl = document.getElementById('imagePreviewMeta');
     const srcEl = document.getElementById('imagePreviewSrc');
     const detailsEl = document.getElementById('imagePreviewDetails');
 
+    // Determine dynamic title based on object type
+    if (objType) {
+        title = objType === 'vehicle' ? 'Foto Kendaraan' : 'Foto Orang';
+    }
+
     if (titleEl) titleEl.textContent = title;
     if (metaEl) metaEl.textContent = meta;
     if (detailsEl) detailsEl.innerHTML = details;
 
-<<<<<<< Updated upstream
-    if (srcEl) {
-        if (imgSrc && imgSrc !== 'null' && imgSrc !== 'undefined') {
-            srcEl.src = '/' + imgSrc.replace(/^\/+/, '');
-=======
-    // Compute image URL from the provided path (already prioritized)
+// Compute image URL from the provided path (already prioritized)
     const imageUrl = buildCaptureUrl(imgSrc);
     console.log('[IMAGE SRC]', imgSrc);
     console.log('[OBJECT TYPE]', objType);
     console.log('[IMAGE URL]', imageUrl);
 
     if (srcEl) {
-        srcEl.onload = function() {
-            resetPreviewZoom();
-        };
         if (imageUrl) {
             srcEl.src = imageUrl;
->>>>>>> Stashed changes
             srcEl.style.display = 'block';
         } else {
             srcEl.src = 'https://placehold.co/600x400/1e293b/94a3b8?text=Foto+Tidak+Tersedia';
             srcEl.style.display = 'block';
+            if (detailsEl) detailsEl.innerHTML = 'Foto Tidak Tersedia';
         }
+        // Error handling for load failure
+        srcEl.onerror = function () {
+            srcEl.style.display = 'none';
+            if (detailsEl) detailsEl.innerHTML = 'Foto tidak dapat dimuat.';
+            console.error('Failed to load image:', imageUrl);
+        };
     }
 
     bootstrap.Modal.getOrCreateInstance(modalEl).show();
 }
 window.openImageModal = openImageModal;
-window.resetPreviewZoom = resetPreviewZoom;
-window.zoomPreview = zoomPreview;
 
 
 // ============================================================
 // MODUL: MONITORING CCTV
 // ============================================================
 
+let allCameras = [];
+let cameraState = {
+    page: 1,
+    limit: 10,
+    search: ''
+};
+
+function renderCameraTable() {
+    const table = document.getElementById('cameraTable');
+    if (!table) return;
+
+    const query = (cameraState.search || '').trim().toLowerCase();
+    const filtered = allCameras.filter(c => {
+        if (!query) return true;
+        const name = (c.name || '').toLowerCase();
+        const url = (c.url || '').toLowerCase();
+        return name.includes(query) || url.includes(query);
+    });
+
+    const total = filtered.length;
+    const totalPages = Math.ceil(total / cameraState.limit) || 1;
+    if (cameraState.page > totalPages) cameraState.page = totalPages;
+    if (cameraState.page < 1) cameraState.page = 1;
+
+    const startIdx = (cameraState.page - 1) * cameraState.limit;
+    const endIdx = Math.min(startIdx + cameraState.limit, total);
+    const pageItems = filtered.slice(startIdx, endIdx);
+
+    const infoEl = document.getElementById('cameraPaginationInfo');
+    const pageEl = document.getElementById('cameraPageNumber');
+    const prevBtn = document.getElementById('cameraPrevBtn');
+    const nextBtn = document.getElementById('cameraNextBtn');
+
+    if (infoEl) infoEl.textContent = `Menampilkan ${total === 0 ? 0 : startIdx + 1} - ${endIdx} dari ${total} kamera`;
+    if (pageEl) pageEl.textContent = `Hal ${cameraState.page} dari ${totalPages}`;
+    if (prevBtn) prevBtn.disabled = cameraState.page <= 1;
+    if (nextBtn) nextBtn.disabled = cameraState.page >= totalPages;
+
+    if (pageItems.length === 0) {
+        table.innerHTML = `<tr><td colspan="5" class="text-center text-muted py-5">${query ? 'Tidak ada kamera yang cocok dengan pencarian.' : 'Belum ada kamera.'}</td></tr>`;
+        return;
+    }
+
+    table.innerHTML = pageItems.map((camera, i) => `
+        <tr>
+            <td class="text-center text-muted fw-semibold">${startIdx + i + 1}</td>
+            <td><strong>${esc(camera.name)}</strong></td>
+            <td class="camera-url">${esc(camera.url)}</td>
+            <td class="text-center">
+                <span class="status ${camera.active ? 'success' : 'warning'}">${camera.active ? 'Aktif' : 'Nonaktif'}</span>
+            </td>
+            <td class="text-center">
+                <div class="table-actions justify-content-center">
+                    <button class="action-toggle ${camera.active ? 'deactivate' : 'activate'}" data-action="toggle" data-id="${camera.id}">
+                        ${camera.active ? 'Nonaktifkan' : 'Aktifkan'}
+                    </button>
+                    <button class="action-edit" data-action="edit" data-id="${camera.id}">Edit</button>
+                    <button class="action-delete" data-action="delete" data-id="${camera.id}">Hapus</button>
+                </div>
+            </td>
+        </tr>
+    `).join('');
+}
+
 async function loadCameras() {
     try {
         const result = await json('/api/cameras');
-        const cameras = result.data || [];
+        allCameras = result.data || [];
         const count = document.getElementById('cameraCountTitle');
-        if (count) count.textContent = cameras.length;
+        if (count) count.textContent = allCameras.length;
 
         const select = document.getElementById('cameraSelect');
         if (select) {
-            select.innerHTML = cameras.map(item => `<option value="${item.id}">${esc(item.name)}</option>`).join('') || '<option value="">Belum ada kamera</option>';
+            select.innerHTML = allCameras.map(item => `<option value="${item.id}">${esc(item.name)}</option>`).join('') || '<option value="">Belum ada kamera</option>';
         }
 
-        const table = document.getElementById('cameraTable');
-        if (table) {
-            table.innerHTML = cameras.map(camera => `
-                <tr>
-                    <td><strong>${esc(camera.name)}</strong></td>
-                    <td class="camera-url">${esc(camera.url)}</td>
-                    <td><span class="status ${camera.active ? 'success' : 'warning'}">${camera.active ? 'Aktif' : 'Nonaktif'}</span></td>
-                    <td>
-                        <div class="table-actions">
-                            <button class="action-toggle ${camera.active ? 'deactivate' : 'activate'}" data-action="toggle" data-id="${camera.id}">
-                                ${camera.active ? 'Nonaktifkan' : 'Aktifkan'}
-                            </button>
-                            <button class="action-edit" data-action="edit" data-id="${camera.id}">Edit</button>
-                            <button class="action-delete" data-action="delete" data-id="${camera.id}">Hapus</button>
-                        </div>
-                    </td>
-                </tr>
-            `).join('') || '<tr><td colspan="4" class="text-center text-muted py-5">Belum ada kamera.</td></tr>';
-        }
-        return cameras;
+        renderCameraTable();
+        return allCameras;
     } catch (err) {
         console.error('Error loadCameras:', err);
         return [];
@@ -312,10 +311,22 @@ function openCameraModal(camera = null) {
 
 async function exportCameras(format) {
     try {
+        // Excel (.xlsx) dan PDF dibuat di backend (openpyxl / ReportLab) agar
+        // hasilnya rapi dan konsisten dengan data kamera di database.
+        // Backend tetap menghasilkan file valid walau daftar kamera kosong.
+        if (format === 'excel') {
+            window.location.href = '/api/export/cameras';
+            return;
+        }
+        if (format === 'pdf') {
+            window.location.href = '/api/export/cameras/pdf';
+            return;
+        }
+
         const result = await json('/api/cameras');
         const cameras = result.data || [];
         if (!cameras.length) {
-            alert('Belum ada kamera untuk diekspor.');
+            showNotification('Belum ada kamera untuk diekspor.', 'info');
             return;
         }
 
@@ -332,27 +343,50 @@ async function exportCameras(format) {
             a.download = 'cctv_playlist.xspf';
             a.click();
             URL.revokeObjectURL(a.href);
-        } else if (format === 'excel' || format === 'csv') {
-            let csv = 'ID,Nama CCTV,URL Stream,Status\n';
-            cameras.forEach(cam => {
-                csv += `"${cam.id}","${String(cam.name || '').replace(/"/g, '""')}","${String(cam.url || '').replace(/"/g, '""')}","${cam.active ? 'Aktif' : 'Nonaktif'}"\n`;
-            });
-            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
-            const a = document.createElement('a');
-            a.href = URL.createObjectURL(blob);
-            a.download = 'daftar_cctv.csv';
-            a.click();
-            URL.revokeObjectURL(a.href);
         }
     } catch (err) {
         console.error('Gagal mengekspor kamera:', err);
-        alert('Gagal mengekspor kamera.');
+        showNotification('Gagal mengekspor kamera.', 'danger');
     }
 }
 window.exportCameras = exportCameras;
 
 async function initMonitoring() {
-    let cameras = await loadCameras();
+    await loadCameras();
+
+    const searchInput = document.getElementById('cameraSearchInput');
+    let searchTimer = null;
+    if (searchInput) {
+        searchInput.addEventListener('input', () => {
+            clearTimeout(searchTimer);
+            searchTimer = setTimeout(() => {
+                cameraState.search = searchInput.value;
+                cameraState.page = 1;
+                renderCameraTable();
+            }, 250);
+        });
+    }
+
+    document.getElementById('cameraPrevBtn')?.addEventListener('click', () => {
+        if (cameraState.page > 1) {
+            cameraState.page--;
+            renderCameraTable();
+        }
+    });
+
+    document.getElementById('cameraNextBtn')?.addEventListener('click', () => {
+        const query = (cameraState.search || '').trim().toLowerCase();
+        const filtered = allCameras.filter(c => {
+            if (!query) return true;
+            return (c.name || '').toLowerCase().includes(query) || (c.url || '').toLowerCase().includes(query);
+        });
+        const totalPages = Math.ceil(filtered.length / cameraState.limit) || 1;
+        if (cameraState.page < totalPages) {
+            cameraState.page++;
+            renderCameraTable();
+        }
+    });
+
     document.getElementById('cameraForm')?.addEventListener('submit', async event => {
         event.preventDefault();
         const id = document.getElementById('cameraId').value;
@@ -367,18 +401,19 @@ async function initMonitoring() {
             body: JSON.stringify(data)
         });
         bootstrap.Modal.getInstance(document.getElementById('cameraModal')).hide();
-        cameras = await loadCameras();
+        await loadCameras();
     });
 
     document.getElementById('cameraTable')?.addEventListener('click', async event => {
         const button = event.target.closest('button');
         if (!button) return;
         const id = Number(button.dataset.id);
-        const camera = cameras.find(item => item.id === id);
+        const camera = allCameras.find(item => item.id === id);
         if (button.dataset.action === 'edit') openCameraModal(camera);
-        if (button.dataset.action === 'delete' && confirm('Hapus kamera ini?')) {
+        if (button.dataset.action === 'delete' && await askConfirmation('Hapus kamera ini?', 'Hapus Kamera')) {
             await json(`/api/cameras/${id}`, { method: 'DELETE' });
-            cameras = await loadCameras();
+            await loadCameras();
+            showNotification('Kamera berhasil dihapus.', 'success');
         }
         if (button.dataset.action === 'toggle') {
             await json(`/api/cameras/${id}`, {
@@ -386,7 +421,7 @@ async function initMonitoring() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ active: !camera.active })
             });
-            cameras = await loadCameras();
+            await loadCameras();
         }
     });
 }
@@ -399,18 +434,39 @@ async function initMonitoring() {
 async function initDashboard() {
     async function updateDashboardMetrics() {
         try {
-            const summaryRes = await json('/api/statistics/summary');
-            const data = summaryRes.data || {};
+            const summaryRes = await json('/api/analytics?period=today');
+            const data = summaryRes.data?.summary || {};
 
             const elTotalVeh = document.getElementById('totalVehicle');
             const elPlateRead = document.getElementById('plateRead');
             const elNeedCheck = document.getElementById('needCheck');
             const elCamStatus = document.getElementById('cameraStatus');
 
-            if (elTotalVeh) elTotalVeh.textContent = data.today_detections || data.total_full_detections || 0;
-            if (elPlateRead) elPlateRead.textContent = data.plate_success || data.total_plates || 0;
-            if (elNeedCheck) elNeedCheck.textContent = data.need_check || 0;
+            if (elTotalVeh) elTotalVeh.textContent = data.vehicles || 0;
+            if (elPlateRead) elPlateRead.textContent = data.plates || 0;
+            if (elNeedCheck) elNeedCheck.textContent = data.people || 0;
             if (elCamStatus) elCamStatus.textContent = `${data.active_cameras || 0} / ${data.total_cameras || 0}`;
+            const unique = document.getElementById('uniquePlateCount');
+            const people = document.getElementById('peopleTotal');
+            const vehicleLabel = document.getElementById('vehicleFlowLabel');
+            const peopleLabel = document.getElementById('peopleFlowLabel');
+            const vehicleTotal = document.getElementById('vehicleFlowTotal');
+            const peopleTotal = document.getElementById('peopleFlowTotal');
+            const vehicleDetail = document.getElementById('vehicleFlowDetail');
+            const peopleDetail = document.getElementById('peopleFlowDetail');
+            if (unique) unique.textContent = data.unique_plates || 0;
+            if (people) people.textContent = data.people || 0;
+            if (vehicleLabel) vehicleLabel.textContent = `Masuk ${data.vehicle_entry || 0} · Keluar ${data.vehicle_exit || 0}`;
+            if (peopleLabel) peopleLabel.textContent = `Masuk ${data.people_entry || 0} · Keluar ${data.people_exit || 0}`;
+            if (vehicleTotal) vehicleTotal.textContent = data.vehicles || 0;
+            if (peopleTotal) peopleTotal.textContent = data.people || 0;
+            if (vehicleDetail) vehicleDetail.textContent = `Masuk ${data.vehicle_entry || 0} · Keluar ${data.vehicle_exit || 0}`;
+            if (peopleDetail) peopleDetail.textContent = `Masuk ${data.people_entry || 0} · Keluar ${data.people_exit || 0}`;
+            const insight = document.getElementById('dashboardInsights');
+            if (insight) {
+                const insightData = summaryRes.data?.insights || [];
+                insight.innerHTML = insightData.map(item => `<li>${esc(item)}</li>`).join('') || '<li>Belum ada data cukup untuk insight.</li>';
+            }
         } catch (e) {
             console.error('Update dashboard metrics error:', e);
         }
@@ -431,16 +487,27 @@ async function initDashboard() {
     const startBtn = document.getElementById('startStreamBtn');
     const stopBtn = document.getElementById('stopStreamBtn');
     const bboxToggle = document.getElementById('bboxToggle');
+    const detectionMode = document.getElementById('detectionMode');
+    const videoFileLabel = document.getElementById('videoFileLabel');
+    const videoFileInput = document.getElementById('videoFileInput');
+    const processedVideo = document.getElementById('processedVideo');
+    let videoJobPoller = null;
 
     function getStreamUrl(camId) {
         const showBbox = bboxToggle ? (bboxToggle.checked ? 1 : 0) : 1;
-        return `/api/video_feed/${camId}?bbox=${showBbox}&t=${Date.now()}`;
+        return `/api/video_feed/${camId}?bbox=${showBbox}`;
     }
 
     function startCameraStream(camId) {
         if (!streamImg) return;
         const cam = cameras.find(c => String(c.id) === String(camId));
         if (cam) {
+            if (videoJobPoller) clearInterval(videoJobPoller);
+            if (processedVideo) {
+                processedVideo.pause();
+                processedVideo.removeAttribute('src');
+                processedVideo.style.display = 'none';
+            }
             streamImg.src = getStreamUrl(cam.id);
             streamImg.style.display = 'block';
             if (placeholder) placeholder.style.display = 'none';
@@ -452,15 +519,16 @@ async function initDashboard() {
         if (!streamImg) return;
         streamImg.src = '';
         streamImg.style.display = 'none';
+        if (videoJobPoller) clearInterval(videoJobPoller);
+        if (processedVideo) {
+            processedVideo.pause();
+            processedVideo.removeAttribute('src');
+            processedVideo.style.display = 'none';
+        }
         if (placeholder) placeholder.style.display = 'flex';
         if (cameraNameEl) cameraNameEl.textContent = 'Stream Dihentikan';
     }
 
-<<<<<<< Updated upstream
-    const activeCam = cameras.find(item => item.active) || cameras[0];
-    if (activeCam && activeCam.active) {
-        if (select) select.value = activeCam.id;
-=======
     function updateDetectionMode() {
         const videoMode = detectionMode?.value === 'video';
         if (videoFileLabel) videoFileLabel.style.display = videoMode ? 'inline-flex' : 'none';
@@ -513,7 +581,7 @@ async function initDashboard() {
                         processedVideo.src = `${job.output_url}?t=${Date.now()}`;
                         processedVideo.style.display = 'block';
                         processedVideo.load();
-                        processedVideo.play().catch(() => { });
+                        processedVideo.play().catch(() => {});
                     }
                     if (placeholder) placeholder.style.display = 'none';
                     if (cameraNameEl) cameraNameEl.textContent = 'Hasil Deteksi Video';
@@ -548,7 +616,6 @@ async function initDashboard() {
     if (savedMode === 'video' && savedVideoJobId) {
         monitorVideoJob(savedVideoJobId);
     } else if (activeCam && activeCam.active) {
->>>>>>> Stashed changes
         startCameraStream(activeCam.id);
     } else {
         stopCameraStream();
@@ -556,14 +623,28 @@ async function initDashboard() {
 
     if (select) {
         select.addEventListener('change', () => {
+            localStorage.setItem('platevision.cameraId', select.value);
+            if (detectionMode?.value === 'video') return;
             if (select.value) startCameraStream(select.value);
         });
     }
 
+    detectionMode?.addEventListener('change', () => {
+        localStorage.setItem('platevision.mode', detectionMode.value);
+        if (detectionMode.value === 'video') stopCameraStream();
+        updateDetectionMode();
+    });
+
+    videoFileInput?.addEventListener('change', () => {
+        const selectedId = select?.value || activeCam?.id;
+        const file = videoFileInput.files?.[0];
+        if (file && selectedId) startVideoJob(file, selectedId);
+    });
+
     if (bboxToggle) {
         bboxToggle.addEventListener('change', () => {
             const selectedId = select?.value || activeCam?.id;
-            if (selectedId && streamImg && streamImg.style.display !== 'none') {
+            if (selectedId && detectionMode?.value !== 'video' && streamImg && streamImg.style.display !== 'none') {
                 startCameraStream(selectedId);
             }
         });
@@ -572,62 +653,57 @@ async function initDashboard() {
     if (startBtn) {
         startBtn.addEventListener('click', () => {
             const selectedId = select?.value || activeCam?.id;
-            if (selectedId) startCameraStream(selectedId);
+            if (!selectedId) return;
+            if (detectionMode?.value === 'video') {
+                startVideoJob(videoFileInput?.files?.[0], selectedId);
+            } else {
+                startCameraStream(selectedId);
+            }
         });
     }
 
     if (stopBtn) {
         stopBtn.addEventListener('click', () => {
+            localStorage.removeItem('platevision.videoJobId');
             stopCameraStream();
         });
     }
 
+    updateDetectionMode();
+
     async function refreshRecentList() {
         try {
-            // Hanya ambil deteksi valid (Terbaca & Perlu cek), kecualikan status Gagal
-            const detRes = await json('/api/detections?limit=12&valid_only=1');
-            const rawItems = detRes.data || [];
-            const items = rawItems.filter(item => item.status !== 'Gagal' && item.status_code !== 0).slice(0, 6);
+            const detRes = await json('/api/detections?limit=6');
+            const items = detRes.data || [];
             const recent = document.getElementById('recentList');
 
             if (recent) {
                 if (items.length === 0) {
-                    recent.innerHTML = '<div class="empty-state py-4 text-muted text-center"><i class="bi bi-shield-check d-block fs-3 mb-1 text-secondary"></i>Belum ada deteksi valid</div>';
+                    recent.innerHTML = '<div class="empty-state py-4 text-muted text-center">Belum ada deteksi</div>';
                     return;
                 }
 
                 recent.innerHTML = items.map(item => {
-                    const isPlate = item.type === 'plate' || Boolean(item.plate && item.plate !== '-');
-                    const label = isPlate ? esc(item.plate) : 'Wajah / Pengendara';
-                    const icon = isPlate ? 'P' : '<i class="bi bi-person-fill"></i>';
-                    const photoPath = item.face_image_path || item.plate_image_path || '';
-                    const cleanPhoto = photoPath ? ('/' + photoPath.replace(/^\/+/, '')) : '';
-
-                    let avatarHtml = '';
-                    if (cleanPhoto) {
-                        avatarHtml = `
-                            <div class="detection-avatar-wrapper" title="Klik untuk lihat foto asli">
-                                <img src="${cleanPhoto}" class="detection-avatar" alt="${label}" onerror="this.style.display='none'; if(this.nextElementSibling) this.nextElementSibling.style.display='flex';" />
-                                <div class="plate-icon ${isPlate ? '' : 'bg-primary text-white'}" style="display: none; width: 100%; height: 100%; border-radius: 0;">${icon}</div>
-                            </div>
-                        `;
+                    const isVehicle = item.object_type === 'vehicle' || item.type === 'vehicle' || item.type === 'vehicle_with_plate' || item.type === 'plate';
+                    const isPlate = item.type === 'vehicle_with_plate' || Boolean(item.plate && item.plate !== '-');
+                    const label = isVehicle ? (isPlate ? esc(item.plate) : 'Kendaraan') : 'Orang';
+                    const icon = isVehicle ? 'K' : '<i class="bi bi-person-fill"></i>';
+                    let photoPath = '';
+                    if (isVehicle) {
+                        photoPath = item.vehicle_image_path || item.vehicleImagePath || item.plate_image_path || item.plateImagePath || '';
                     } else {
-                        avatarHtml = `
-                            <div class="detection-avatar-wrapper">
-                                <div class="plate-icon ${isPlate ? '' : 'bg-primary text-white'}" style="width: 100%; height: 100%; border-radius: 0;">${icon}</div>
-                            </div>
-                        `;
+                        photoPath = item.face_image_path || item.faceImagePath || '';
                     }
 
                     return `
-                        <div class="recent recent-detection-item d-flex align-items-center justify-content-between p-2 rounded mb-2 bg-white shadow-xs" 
-                             style="cursor: pointer;" 
-                             onclick="openImageModal('${photoPath}', '${label}', '${esc(item.camera)} · ${esc(item.timestamp)}', 'Akurasi AI: <b>${item.confidence_percent}%</b> · Status: <b>${esc(item.status)}</b>')">
+                        <div class="recent d-flex align-items-center justify-content-between p-2 rounded mb-2" 
+                             style="cursor: pointer; transition: background 0.2s;" 
+                             onclick="openImageModal('${photoPath}', '${label}', '${esc(item.camera)} · ${esc(item.timestamp)}', 'Akurasi AI: <b>${item.confidence_percent}%</b> · Status: <b>${esc(item.status)}</b>', '${item.object_type}')">
                             <div class="d-flex align-items-center gap-3">
-                                ${avatarHtml}
+                                <div class="plate-icon ${isPlate ? '' : 'bg-primary text-white'}">${icon}</div>
                                 <div class="recent-info">
-                                    <strong class="d-block text-dark ${isPlate ? 'recent-plate-badge' : ''}">${label}</strong>
-                                    <span class="text-muted small"><i class="bi bi-camera-video me-1"></i>${esc(item.camera)} · ${esc(item.timestamp)}</span>
+                                    <strong class="d-block">${label}</strong>
+                                    <span class="text-muted small">${esc(item.camera)} · ${esc(item.timestamp)}</span>
                                 </div>
                             </div>
                             <div class="text-end">
@@ -668,7 +744,10 @@ let detState = {
     type: 'all',
     status: 'all',
     camera_id: '',
-    search: ''
+    search: '',
+    period: 'today',
+    start_date: '',
+    end_date: ''
 };
 
 async function loadDetections() {
@@ -684,7 +763,8 @@ async function loadDetections() {
             type: detState.type,
             status: detState.status,
             camera_id: detState.camera_id,
-            search: detState.search
+            search: detState.search,
+            ...getStateDateRange(detState)
         });
 
         const res = await json(`/api/detections?${queryParams.toString()}`);
@@ -709,16 +789,16 @@ async function loadDetections() {
         }
 
         tableBody.innerHTML = items.map(item => {
-            const isPlate = item.type === 'plate' || (item.plate && item.plate !== '-');
-            const targetLabel = isPlate ? `<strong>${esc(item.plate)}</strong>` : `<span class="text-muted fst-italic">Wajah / Pejalan Kaki</span>`;
-            
+            const isVehicle = item.object_type === 'vehicle' || item.type === 'vehicle' || item.type === 'vehicle_with_plate' || item.type === 'plate';
+            const isPlate = item.type === 'vehicle_with_plate' || (isVehicle && item.has_plate);
+            const targetLabel = isVehicle ? `<strong class=\"d-block\">${esc(isPlate ? item.plate : 'Kendaraan')}</strong>` : `<span class=\"text-muted fst-italic\">Orang</span>`;
             let typeBadge = '';
-            if (item.type === 'combined') {
-                typeBadge = `<span class="badge bg-primary-subtle text-primary border border-primary-subtle">Terpadu (Plat + Wajah)</span>`;
-            } else if (item.type === 'plate') {
-                typeBadge = `<span class="badge bg-info-subtle text-info border border-info-subtle"><i class="bi bi-card-heading"></i> Plat Nomor</span>`;
+            if (isPlate) {
+                typeBadge = `<span class=\"badge bg-info-subtle text-info border border-info-subtle\"><i class=\"bi bi-car-front\"></i> Kendaraan / Plat Nomor</span>`;
+            } else if (isVehicle) {
+                typeBadge = `<span class=\"badge bg-primary-subtle text-primary border border-primary-subtle\"><i class=\"bi bi-car-front\"></i> Kendaraan</span>`;
             } else {
-                typeBadge = `<span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle"><i class="bi bi-person"></i> Orang</span>`;
+                typeBadge = `<span class=\"badge bg-secondary-subtle text-secondary border border-secondary-subtle\"><i class=\"bi bi-person\"></i> Orang</span>`;
             }
 
             let statusBadge = '';
@@ -730,21 +810,17 @@ async function loadDetections() {
                 statusBadge = `<span class="badge bg-danger-subtle text-danger border border-danger-subtle">Gagal</span>`;
             }
 
-<<<<<<< Updated upstream
-            const photo = item.plate_image_path || item.face_image_path || '';
-=======
             let photo = '';
-            if (isVehicle) {
-                photo = item.vehicle_image_path || item.vehicleImagePath || item.plate_image_path || item.plateImagePath || '';
-            } else {
-                photo = item.face_image_path || item.faceImagePath || '';
-            }
+        if (isVehicle) {
+            photo = item.vehicle_image_path || item.vehicleImagePath || item.plate_image_path || item.plateImagePath || '';
+        } else {
+            photo = item.face_image_path || item.faceImagePath || '';
+        }
             const confidenceText = isPlate
                 ? `Kendaraan ${item.vehicle_confidence_percent || 0}% · Plat ${item.plate_confidence_percent || 0}% · OCR ${item.ocr_confidence_percent || 0}%`
                 : (isVehicle ? `Kendaraan ${item.vehicle_confidence_percent || item.confidence_percent || 0}%` : `Orang ${item.person_confidence_percent || item.confidence_percent || 0}%`);
->>>>>>> Stashed changes
             const thumbHtml = photo
-                ? `<img src="/${esc(photo.replace(/^\/+/, ''))}" alt="Thumb" class="rounded border" style="width: 50px; height: 36px; object-fit: cover; cursor: pointer;" onclick="openImageModal('${esc(photo)}', '${esc(item.plate || 'Deteksi')}', '${esc(item.camera)} · ${esc(item.timestamp)}', 'Akurasi: <b>${item.confidence_percent}%</b>')">`
+                ? `<img src="/${esc(photo.replace(/^\/+/, ''))}" alt="Thumb" class="rounded border" style="width: 50px; height: 36px; object-fit: cover; cursor: pointer;" onclick="openImageModal('${esc(photo)}', '${esc(item.plate || 'Deteksi')}', '${esc(item.camera)} · ${esc(item.timestamp)}', '${esc(confidenceText)}')">`
                 : `<div class="rounded border bg-light text-muted d-flex align-items-center justify-content-center small" style="width: 50px; height: 36px;"><i class="bi bi-image"></i></div>`;
 
             return `
@@ -764,8 +840,11 @@ async function loadDetections() {
                     <td><span class="small text-muted">${esc(item.timestamp)}</span></td>
                     <td>${statusBadge}</td>
                     <td class="text-center">
-                        <button class="btn btn-outline-primary btn-sm px-2 py-1" title="Lihat Foto" onclick="openImageModal('${esc(photo)}', '${esc(item.plate || 'Detail Deteksi')}', '${esc(item.camera)} · ${esc(item.timestamp)}', 'Akurasi: <b>${item.confidence_percent}%</b> · Status: <b>${esc(item.status)}</b>')">
+                        <button class="btn btn-outline-primary btn-sm px-2 py-1" title="Lihat Foto" onclick="openImageModal('${esc(photo)}', '${esc(item.plate || 'Detail Deteksi')}', '${esc(item.camera)} · ${esc(item.timestamp)}', '${esc(confidenceText)} · Status: ${esc(item.status)}')">
                             <i class="bi bi-eye"></i>
+                        </button>
+                        <button class="btn btn-outline-danger btn-sm px-2 py-1" title="Hapus Deteksi" onclick="deleteDetection(${item.id})">
+                            <i class="bi bi-trash"></i>
                         </button>
                     </td>
                 </tr>
@@ -777,7 +856,22 @@ async function loadDetections() {
     }
 }
 
+async function deleteDetection(detectionId) {
+    if (!await askConfirmation('Hapus histori deteksi ini beserta capture terkait?', 'Hapus Deteksi')) return;
+    try {
+        const result = await json(`/api/detections/${encodeURIComponent(detectionId)}`, { method: 'DELETE' });
+        if (!result.success) throw new Error(result.message || 'Penghapusan gagal');
+        await loadDetections();
+    } catch (error) {
+        console.error('Error deleteDetection:', error);
+        showNotification(error.message || 'Gagal menghapus deteksi.', 'danger');
+    }
+}
+window.deleteDetection = deleteDetection;
+
 async function initDetectionsPage() {
+    setDateFilterLimits();
+
     try {
         const camRes = await json('/api/cameras');
         const cams = camRes.data || [];
@@ -790,7 +884,17 @@ async function initDetectionsPage() {
                 loadDetections();
             });
         }
-    } catch (e) { }
+    } catch (e) {}
+
+    const typeSelect = document.getElementById('detTypeFilter');
+    if (typeSelect) {
+        typeSelect.value = detState.type || 'all';
+        typeSelect.addEventListener('change', () => {
+            detState.type = typeSelect.value;
+            detState.page = 1;
+            loadDetections();
+        });
+    }
 
     const typeGroup = document.getElementById('detTypeButtonGroup');
     if (typeGroup) {
@@ -827,6 +931,63 @@ async function initDetectionsPage() {
         });
     }
 
+    const periodSelect = document.getElementById('detPeriodFilter');
+    if (periodSelect) {
+        periodSelect.addEventListener('change', () => {
+            detState.period = periodSelect.value;
+            detState.start_date = '';
+            detState.end_date = '';
+            document.getElementById('detStartDate').value = '';
+            document.getElementById('detEndDate').value = '';
+            detState.page = 1;
+            loadDetections();
+        });
+    }
+
+    ['detStartDate', 'detEndDate'].forEach(id => {
+        document.getElementById(id)?.addEventListener('change', () => {
+            const p = document.getElementById('detPeriodFilter');
+            if (p) p.value = 'custom';
+            detState.period = 'custom';
+        });
+    });
+
+    document.getElementById('detDateApply')?.addEventListener('click', () => {
+        if (applyCustomDateRange(detState, 'detStartDate', 'detEndDate')) {
+            detState.page = 1;
+            loadDetections();
+        }
+    });
+
+    document.getElementById('detResetBtn')?.addEventListener('click', () => {
+        detState = {
+            page: 1,
+            limit: 15,
+            type: 'all',
+            status: 'all',
+            camera_id: '',
+            search: '',
+            period: 'today',
+            start_date: '',
+            end_date: ''
+        };
+        const searchInput = document.getElementById('detectionSearch');
+        if (searchInput) searchInput.value = '';
+        const typeFilter = document.getElementById('detTypeFilter');
+        if (typeFilter) typeFilter.value = 'all';
+        const camFilter = document.getElementById('detCameraFilter');
+        if (camFilter) camFilter.value = '';
+        const statusFilter = document.getElementById('detStatusFilter');
+        if (statusFilter) statusFilter.value = 'all';
+        const periodFilter = document.getElementById('detPeriodFilter');
+        if (periodFilter) periodFilter.value = 'today';
+        const startInput = document.getElementById('detStartDate');
+        if (startInput) startInput.value = '';
+        const endInput = document.getElementById('detEndDate');
+        if (endInput) endInput.value = '';
+        loadDetections();
+    });
+
     document.getElementById('detPrevBtn')?.addEventListener('click', () => {
         if (detState.page > 1) {
             detState.page--;
@@ -842,10 +1003,26 @@ async function initDetectionsPage() {
     await loadDetections();
 }
 
+// Parameter filter SAMA dengan yang dipakai loadDetections() (tanpa page/limit)
+function detectionExportParams() {
+    return new URLSearchParams({
+        type: detState.type,
+        status: detState.status,
+        camera_id: detState.camera_id,
+        search: detState.search,
+        ...getStateDateRange(detState)
+    });
+}
+
 function exportDetections() {
-    window.location.href = '/api/export/detections';
+    window.location.href = `/api/export/detections?${detectionExportParams().toString()}`;
 }
 window.exportDetections = exportDetections;
+
+function exportDetectionsPdf() {
+    window.location.href = `/api/export/detections/pdf?${detectionExportParams().toString()}`;
+}
+window.exportDetectionsPdf = exportDetectionsPdf;
 
 
 // ============================================================
@@ -857,7 +1034,10 @@ let plateState = {
     limit: 15,
     search: '',
     camera_id: '',
-    status: 'all'
+    status: 'all',
+    period: 'today',
+    start_date: '',
+    end_date: ''
 };
 
 async function loadPlateHistory() {
@@ -872,7 +1052,8 @@ async function loadPlateHistory() {
             limit: plateState.limit,
             search: plateState.search,
             camera_id: plateState.camera_id,
-            status: plateState.status
+            status: plateState.status,
+            ...getStateDateRange(plateState)
         });
 
         const res = await json(`/api/plate/history?${queryParams.toString()}`);
@@ -929,6 +1110,9 @@ async function loadPlateHistory() {
                         <button class="btn btn-outline-primary btn-sm px-2 py-1" title="Lihat Foto Crop" onclick="openImageModal('${esc(photo)}', 'Plat Nomor: ${esc(item.plate)}', '${esc(item.camera)} · ${esc(item.timestamp)}', 'Confidence OCR: <b>${item.confidence_percent}%</b> · Status: <b>${esc(item.status)}</b>')">
                             <i class="bi bi-eye"></i>
                         </button>
+                        <button class="btn btn-outline-danger btn-sm px-2 py-1" title="Hapus Riwayat Plat" onclick="deletePlateHistory(${item.id})">
+                            <i class="bi bi-trash"></i>
+                        </button>
                     </td>
                 </tr>
             `;
@@ -939,7 +1123,22 @@ async function loadPlateHistory() {
     }
 }
 
+async function deletePlateHistory(plateId) {
+    if (!await askConfirmation('Hapus riwayat plat ini beserta event dan capture terkait?', 'Hapus Riwayat Plat')) return;
+    try {
+        const result = await json(`/api/plate/history/${encodeURIComponent(plateId)}`, { method: 'DELETE' });
+        if (!result.success) throw new Error(result.message || 'Penghapusan gagal');
+        await loadPlateHistory();
+    } catch (error) {
+        console.error('Error deletePlateHistory:', error);
+        showNotification(error.message || 'Gagal menghapus riwayat plat.', 'danger');
+    }
+}
+window.deletePlateHistory = deletePlateHistory;
+
 async function initHistoryPage() {
+    setDateFilterLimits();
+
     try {
         const camRes = await json('/api/cameras');
         const cams = camRes.data || [];
@@ -952,7 +1151,7 @@ async function initHistoryPage() {
                 loadPlateHistory();
             });
         }
-    } catch (e) { }
+    } catch (e) {}
 
     const statusSelect = document.getElementById('plateStatusFilter');
     if (statusSelect) {
@@ -976,6 +1175,60 @@ async function initHistoryPage() {
         });
     }
 
+    const periodSelect = document.getElementById('platePeriodFilter');
+    if (periodSelect) {
+        periodSelect.addEventListener('change', () => {
+            plateState.period = periodSelect.value;
+            plateState.start_date = '';
+            plateState.end_date = '';
+            document.getElementById('plateStartDate').value = '';
+            document.getElementById('plateEndDate').value = '';
+            plateState.page = 1;
+            loadPlateHistory();
+        });
+    }
+
+    ['plateStartDate', 'plateEndDate'].forEach(id => {
+        document.getElementById(id)?.addEventListener('change', () => {
+            const p = document.getElementById('platePeriodFilter');
+            if (p) p.value = 'custom';
+            plateState.period = 'custom';
+        });
+    });
+
+    document.getElementById('plateDateApply')?.addEventListener('click', () => {
+        if (applyCustomDateRange(plateState, 'plateStartDate', 'plateEndDate')) {
+            plateState.page = 1;
+            loadPlateHistory();
+        }
+    });
+
+    document.getElementById('plateResetBtn')?.addEventListener('click', () => {
+        plateState = {
+            page: 1,
+            limit: 15,
+            search: '',
+            camera_id: '',
+            status: 'all',
+            period: 'today',
+            start_date: '',
+            end_date: ''
+        };
+        const searchInput = document.getElementById('plateSearch');
+        if (searchInput) searchInput.value = '';
+        const camFilter = document.getElementById('plateCameraFilter');
+        if (camFilter) camFilter.value = '';
+        const statusFilter = document.getElementById('plateStatusFilter');
+        if (statusFilter) statusFilter.value = 'all';
+        const periodFilter = document.getElementById('platePeriodFilter');
+        if (periodFilter) periodFilter.value = 'today';
+        const startInput = document.getElementById('plateStartDate');
+        if (startInput) startInput.value = '';
+        const endInput = document.getElementById('plateEndDate');
+        if (endInput) endInput.value = '';
+        loadPlateHistory();
+    });
+
     document.getElementById('platePrevBtn')?.addEventListener('click', () => {
         if (plateState.page > 1) {
             plateState.page--;
@@ -991,15 +1244,166 @@ async function initHistoryPage() {
     await loadPlateHistory();
 }
 
+// Parameter filter SAMA dengan yang dipakai loadPlateHistory() (tanpa page/limit)
+function plateExportParams() {
+    return new URLSearchParams({
+        search: plateState.search,
+        camera_id: plateState.camera_id,
+        status: plateState.status,
+        ...getStateDateRange(plateState)
+    });
+}
+
 function exportPlates() {
-    window.location.href = '/api/export/plates';
+    window.location.href = `/api/export/plates?${plateExportParams().toString()}`;
 }
 window.exportPlates = exportPlates;
+
+function exportPlatesPdf() {
+    window.location.href = `/api/export/plates/pdf?${plateExportParams().toString()}`;
+}
+window.exportPlatesPdf = exportPlatesPdf;
 
 
 // ============================================================
 // MODUL: STATISTIK STANDAR PERUSAHAAN (ENTERPRISE ANALYTICS)
 // ============================================================
+
+function analyticsParams(prefix, periodOverride = '') {
+    const period = periodOverride || document.getElementById(`${prefix}Period`)?.value || 'today';
+    const params = new URLSearchParams({ period });
+    const start = document.getElementById(`${prefix}Start`)?.value;
+    const end = document.getElementById(`${prefix}End`)?.value;
+    const camera = document.getElementById(`${prefix}Camera`)?.value;
+    const region = document.getElementById(`${prefix}Region`)?.value;
+    const gate = document.getElementById(`${prefix}Gate`)?.value;
+    const type = document.getElementById(`${prefix}ObjectType`)?.value;
+    const direction = document.getElementById(`${prefix}Direction`)?.value;
+    if (start) params.set('start_date', start);
+    if (end) params.set('end_date', end);
+    if (camera) params.set('camera_id', camera);
+    if (region) params.set('region', region);
+    if (gate) params.set('gate', gate);
+    if (type) params.set('object_type', type);
+    if (direction) params.set('direction', direction);
+    return params;
+}
+
+async function populateAnalyticsCameraSelect(id) {
+    const select = document.getElementById(id);
+    if (!select) return;
+    const res = await json('/api/cameras').catch(() => ({ data: [] }));
+    select.innerHTML = '<option value="">Semua CCTV</option>' + (res.data || []).map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+}
+
+async function loadRecap() {
+    const start = document.getElementById('recapStart')?.value || '';
+    const end = document.getElementById('recapEnd')?.value || '';
+    if (start && end && start > end) {
+        throw new Error('Tanggal mulai tidak boleh lebih besar dari tanggal akhir.');
+    }
+
+    const applyButton = document.getElementById('recapApply');
+    const cameraTable = document.getElementById('recapCameraTable');
+    const dailyTable = document.getElementById('recapDailyTable');
+    if (applyButton) applyButton.disabled = true;
+    if (cameraTable) cameraTable.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">Memuat data sesuai filter...</td></tr>';
+    if (dailyTable) dailyTable.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">Memuat data sesuai filter...</td></tr>';
+
+    try {
+        const res = await json(`/api/analytics?${analyticsParams('recap').toString()}`);
+        if (!res.success) throw new Error(res.message || 'Data rekap tidak dapat dimuat.');
+
+        const data = res.data || {};
+        const s = data.summary || {};
+        const cards = [
+            ['Kendaraan masuk', s.vehicle_entry], ['Kendaraan keluar', s.vehicle_exit], ['Total kendaraan', s.vehicles],
+            ['Orang masuk', s.people_entry], ['Orang keluar', s.people_exit], ['Total orang', s.people]
+        ];
+        const totals = document.getElementById('recapTotals');
+        if (totals) totals.innerHTML = cards.map(([label, value]) => `<div class="col-xl-2 col-md-4 col-6"><div class="stat-card recap-stat"><div><span>${label}</span><strong>${value || 0}</strong></div></div></div>`).join('');
+        if (cameraTable) cameraTable.innerHTML = (data.cameras || []).map(c => `<tr><td><strong>${esc(c.camera)}</strong></td><td>${esc(c.direction)}</td><td>${c.vehicles}</td><td>${c.people}</td><td>${c.unique_plates}</td><td><span class="status ${c.status === 'Aktif' ? 'success' : 'warning'}">${c.status}</span></td></tr>`).join('') || '<tr><td colspan="6" class="text-center text-muted py-4">Belum ada event pada filter ini.</td></tr>';
+        if (dailyTable) dailyTable.innerHTML = (data.daily || []).map(d => `<tr><td>${esc(d.date)}</td><td>${d.vehicles}</td><td>${d.unique_plates}</td><td>${d.entry}</td><td>${d.exit}</td><td>${d.people}</td></tr>`).join('') || '<tr><td colspan="6" class="text-center text-muted py-4">Belum ada data harian.</td></tr>';
+    } catch (error) {
+        const message = esc(error.message || 'Gagal memuat data rekapitulasi.');
+        if (cameraTable) cameraTable.innerHTML = `<tr><td colspan="6" class="text-center text-danger py-4">${message}</td></tr>`;
+        if (dailyTable) dailyTable.innerHTML = `<tr><td colspan="6" class="text-center text-danger py-4">${message}</td></tr>`;
+        throw error;
+    } finally {
+        if (applyButton) applyButton.disabled = false;
+    }
+}
+
+function exportRecap() {
+    window.location.href = `/api/export/recap?${analyticsParams('recap').toString()}`;
+}
+window.exportRecap = exportRecap;
+
+function exportRecapPdf() {
+    window.location.href = `/api/export/recap/pdf?${analyticsParams('recap').toString()}`;
+}
+window.exportRecapPdf = exportRecapPdf;
+
+window.loadRecap = loadRecap;
+
+async function initRecap() {
+    setDateFilterLimits();
+    await populateAnalyticsCameraSelect('recapCamera');
+    const recapPeriod = document.getElementById('recapPeriod');
+    if (recapPeriod) {
+        recapPeriod.addEventListener('change', () => {
+            if (recapPeriod.value !== 'custom') {
+                const s = document.getElementById('recapStart');
+                const e = document.getElementById('recapEnd');
+                if (s) s.value = '';
+                if (e) e.value = '';
+            }
+            loadRecap().catch(err => {
+                if (err.message) showNotification(err.message, 'warning');
+            });
+        });
+    }
+
+    ['recapStart', 'recapEnd'].forEach(id => {
+        document.getElementById(id)?.addEventListener('change', () => {
+            if (recapPeriod) recapPeriod.value = 'custom';
+        });
+    });
+
+    ['recapObjectType', 'recapCamera', 'recapDirection'].forEach(id => {
+        document.getElementById(id)?.addEventListener('change', () => {
+            loadRecap().catch(err => {
+                if (err.message) showNotification(err.message, 'warning');
+            });
+        });
+    });
+
+    document.getElementById('recapApply')?.addEventListener('click', () => {
+        loadRecap().catch(err => {
+            if (err.message) showNotification(err.message, 'warning');
+        });
+    });
+    document.getElementById('recapResetBtn')?.addEventListener('click', () => {
+        const period = document.getElementById('recapPeriod');
+        if (period) period.value = 'today';
+        const start = document.getElementById('recapStart');
+        if (start) start.value = '';
+        const end = document.getElementById('recapEnd');
+        if (end) end.value = '';
+        const objType = document.getElementById('recapObjectType');
+        if (objType) objType.value = '';
+        const cam = document.getElementById('recapCamera');
+        if (cam) cam.value = '';
+        const dir = document.getElementById('recapDirection');
+        if (dir) dir.value = '';
+        loadRecap().catch(err => {
+            if (err.message) showNotification(err.message, 'warning');
+        });
+    });
+    document.getElementById('recapExport')?.addEventListener('click', exportRecap);
+    document.getElementById('recapExportPdf')?.addEventListener('click', exportRecapPdf);
+    loadRecap().catch(err => console.error('Error loadRecap:', err));
+}
 
 window._currentStatsPeriod = 'today';
 window._trendChart = null;
@@ -1008,6 +1412,51 @@ window._cameraChart = null;
 
 async function loadEnterpriseStatistics(period = 'today') {
     window._currentStatsPeriod = period;
+
+    const periodSelect = document.getElementById('statsPeriod');
+    if (periodSelect) periodSelect.value = period;
+    const start = document.getElementById('statsStart')?.value || '';
+    const end = document.getElementById('statsEnd')?.value || '';
+    if (start && end && start > end) {
+        throw new Error('Tanggal mulai tidak boleh lebih besar dari tanggal akhir.');
+    }
+
+    const applyButton = document.getElementById('statsApply');
+    if (applyButton) applyButton.disabled = true;
+    const analyticsRes = await json(`/api/analytics?${analyticsParams('stats', period).toString()}`).catch(() => null);
+    if (analyticsRes?.success && analyticsRes.data) {
+        const data = analyticsRes.data;
+        const s = data.summary || {};
+        const kpiValues = {
+            kpiTotalDets: s.vehicles, kpiTotalPlates: s.plates, kpiTotalFaces: s.people,
+            kpiPlateRate: s.vehicles ? `${Math.round((s.plates / s.vehicles) * 100)}%` : '0%',
+            kpiAvgConf: '-', kpiNeedCheck: '-', kpiCamStatus: `${s.active_cameras || 0} / ${s.total_cameras || 0}`, kpiCamUptime: '-'
+        };
+        Object.entries(kpiValues).forEach(([id, value]) => { const el = document.getElementById(id); if (el) el.textContent = value ?? 0; });
+        const trend = data.daily?.length ? data.daily : data.hourly;
+        const labels = trend.map(item => item.date || item.label);
+        const vehicleData = trend.map(item => item.vehicles || 0);
+        const peopleData = trend.map(item => item.people || 0);
+        const trendCanvas = document.getElementById('trendChartCanvas');
+        if (trendCanvas && window.Chart) {
+            if (window._trendChart) window._trendChart.destroy();
+            window._trendChart = new Chart(trendCanvas, { type: 'line', data: { labels, datasets: [{ label: 'Kendaraan', data: vehicleData, borderColor: '#2563eb', backgroundColor: 'rgba(37,99,235,.12)', fill: true, tension: .3 }, { label: 'Orang', data: peopleData, borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,.08)', fill: true, tension: .3 }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true } } } });
+        }
+        const camCanvas = document.getElementById('cameraBarCanvas');
+        if (camCanvas && window.Chart) {
+            if (window._cameraChart) window._cameraChart.destroy();
+            window._cameraChart = new Chart(camCanvas, { type: 'bar', data: { labels: (data.cameras || []).map(c => c.camera), datasets: [{ label: 'Kendaraan', data: (data.cameras || []).map(c => c.vehicles), backgroundColor: '#2563eb' }, { label: 'Orang', data: (data.cameras || []).map(c => c.people), backgroundColor: '#f59e0b' }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true } } } });
+        }
+        const peak = (data.hourly || []).reduce((best, item) => item.vehicles > (best?.vehicles || -1) ? item : best, null);
+        const peakContainer = document.getElementById('peakHoursList');
+        if (peakContainer) peakContainer.innerHTML = peak ? `<div class="p-3 bg-light rounded border"><strong>${peak.label} - ${String((peak.hour + 1) % 24).padStart(2, '0')}:00</strong><span class="d-block text-primary mt-1">${peak.vehicles} kendaraan · ${peak.people} orang</span></div>` : '<div class="text-muted">Belum ada data.</div>';
+        const topBody = document.getElementById('topPlatesTable');
+        if (topBody) topBody.innerHTML = (data.top_plates || []).map((p, i) => `<tr><td>${i + 1}</td><td><strong>${esc(p.plate)}</strong></td><td>${p.count} kali</td><td>${esc(p.camera)}</td><td>${esc(p.last_seen)}</td><td>${p.confidence}%</td><td><span class="badge bg-success-subtle text-success">Aktual</span></td></tr>`).join('') || '<tr><td colspan="7" class="text-center text-muted py-4">Belum ada data plat.</td></tr>';
+        const badgeEl = document.getElementById('statsPeriodBadge');
+        if (badgeEl) badgeEl.textContent = { today: 'Hari Ini', '7d': '7 Hari Terakhir', '30d': '30 Hari', all: 'Semua Waktu' }[period] || period;
+        if (applyButton) applyButton.disabled = false;
+        return;
+    }
 
     const badgeEl = document.getElementById('statsPeriodBadge');
     if (badgeEl) {
@@ -1244,17 +1693,83 @@ async function loadEnterpriseStatistics(period = 'today') {
         }
     } catch (e) {
         console.error('Error loadEnterpriseStatistics:', e);
+    } finally {
+        if (applyButton) applyButton.disabled = false;
     }
 }
 window.loadEnterpriseStatistics = loadEnterpriseStatistics;
 
 function exportStatsReport() {
-    const period = window._currentStatsPeriod || 'today';
-    window.location.href = `/api/export/statistics?period=${period}`;
+    const period = window._currentStatsPeriod || document.getElementById('statsPeriod')?.value || 'today';
+    window.location.href = `/api/export/statistics?${analyticsParams('stats', period).toString()}`;
 }
 window.exportStatsReport = exportStatsReport;
 
-function initStatistics() {
+function exportStatsPdf() {
+    const period = window._currentStatsPeriod || document.getElementById('statsPeriod')?.value || 'today';
+    window.location.href = `/api/export/statistics/pdf?${analyticsParams('stats', period).toString()}`;
+}
+window.exportStatsPdf = exportStatsPdf;
+
+async function initStatistics() {
+    setDateFilterLimits();
+    await populateAnalyticsCameraSelect('statsCamera');
+    const statsPeriodSelect = document.getElementById('statsPeriod');
+    if (statsPeriodSelect) {
+        statsPeriodSelect.addEventListener('change', () => {
+            if (statsPeriodSelect.value !== 'custom') {
+                const s = document.getElementById('statsStart');
+                const e = document.getElementById('statsEnd');
+                if (s) s.value = '';
+                if (e) e.value = '';
+            }
+            const period = statsPeriodSelect.value;
+            const periodGroup = document.getElementById('statsPeriodGroup');
+            if (periodGroup) {
+                periodGroup.querySelectorAll('button').forEach(b => {
+                    if (b.dataset.period === period) b.classList.add('active');
+                    else b.classList.remove('active');
+                });
+            }
+            loadEnterpriseStatistics(period).catch(err => console.error('Error loadEnterpriseStatistics:', err));
+        });
+    }
+
+    ['statsStart', 'statsEnd'].forEach(id => {
+        document.getElementById(id)?.addEventListener('change', () => {
+            if (statsPeriodSelect) statsPeriodSelect.value = 'custom';
+        });
+    });
+
+    ['statsObjectType', 'statsCamera'].forEach(id => {
+        document.getElementById(id)?.addEventListener('change', () => {
+            loadEnterpriseStatistics(document.getElementById('statsPeriod')?.value || 'today').catch(err => console.error('Error loadEnterpriseStatistics:', err));
+        });
+    });
+
+    document.getElementById('statsApply')?.addEventListener('click', () => {
+        loadEnterpriseStatistics(document.getElementById('statsPeriod')?.value || 'today').catch(err => showNotification(err.message, 'warning'));
+    });
+    document.getElementById('statsResetBtn')?.addEventListener('click', () => {
+        const period = document.getElementById('statsPeriod');
+        if (period) period.value = 'today';
+        const start = document.getElementById('statsStart');
+        if (start) start.value = '';
+        const end = document.getElementById('statsEnd');
+        if (end) end.value = '';
+        const objType = document.getElementById('statsObjectType');
+        if (objType) objType.value = '';
+        const cam = document.getElementById('statsCamera');
+        if (cam) cam.value = '';
+        const periodGroup = document.getElementById('statsPeriodGroup');
+        if (periodGroup) {
+            periodGroup.querySelectorAll('button').forEach(b => {
+                if (b.dataset.period === 'today') b.classList.add('active');
+                else b.classList.remove('active');
+            });
+        }
+        loadEnterpriseStatistics('today').catch(err => console.error('Error loadEnterpriseStatistics:', err));
+    });
     const periodGroup = document.getElementById('statsPeriodGroup');
     if (periodGroup) {
         periodGroup.addEventListener('click', e => {
@@ -1263,11 +1778,13 @@ function initStatistics() {
             periodGroup.querySelectorAll('button').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
             const period = btn.dataset.period || 'today';
-            loadEnterpriseStatistics(period);
+            const periodSelect = document.getElementById('statsPeriod');
+            if (periodSelect) periodSelect.value = period;
+            loadEnterpriseStatistics(period).catch(err => console.error('Error loadEnterpriseStatistics:', err));
         });
     }
 
-    loadEnterpriseStatistics('today');
+    await loadEnterpriseStatistics(document.getElementById('statsPeriod')?.value || 'today');
 }
 
 
@@ -1283,20 +1800,25 @@ async function loadSettingsFromDb() {
 
         // 1. Isi form
         const opName = document.getElementById('operatorName');
-        const compName = document.getElementById('companyName');
-        const refInt = document.getElementById('refreshInterval');
-        const sysTitle = document.getElementById('systemTitle');
-        const confPlate = document.getElementById('minConfPlate');
-        const confFace = document.getElementById('minConfFace');
-        const streamUrl = document.getElementById('streamUrl');
-
-        if (opName && settings.operator_name) opName.value = settings.operator_name;
-        if (compName && settings.company_name) compName.value = settings.company_name;
-        if (refInt && settings.refresh_interval) refInt.value = settings.refresh_interval;
-        if (sysTitle && settings.system_title) sysTitle.value = settings.system_title;
-        if (confPlate && settings.min_confidence_plate) confPlate.value = settings.min_confidence_plate;
-        if (confFace && settings.min_confidence_face) confFace.value = settings.min_confidence_face;
-        if (streamUrl && settings.stream_url) streamUrl.value = settings.stream_url;
+        const email = document.getElementById('profileEmail');
+        const phone = document.getElementById('profilePhone');
+        const role = document.getElementById('profileRole');
+        if (opName) opName.value = settings.operator_name || 'Administrator';
+        if (email) email.value = settings.profile_email || '';
+        if (phone) phone.value = settings.profile_phone || '';
+        if (role) role.value = settings.profile_role || 'Operator';
+        const displayName = document.getElementById('profileDisplayName');
+        const displayRole = document.getElementById('profileDisplayRole');
+        const topbarName = document.getElementById('topbarName');
+        const topbarRole = document.getElementById('topbarRole');
+        const avatar = document.getElementById('topbarAvatar');
+        const name = settings.operator_name || 'Administrator';
+        const profileRole = settings.profile_role || 'Operator';
+        if (displayName) displayName.textContent = name;
+        if (displayRole) displayRole.textContent = profileRole;
+        if (topbarName) topbarName.textContent = name;
+        if (topbarRole) topbarRole.textContent = profileRole;
+        if (avatar) avatar.textContent = name.charAt(0).toUpperCase();
 
         // 2. Isi diagnostik sistem
         const diagStatus = document.getElementById('diagDbStatus');
@@ -1334,10 +1856,10 @@ async function seedDemoData() {
             body: JSON.stringify({ count: 35 })
         });
 
-        alert(res.message || 'Data simulasi berhasil ditambahkan!');
+        showNotification(res.message || 'Data simulasi berhasil ditambahkan!', 'success');
         await loadSettingsFromDb();
     } catch (e) {
-        alert('Gagal menambahkan data simulasi: ' + e.message);
+        showNotification('Gagal menambahkan data simulasi: ' + e.message, 'danger');
     } finally {
         if (btn) {
             btn.disabled = false;
@@ -1360,12 +1882,9 @@ function initSettings() {
 
         const payload = {
             operator_name: document.getElementById('operatorName')?.value,
-            company_name: document.getElementById('companyName')?.value,
-            refresh_interval: document.getElementById('refreshInterval')?.value,
-            system_title: document.getElementById('systemTitle')?.value,
-            min_confidence_plate: document.getElementById('minConfPlate')?.value,
-            min_confidence_face: document.getElementById('minConfFace')?.value,
-            stream_url: document.getElementById('streamUrl')?.value
+            profile_email: document.getElementById('profileEmail')?.value,
+            profile_phone: document.getElementById('profilePhone')?.value,
+            profile_role: document.getElementById('profileRole')?.value
         };
 
         try {
@@ -1448,12 +1967,120 @@ function initSidebarToggle() {
 
 
 // ============================================================
+// THEME MANAGER (DARK / LIGHT MODE)
+// ============================================================
+
+function getActiveTheme() {
+    return document.documentElement.classList.contains('dark') ? 'dark' : 'light';
+}
+
+function updateThemeUI(theme) {
+    const icon = document.getElementById('themeToggleIcon');
+    const label = document.getElementById('themeToggleLabel');
+    const btn = document.getElementById('themeToggleBtn');
+
+    if (theme === 'dark') {
+        document.documentElement.classList.add('dark');
+        document.documentElement.setAttribute('data-bs-theme', 'dark');
+        if (icon) {
+            icon.className = 'bi bi-sun-fill text-warning';
+        }
+        if (label) {
+            label.textContent = 'Mode Terang';
+        }
+        if (btn) {
+            btn.title = 'Beralih ke Mode Terang';
+            btn.setAttribute('aria-label', 'Beralih ke Mode Terang');
+        }
+    } else {
+        document.documentElement.classList.remove('dark');
+        document.documentElement.setAttribute('data-bs-theme', 'light');
+        if (icon) {
+            icon.className = 'bi bi-moon-stars-fill';
+        }
+        if (label) {
+            label.textContent = 'Mode Gelap';
+        }
+        if (btn) {
+            btn.title = 'Beralih ke Mode Gelap';
+            btn.setAttribute('aria-label', 'Beralih ke Mode Gelap');
+        }
+    }
+
+    refreshChartThemes(theme);
+}
+
+function refreshChartThemes(theme) {
+    if (!window.Chart) return;
+    const isDark = theme === 'dark';
+    const textColor = isDark ? '#94a3b8' : '#64748b';
+    const gridColor = isDark ? 'rgba(255, 255, 255, 0.08)' : '#f1f5f9';
+
+    [window._trendChart, window._cameraChart, window._statusChart].forEach(chart => {
+        if (!chart) return;
+        try {
+            if (chart.options && chart.options.scales) {
+                if (chart.options.scales.x) {
+                    chart.options.scales.x.ticks = chart.options.scales.x.ticks || {};
+                    chart.options.scales.x.ticks.color = textColor;
+                    if (chart.options.scales.x.grid) chart.options.scales.x.grid.color = gridColor;
+                }
+                if (chart.options.scales.y) {
+                    chart.options.scales.y.ticks = chart.options.scales.y.ticks || {};
+                    chart.options.scales.y.ticks.color = textColor;
+                    if (chart.options.scales.y.grid) chart.options.scales.y.grid.color = gridColor;
+                }
+            }
+            if (chart.options && chart.options.plugins && chart.options.plugins.legend) {
+                chart.options.plugins.legend.labels = chart.options.plugins.legend.labels || {};
+                chart.options.plugins.legend.labels.color = textColor;
+            }
+            chart.update();
+        } catch (e) {
+            console.warn('Error updating chart theme:', e);
+        }
+    });
+}
+
+function toggleTheme() {
+    const currentTheme = getActiveTheme();
+    const nextTheme = currentTheme === 'dark' ? 'light' : 'dark';
+    try {
+        localStorage.setItem('platevision_theme', nextTheme);
+        localStorage.setItem('theme', nextTheme);
+    } catch (e) {}
+    updateThemeUI(nextTheme);
+}
+
+function initTheme() {
+    let savedTheme = null;
+    try {
+        savedTheme = localStorage.getItem('platevision_theme') || localStorage.getItem('theme');
+    } catch (e) {}
+
+    if (!savedTheme) {
+        // Default light mode as existing look
+        savedTheme = 'light';
+    }
+
+    updateThemeUI(savedTheme);
+
+    const toggleBtn = document.getElementById('themeToggleBtn');
+    if (toggleBtn) {
+        toggleBtn.addEventListener('click', toggleTheme);
+    }
+}
+window.toggleTheme = toggleTheme;
+window.initTheme = initTheme;
+
+
+// ============================================================
 // INISIALISASI HALAMAN (ROUTING CLIENT-SIDE)
 // ============================================================
 
 document.addEventListener('DOMContentLoaded', () => {
+    initTheme();
     initSidebarToggle();
-    initImagePreviewZoom();
     setInterval(updateClock, 1000);
     updateClock();
 
@@ -1469,7 +2096,10 @@ document.addEventListener('DOMContentLoaded', () => {
     if (document.getElementById('plateHistoryTable')) {
         initHistoryPage();
     }
-    if (document.getElementById('trendChartCanvas')) {
+    if (document.getElementById('recapPage')) {
+        initRecap();
+    }
+    if (document.getElementById('statsApply')) {
         initStatistics();
     }
     if (document.getElementById('settingsForm')) {

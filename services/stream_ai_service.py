@@ -1,25 +1,54 @@
 import os
+import re
 import time
+import threading
+from datetime import datetime
+
+import psutil
+
 import cv2
 import numpy as np
-from datetime import datetime
 from ultralytics import YOLO
 import supervision as sv
+import collections
 
 from ai.plate.detector import PlateDetector
 from ai.plate.ocr import PlateOCR
+from tracker import PlateTracker
 import db
 
+
 # ============================================================
-# KONFIGURASI AI STREAM PIPELINE
+# PATH PROJECT
 # ============================================================
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# File service biasanya berada di folder ai/.
+def _find_project_root():
+    current = os.path.abspath(os.path.dirname(__file__))
+    candidates = [current]
+    parent = current
+    for _ in range(4):
+        parent = os.path.dirname(parent)
+        candidates.append(parent)
+    for candidate in candidates:
+        if (
+            os.path.isfile(os.path.join(candidate, "yolov8n.pt"))
+            or os.path.isdir(os.path.join(candidate, "models"))
+        ):
+            return candidate
+    return current
+
+
+BASE_DIR = _find_project_root()
+
 PERSON_MODEL_PATH = os.path.join(BASE_DIR, "yolov8n.pt")
-PLATE_MODEL_PATH = os.path.join(BASE_DIR, "models", "plate", "license-plate-finetune-v2n.pt")
+PLATE_MODEL_PATH = os.path.join(
+    BASE_DIR,
+    "models",
+    "plate",
+    "license-plate-finetune-v2n.pt",
+)
 
-<<<<<<< Updated upstream
-=======
 CAPTURE_DIR = os.path.join(BASE_DIR, "static", "captures")
 PLATE_CAPTURE_DIR = os.path.join(CAPTURE_DIR, "plates")
 
@@ -250,18 +279,17 @@ PLATE_TRACKER_MAX_HISTORY = 5
 PLATE_PADDING = 0.08
 
 PLATE_REVIEW_CONFIDENCE = 0.60
-PLATE_COOLDOWN = 30.0
-PERSON_COOLDOWN = 30.0
+PLATE_COOLDOWN = 20.0
+PERSON_COOLDOWN = 20.0
+VEHICLE_COOLDOWN = 20.0
 
 # ByteTrack IDs can be reused after an object disappears. Treat a track as a
 # new physical event only after it has been absent for this long.
-TRACK_REUSE_GAP = 5.0
+TRACK_REUSE_GAP = 6.0
 
-PERSON_CAPTURE_CONFIDENCE = 0.40
+PERSON_CAPTURE_CONFIDENCE = 0.30
 MIN_PERSON_CROP_WIDTH = 25
 MIN_PERSON_CROP_HEIGHT = 45
-MIN_CAPTURE_WIDTH = 120
-MIN_CAPTURE_HEIGHT = 180
 
 DISPLAY_FPS = 15
 
@@ -327,77 +355,31 @@ def _save_image(image, directory, filename, quality=94):
         return None
 
 
-def crop_expanded_object(frame, bbox, min_width=MIN_CAPTURE_WIDTH, min_height=MIN_CAPTURE_HEIGHT):
+def _prepare_high_quality_capture(
+    frame,
+    bbox,
+    padding=0.18,
+    target_short_side=420,
+    max_scale=3.0,
+    max_long_side=1280,
+    sharpen=True,
+):
     """
-    Crop objek dari frame dengan memastikan ukuran bounding box minimal min_width x min_height.
-    Jika bounding box asli lebih kecil dari ukuran minimal, bounding box akan di-expand
-    secara simetris dari titik tengah. Jika sudah memenuhi, ukuran asli dipertahankan.
-    Pergeseran (shift) dilakukan jika box mendekati tepi frame kamera agar ukuran minimal tetap terjaga.
+    Prepare a web/database capture from the ORIGINAL CCTV frame.
+
+    Detection may run on an enhanced/downsized frame, but this function must
+    receive the original frame so the saved capture keeps all available
+    source pixels.
+
+    Note:
+        Upscaling increases display resolution but cannot create detail that
+        was not present in the CCTV source.
     """
-    if frame is None or getattr(frame, "size", 0) == 0 or bbox is None or len(bbox) != 4:
-        return None
-    h_frame, w_frame = frame.shape[:2]
-    try:
-        x1, y1, x2, y2 = [float(v) for v in bbox]
-    except (TypeError, ValueError):
-        return None
-
-    if x2 < x1:
-        x1, x2 = x2, x1
-    if y2 < y1:
-        y1, y2 = y2, y1
-
-    cur_w = x2 - x1
-    cur_h = y2 - y1
-    if cur_w <= 0 or cur_h <= 0:
-        return None
-
-    # Expand lebar simetris dari center jika kurang dari min_width
-    if cur_w < min_width:
-        diff_w = min_width - cur_w
-        x1 -= diff_w / 2.0
-        x2 += diff_w / 2.0
-
-    # Expand tinggi simetris dari center jika kurang dari min_height
-    if cur_h < min_height:
-        diff_h = min_height - cur_h
-        y1 -= diff_h / 2.0
-        y2 += diff_h / 2.0
-
-    # Pergeseran batas X
-    if x1 < 0:
-        x2 += (0.0 - x1)
-        x1 = 0.0
-    if x2 > w_frame:
-        x1 -= (x2 - float(w_frame))
-        x2 = float(w_frame)
-    x1 = max(0, min(int(round(x1)), w_frame))
-    x2 = max(0, min(int(round(x2)), w_frame))
-
-    # Pergeseran batas Y
-    if y1 < 0:
-        y2 += (0.0 - y1)
-        y1 = 0.0
-    if y2 > h_frame:
-        y1 -= (y2 - float(h_frame))
-        y2 = float(h_frame)
-    y1 = max(0, min(int(round(y1)), h_frame))
-    y2 = max(0, min(int(round(y2)), h_frame))
-
-    if x2 <= x1 or y2 <= y1:
-        return None
-
-    crop = frame[y1:y2, x1:x2]
-    if crop is None or getattr(crop, "size", 0) == 0:
-        return None
-    return crop
-
-
-def save_person_capture(frame, bbox, track_id, camera_id):
-    if frame is None:
+    if frame is None or not hasattr(frame, "size") or frame.size == 0:
         return None
 
     h, w = frame.shape[:2]
+
     try:
         x1, y1, x2, y2 = [int(v) for v in bbox]
     except Exception:
@@ -410,20 +392,111 @@ def save_person_capture(frame, bbox, track_id, camera_id):
 
     if x2 <= x1 or y2 <= y1:
         return None
+
+    bw = x2 - x1
+    bh = y2 - y1
+
+    # Add proportional context around the detected object.
+    px = int(bw * float(padding))
+    py = int(bh * float(padding))
+
+    cx1 = max(0, x1 - px)
+    cy1 = max(0, y1 - py)
+    cx2 = min(w, x2 + px)
+    cy2 = min(h, y2 + py)
+
+    crop = frame[cy1:cy2, cx1:cx2].copy()
+
+    if crop.size == 0:
+        return None
+
+    ch, cw = crop.shape[:2]
+
+    # Upscale only when the source crop is small.
+    short_side = min(cw, ch)
+
+    if short_side > 0 and short_side < target_short_side:
+        scale = target_short_side / float(short_side)
+        scale = min(scale, float(max_scale))
+
+        new_w = max(1, int(round(cw * scale)))
+        new_h = max(1, int(round(ch * scale)))
+
+        # Lanczos gives better enlargement quality than nearest/bilinear.
+        crop = cv2.resize(
+            crop,
+            (new_w, new_h),
+            interpolation=cv2.INTER_LANCZOS4,
+        )
+
+    # Prevent very large captures from unnecessarily consuming disk/RAM.
+    ch, cw = crop.shape[:2]
+    long_side = max(cw, ch)
+
+    if long_side > max_long_side:
+        scale = max_long_side / float(long_side)
+        new_w = max(1, int(round(cw * scale)))
+        new_h = max(1, int(round(ch * scale)))
+
+        crop = cv2.resize(
+            crop,
+            (new_w, new_h),
+            interpolation=cv2.INTER_AREA,
+        )
+
+    # Mild unsharp mask. It improves edge perception but does not invent detail.
+    if sharpen and crop.shape[1] >= 3 and crop.shape[0] >= 3:
+        blur = cv2.GaussianBlur(crop, (0, 0), 0.8)
+        crop = cv2.addWeighted(crop, 1.12, blur, -0.12, 0)
+
+    return crop
+
+
+def save_person_capture(frame, bbox, track_id, camera_id):
+    if frame is None:
+        return None
+
+    h, w = frame.shape[:2]
+
+    try:
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+    except Exception:
+        return None
+
+    x1 = max(0, min(x1, w - 1))
+    y1 = max(0, min(y1, h - 1))
+    x2 = max(0, min(x2, w))
+    y2 = max(0, min(y2, h))
+
+    if x2 <= x1 or y2 <= y1:
+        return None
+
     if x2 - x1 < MIN_PERSON_CROP_WIDTH:
         return None
     if y2 - y1 < MIN_PERSON_CROP_HEIGHT:
         return None
 
-    crop = crop_expanded_object(frame, bbox, min_width=MIN_CAPTURE_WIDTH, min_height=MIN_CAPTURE_HEIGHT)
-    if crop is None or crop.size == 0:
+    # IMPORTANT:
+    # Capture is taken from the original CCTV frame, not ai_frame.
+    crop = _prepare_high_quality_capture(
+        frame,
+        (x1, y1, x2, y2),
+        padding=0.20,
+        target_short_side=360,
+        max_scale=2.5,
+        max_long_side=960,
+        sharpen=True,
+    )
+
+    if crop is None:
         return None
+
     now = datetime.now()
     date_dir = os.path.join(CAPTURE_DIR, now.strftime("%Y%m%d"))
     ts = now.strftime("%Y%m%d_%H%M%S_%f")[:-3]
     filename = f"person_cam{camera_id}_track{track_id}_{ts}.jpg"
 
-    return _save_image(crop, date_dir, filename, 92)
+    return _save_image(crop, date_dir, filename, 95)
 
 
 def save_plate_capture(crop, track_id, camera_id, plate_text, prefix="plate"):
@@ -440,6 +513,19 @@ def save_plate_capture(crop, track_id, camera_id, plate_text, prefix="plate"):
     )
 
     return _save_image(crop, date_dir, filename, 95)
+
+
+def _prepare_vehicle_capture(frame, bbox):
+    """High-quality vehicle capture from the original CCTV frame."""
+    return _prepare_high_quality_capture(
+        frame,
+        bbox,
+        padding=0.15,
+        target_short_side=480,
+        max_scale=2.5,
+        max_long_side=1280,
+        sharpen=True,
+    )
 
 
 def _get_value(data, keys, default=None):
@@ -513,6 +599,13 @@ def _track_to_result(track):
         "votes": votes,
         "total_reads": total_reads,
         "crop": getattr(track, "best_crop", None),
+        # PlateTracker may expose the originating vehicle track. Keep it
+        # when available so OCR results can be tied to the correct vehicle.
+        "vehicle_track_id": (
+            int(getattr(track, "vehicle_track_id"))
+            if getattr(track, "vehicle_track_id", None) is not None
+            else None
+        ),
         "distance_zone": "NEAR",
     }
 
@@ -551,8 +644,14 @@ def _find_vehicle_for_plate(frame, plate_bbox, vehicle_dets):
         return None, 0.0
 
     try:
-        crop = crop_expanded_object(frame, best["box"], min_width=MIN_CAPTURE_WIDTH, min_height=MIN_CAPTURE_HEIGHT)
-        return crop if (crop is not None and crop.size) else None, _safe_float(best.get("conf", 0.0))
+        h, w = frame.shape[:2]
+        x1, y1, x2, y2 = [int(v) for v in best["box"]]
+        x1 = max(0, min(x1, w - 1))
+        y1 = max(0, min(y1, h - 1))
+        x2 = max(0, min(x2, w))
+        y2 = max(0, min(y2, h))
+        crop = frame[y1:y2, x1:x2]
+        return crop if crop.size else None, _safe_float(best.get("conf", 0.0))
     except Exception:
         return None, 0.0
 
@@ -809,58 +908,315 @@ class AdaptiveAIController:
 # ============================================================
 # SERVICE
 # ============================================================
->>>>>>> Stashed changes
 
-import threading
 
 class StreamAIService:
     _instance = None
-    _init_lock = threading.Lock()
 
     @classmethod
     def get_instance(cls):
         if cls._instance is None:
-            with cls._init_lock:
-                if cls._instance is None:
-                    cls._instance = cls()
+            cls._instance = cls()
         return cls._instance
 
     def __init__(self):
-        print("[AI STREAM] Inisialisasi model YOLO dan OCR...")
-        self.lock = threading.Lock()
-        self.yolo_person = YOLO(PERSON_MODEL_PATH)
-        self.plate_detector = PlateDetector(PLATE_MODEL_PATH)
-        self.plate_ocr = PlateOCR()
+        print("=" * 75)
+        print("[AI STREAM] Inisialisasi pipeline Person + Vehicle + Plate + OCR")
+        print("=" * 75)
 
-        # ByteTrack per kamera: camera_id -> sv.ByteTrack instance
-        self.trackers = {}
-
-        # Cache untuk melacak track yang sudah di-capture (mencegah duplicate insert)
-        # (camera_id, key) -> timestamp capture terakhir
-        self.captured_tracks = {}
-        self.last_ai_times = {}
-        self.last_results = {}
-        print("[AI STREAM] Pipeline AI siap digunakan!")
-
-    def _get_tracker(self, camera_id):
-        """Membuat atau mengambil instance ByteTrack terisolasi per kamera."""
-        cam_key = int(camera_id) if camera_id else 1
-        if cam_key not in self.trackers:
-            self.trackers[cam_key] = sv.ByteTrack(
-                track_activation_threshold=0.35,
-                lost_track_buffer=60,
-                minimum_matching_threshold=0.7,
-                frame_rate=25
+        if not os.path.isfile(PERSON_MODEL_PATH):
+            raise FileNotFoundError(
+                f"Model person/vehicle tidak ditemukan: {PERSON_MODEL_PATH}"
             )
-        return self.trackers[cam_key]
+        if not os.path.isfile(PLATE_MODEL_PATH):
+            raise FileNotFoundError(
+                f"Model plate tidak ditemukan: {PLATE_MODEL_PATH}"
+            )
 
-<<<<<<< Updated upstream
-    def _cleanup_old_tracks(self, current_time):
-        """Menghapus cache track yang sudah lewat dari 30 detik."""
-        expired = [k for k, ts in list(self.captured_tracks.items()) if current_time - ts > 30.0]
-        for k in expired:
-            self.captured_tracks.pop(k, None)
-=======
+        print(f"[AI STREAM] YOLO    : {PERSON_MODEL_PATH}")
+        self.yolo_person = YOLO(PERSON_MODEL_PATH)
+
+        print(f"[AI STREAM] Plate   : {PLATE_MODEL_PATH}")
+        self.plate_detector = PlateDetector(
+            model_path=PLATE_MODEL_PATH,
+            confidence=PLATE_CONFIDENCE,
+            imgsz=PLATE_IMGSZ,
+            device="cpu",
+            max_det=PLATE_MAX_DET,
+            iou=PLATE_IOU,
+            min_width=PLATE_MIN_WIDTH,
+            min_height=PLATE_MIN_HEIGHT,
+            min_aspect_ratio=1.5,
+            max_aspect_ratio=7.0,
+        )
+
+        try:
+            self.plate_ocr = PlateOCR(
+                scale=2.5,
+                min_confidence=0.15,
+                verbose=False,
+                fast_mode=True,
+            )
+            self.plate_ocr.warmup()
+            print("[AI STREAM] OCR siap")
+        except Exception as exc:
+            self.plate_ocr = None
+            print(f"[AI STREAM WARNING] OCR tidak tersedia: {exc}")
+
+        self.person_tracker = sv.ByteTrack(
+            track_activation_threshold=0.30,
+            lost_track_buffer=90,
+            minimum_matching_threshold=0.70,
+            frame_rate=25,
+        )
+
+        self.plate_tracker = PlateTracker(
+            iou_threshold=PLATE_TRACKER_IOU,
+            max_frame_gap=PLATE_TRACKER_FRAME_GAP,
+            ocr_every_n_matches=PLATE_TRACKER_OCR_EVERY,
+            min_final_confidence=PLATE_TRACKER_MIN_CONFIDENCE,
+            min_consistent_reads=2,
+            single_read_ocr_confidence=0.72,
+            single_read_detection_confidence=0.55,
+            max_history=PLATE_TRACKER_MAX_HISTORY,
+        )
+
+        self.captured_tracks = {}
+        self.saved_plate_events = {}
+        self.last_ai_time = 0.0
+
+        # Track lifecycle: (camera_id, track_id) -> {generation, last_seen}
+        self.track_lifecycle = {}
+
+        # Adaptive scheduler: never stops AI, only changes its cadence.
+        self.adaptive_ai = AdaptiveAIController()
+
+        # Frame queue for decoupling AI inference from the CCTV display path.
+        # The queue stores only the newest few frames so AI can never build
+        # an unbounded backlog and increase latency.
+        self.frame_queue = collections.deque(maxlen=2)
+        self.frame_queue_lock = threading.Lock()
+        self.ai_wakeup = threading.Event()
+        self.ai_thread = threading.Thread(
+            target=self._ai_loop,
+            name="PlateVision-AI",
+            daemon=True,
+        )
+
+        # Shared AI results accessed by display path
+        self.latest_results = {"persons": [], "plates": []}
+        self.last_results_time = 0.0
+        self.last_plate_history = []
+        self.last_plate_capture = None
+
+        # Locks and thread control
+        self.processing_lock = threading.Lock()
+        self.ai_lock = threading.Lock()
+        self.running = True
+
+        # Performance counters
+        self.display_counter = 0
+        self.last_display_fps_calc = time.time()
+        self.display_fps = 0.0
+        self.ai_cycle_counter = 0
+        self.last_perf_log = time.time()
+
+        # Runtime state must be initialized before the worker starts.
+        self.focus_track_id = None
+        self.focus_last_seen = 0.0
+        self.focus_plate_last_seen = 0.0
+        self.focus_info = {"type":"AREA","box":None,"track_id":None,"lighting":None}
+        self.latest_raw_plate_detections = []
+        self.camera_states = {}
+        self.last_display_time = {}
+        # Caches for CPU-friendly optimization
+        self.plate_detection_cache = {}
+        self.ocr_cache = {}
+        self.saved_event_meta = {}
+
+        # Start background AI thread only after every runtime field exists.
+        self.ai_thread.start()
+
+        print("[AI STREAM] Vehicle classes : person/car/motorcycle/bus/truck")
+        print(
+            f"[AI STREAM] Distance zone  : "
+            f"{'ON' if ENABLE_DISTANCE_ZONE else 'OFF'}"
+        )
+        print("[AI STREAM] Plate ROI       : NEAR zone vehicle")
+        print("[AI STREAM] PlateTracker    : multi-frame voting")
+        print("[AI STREAM] OCR variants    : original/clahe/sharpen/threshold")
+        print("=" * 75)
+
+    def get_performance_status(self):
+        """Return current adaptive performance metrics."""
+        status = self.adaptive_ai.get_status()
+        status["display_fps"] = DISPLAY_FPS
+        status["max_plate_roi"] = MAX_PLATE_ROI
+        status["distance_zone_enabled"] = ENABLE_DISTANCE_ZONE
+        status["camera_zone_count"] = len(CAMERA_ZONE_CONFIG)
+        status["ocr_min_plate_width"] = OCR_MIN_PLATE_WIDTH
+        status["ocr_min_plate_height"] = OCR_MIN_PLATE_HEIGHT
+        return status
+
+    # ------------------------------------------------------------
+    # DETECTION
+    # ------------------------------------------------------------
+
+    def _camera_state(self, camera_id):
+        state = self.camera_states.get(camera_id)
+        if state is None:
+            state = {
+                "last_ai_time": 0.0,
+                "last_results_time": 0.0,
+                "last_results": {"persons": [], "plates": []},
+                "person_tracker": sv.ByteTrack(
+                    track_activation_threshold=0.30,
+                    lost_track_buffer=90,
+                    minimum_matching_threshold=0.70,
+                    frame_rate=25,
+                ),
+                "plate_tracker": PlateTracker(
+                    iou_threshold=PLATE_TRACKER_IOU,
+                    max_frame_gap=PLATE_TRACKER_FRAME_GAP,
+                    ocr_every_n_matches=PLATE_TRACKER_OCR_EVERY,
+                    min_final_confidence=PLATE_TRACKER_MIN_CONFIDENCE,
+                    min_consistent_reads=2,
+                    single_read_ocr_confidence=0.72,
+                    single_read_detection_confidence=0.55,
+                    max_history=PLATE_TRACKER_MAX_HISTORY,
+                ),
+            }
+            self.camera_states[camera_id] = state
+        return state
+
+    def _detect_vehicles(self, frame, camera_id=1):
+        """Detect and track only objects inside the configured MID_ZONE.
+
+        Filtering happens BEFORE ByteTrack. This prevents far-away objects
+        from consuming tracker slots and prevents them from reaching the
+        plate/OCR pipeline.
+        """
+        detections = []
+
+        try:
+            h, w = frame.shape[:2]
+
+            result = self.yolo_person(
+                frame,
+                classes=VEHICLE_CLASSES,
+                imgsz=VEHICLE_IMGSZ,
+                conf=VEHICLE_CONFIDENCE,
+                verbose=False,
+            )[0]
+
+            boxes = result.boxes
+
+            if boxes is None or len(boxes) == 0:
+                tracked = sv.Detections.empty()
+            else:
+                keep_indices = []
+
+                for i, box_tensor in enumerate(boxes.xyxy):
+                    bbox = box_tensor.cpu().numpy().astype(int).tolist()
+                    cls_id = int(boxes.cls[i].item())
+                    conf = float(boxes.conf[i].item())
+
+                    x1, y1, x2, y2 = bbox
+                    bw = max(0, x2 - x1)
+                    bh = max(0, y2 - y1)
+
+                    # --------------------------------------------------
+                    # 1. DISTANCE / PERSPECTIVE ZONE
+                    # --------------------------------------------------
+                    zone = _get_distance_zone(
+                        bbox,
+                        camera_id,
+                        w,
+                        h,
+                    )
+
+                    if ENABLE_DISTANCE_ZONE and zone == "FAR":
+                        continue
+
+                    # --------------------------------------------------
+                    # 2. OBJECT SIZE QUALITY GATE
+                    # --------------------------------------------------
+                    if cls_id == 0:
+                        if bw < MIN_PERSON_WIDTH or bh < MIN_PERSON_HEIGHT:
+                            continue
+                    elif cls_id in VEHICLE_TYPES:
+                        if bw < MIN_VEHICLE_WIDTH or bh < MIN_VEHICLE_HEIGHT:
+                            continue
+                    else:
+                        continue
+
+                    keep_indices.append(i)
+
+                if keep_indices:
+                    filtered_result = result[keep_indices]
+                    tracked = self._camera_state(
+                        camera_id
+                    )["person_tracker"].update_with_detections(
+                        sv.Detections.from_ultralytics(filtered_result)
+                    )
+                else:
+                    tracked = sv.Detections.empty()
+
+            for i in range(len(tracked)):
+                bbox = tracked.xyxy[i].astype(int).tolist()
+
+                cls_id = (
+                    int(tracked.class_id[i])
+                    if tracked.class_id is not None
+                    else 0
+                )
+
+                conf = (
+                    _safe_float(tracked.confidence[i])
+                    if tracked.confidence is not None
+                    else 0.0
+                )
+
+                track_id = (
+                    int(tracked.tracker_id[i])
+                    if tracked.tracker_id is not None
+                    else -1
+                )
+
+                zone = _get_distance_zone(
+                    bbox,
+                    camera_id,
+                    w,
+                    h,
+                )
+
+                # A track should never re-enter from FAR because the
+                # pre-tracker filter above already blocks FAR objects.
+                if ENABLE_DISTANCE_ZONE and zone == "FAR":
+                    continue
+
+                detections.append({
+                    "box": bbox,
+                    "track_id": track_id,
+                    "conf": conf,
+                    "cls": cls_id,
+                    "distance_zone": zone,
+                    "object_type": (
+                        "vehicle"
+                        if cls_id in VEHICLE_TYPES
+                        else "person"
+                    ),
+                    "vehicle_type": VEHICLE_TYPES.get(
+                        cls_id,
+                        "unknown",
+                    ),
+                })
+
+        except Exception as exc:
+            print(
+                f"[AI STREAM ERROR] Vehicle detection failed: {exc}"
+            )
+
         return detections
 
     def _detect_plates_in_vehicles(self, frame, vehicle_dets):
@@ -1075,6 +1431,22 @@ class StreamAIService:
         crop = finished.get("crop")
         bbox = finished.get("bbox")
 
+        # PlateTracker may carry a crop from the enhanced AI frame.
+        # For the persisted capture, prefer a fresh crop from the ORIGINAL
+        # CCTV frame so enhancement/resize does not reduce source quality.
+        if frame is not None and bbox and len(bbox) == 4:
+            original_plate_crop = _prepare_high_quality_capture(
+                frame,
+                bbox,
+                padding=0.20,
+                target_short_side=400,
+                max_scale=3.0,
+                max_long_side=1000,
+                sharpen=True,
+            )
+            if original_plate_crop is not None:
+                crop = original_plate_crop
+
         valid = _valid_indonesian_plate(text)
         if not valid and det_conf < PLATE_REVIEW_CONFIDENCE:
             return None
@@ -1099,6 +1471,45 @@ class StreamAIService:
         )
 
         finished = dict(finished)
+
+        # PlateTracker's ID is a plate-track ID, not necessarily the vehicle
+        # ByteTrack ID. Resolve the finished plate against the CURRENT vehicle
+        # detections so OCR is enriched into the correct vehicle event.
+        vehicle_track_id = finished.get("vehicle_track_id")
+        if vehicle_track_id is None and bbox and len(bbox) == 4:
+            px1, py1, px2, py2 = [float(v) for v in bbox]
+            pcx = (px1 + px2) / 2.0
+            pcy = (py1 + py2) / 2.0
+            best_vehicle = None
+            best_score = 0.0
+
+            for vehicle in vehicle_dets or []:
+                if vehicle.get("cls") not in VEHICLE_TYPES:
+                    continue
+                vb = vehicle.get("box") or []
+                if len(vb) != 4:
+                    continue
+                vx1, vy1, vx2, vy2 = [float(v) for v in vb]
+                if not (vx1 <= pcx <= vx2 and vy1 <= pcy <= vy2):
+                    continue
+
+                vw = max(1.0, vx2 - vx1)
+                vh = max(1.0, vy2 - vy1)
+                # Prefer the smallest containing vehicle, which is useful
+                # when two vehicle boxes overlap in crowded scenes.
+                score = 1.0 / (vw * vh)
+                if score > best_score:
+                    best_score = score
+                    best_vehicle = vehicle
+
+            if best_vehicle is not None:
+                vehicle_track_id = best_vehicle.get("track_id")
+
+        try:
+            vehicle_track_id = int(vehicle_track_id) if vehicle_track_id is not None else None
+        except (TypeError, ValueError):
+            vehicle_track_id = None
+
         finished.update({
             "text": text,
             "formatted": formatted or text,
@@ -1106,6 +1517,7 @@ class StreamAIService:
             "conf": det_conf,
             "valid": valid,
             "plate_image_path": plate_path,
+            "vehicle_track_id": vehicle_track_id,
         })
 
         self.last_plate_capture = finished
@@ -1145,26 +1557,60 @@ class StreamAIService:
         return intersection / area
 
     def _get_track_generation(self, camera_id, track_id, current_time):
-        """Return a stable event generation for a camera/track lifecycle.
+        """Return a generation number for one ByteTrack lifecycle.
 
-        ByteTrack IDs are not globally unique and may be reused after an
-        object disappears. The database event_key therefore includes this
-        generation so a later vehicle/person with the same tracker ID can
-        create a new event.
+        ByteTrack can reuse IDs after a track is lost. The reuse gap is kept
+        slightly above the 60-frame/25-FPS tracker buffer so a reused ID is
+        treated as a new physical object instead of the old DB event.
         """
-        key = (int(camera_id), int(track_id))
+        try:
+            camera_id = int(camera_id)
+            track_id = int(track_id)
+            current_time = float(current_time)
+        except (TypeError, ValueError):
+            return 1
+
+        key = (camera_id, track_id)
         state = self.track_lifecycle.get(key)
 
         if state is None:
             state = {"generation": 1, "last_seen": current_time}
-        elif current_time - float(state["last_seen"]) > TRACK_REUSE_GAP:
-            state["generation"] = int(state.get("generation", 1)) + 1
-            state["last_seen"] = current_time
         else:
+            last_seen = float(state.get("last_seen", current_time))
+            gap = current_time - last_seen
+
+            # Clock correction / restart protection.
+            if gap < 0:
+                state["generation"] = int(state.get("generation", 1)) + 1
+            elif gap > TRACK_REUSE_GAP:
+                state["generation"] = int(state.get("generation", 1)) + 1
+
             state["last_seen"] = current_time
 
         self.track_lifecycle[key] = state
         return int(state["generation"])
+
+    def _cleanup_runtime_state(self, current_time):
+        """Prevent lifecycle/cache dictionaries from growing forever."""
+        now = float(current_time)
+        lifecycle_ttl = 300.0
+        event_ttl = 1800.0
+
+        for key, state in list(self.track_lifecycle.items()):
+            if now - float(state.get("last_seen", now)) > lifecycle_ttl:
+                self.track_lifecycle.pop(key, None)
+
+        for cache_name in ("captured_tracks", "saved_plate_events", "saved_event_meta"):
+            cache = getattr(self, cache_name, None)
+            if not isinstance(cache, dict):
+                continue
+            for key, value in list(cache.items()):
+                try:
+                    stamp = float(value if cache_name != "saved_event_meta" else value.get("updated_at", now))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+                if now - stamp > event_ttl:
+                    cache.pop(key, None)
 
     def _save_consistent_events(self, frame, person_dets, plate_dets, camera_id, current_time):
         """Persist one explicit event per tracked vehicle or unassociated person."""
@@ -1179,11 +1625,28 @@ class StreamAIService:
             vehicle_type = vehicle.get("vehicle_type") or VEHICLE_TYPES.get(vehicle.get("cls"), "unknown")
 
             matching_plates = []
+            geometric_plates = []
             for plate in plate_dets:
+                plate_vehicle_id = plate.get("vehicle_track_id")
+                if plate_vehicle_id is not None:
+                    try:
+                        if int(plate_vehicle_id) == vehicle_id:
+                            matching_plates.append(plate)
+                            continue
+                    except (TypeError, ValueError):
+                        pass
+
                 plate_box = plate.get("bbox") or plate.get("box") or [0, 0, 0, 0]
+                if len(plate_box) != 4:
+                    continue
                 center = plate.get("center") or [(plate_box[0] + plate_box[2]) / 2, (plate_box[1] + plate_box[3]) / 2]
                 if vehicle_box[0] <= center[0] <= vehicle_box[2] and vehicle_box[1] <= center[1] <= vehicle_box[3]:
-                    matching_plates.append(plate)
+                    geometric_plates.append(plate)
+
+            # Exact vehicle-track association wins. Geometry is only a
+            # fallback for tracker versions that do not expose that ID.
+            if not matching_plates:
+                matching_plates = geometric_plates
             plate = max(matching_plates, key=lambda item: float(item.get("conf", item.get("confidence", 0)) or 0), default=None)
 
             driver = None
@@ -1191,10 +1654,17 @@ class StreamAIService:
                 if index in associated_people:
                     continue
                 person_box = person.get("box", [0, 0, 0, 0])
-                if self._intersection_ratio(person_box, vehicle_box) >= 0.25:
-                    driver = person
+                ratio = self._intersection_ratio(person_box, vehicle_box)
+                pcx = (person_box[0] + person_box[2]) / 2.0
+                pcy = (person_box[1] + person_box[3]) / 2.0
+                center_near = (
+                    vehicle_box[0] <= pcx <= vehicle_box[2]
+                    and (vehicle_box[1] - 40) <= pcy <= vehicle_box[3]
+                )
+                if ratio >= 0.20 or center_near:
+                    if driver is None:
+                        driver = person
                     associated_people.add(index)
-                    break
 
             center = ((vehicle_box[0] + vehicle_box[2]) // 2, (vehicle_box[1] + vehicle_box[3]) // 2)
             stable_id = vehicle_id if vehicle_id >= 0 else f"{center[0]}_{center[1]}"
@@ -1222,6 +1692,18 @@ class StreamAIService:
             has_driver_now = driver is not None
             previous_meta = self.saved_event_meta.get(event_key)
             is_new_event = event_key not in self.captured_tracks
+
+            # Spatial duplicate suppression (cegah ID switch menyimpan kendaraan yang sama di posisi yang sama dalam 3s)
+            recent_veh_key = f"recent_pos:v:{camera_id}"
+            recent_positions = self.captured_tracks.get(recent_veh_key, [])
+            recent_positions = [p for p in recent_positions if current_time - p["t"] < 3.0]
+            is_spatial_duplicate = any(
+                abs(p["cx"] - center[0]) < 70 and abs(p["cy"] - center[1]) < 70
+                for p in recent_positions
+            )
+            if is_new_event and is_spatial_duplicate:
+                continue
+
             needs_enrichment = (
                 not is_new_event
                 and previous_meta is not None
@@ -1232,7 +1714,6 @@ class StreamAIService:
             )
             if not is_new_event and not needs_enrichment:
                 continue
-            self.captured_tracks[event_key] = current_time
 
             try:
                 result = db.save_detection_event(
@@ -1246,15 +1727,24 @@ class StreamAIService:
                     object_type="vehicle",
                     vehicle_type=vehicle_type,
                     vehicle_confidence=float(vehicle.get("conf", 0.0) or 0),
-                    vehicle_crop=crop_expanded_object(frame, vehicle_box, min_width=MIN_CAPTURE_WIDTH, min_height=MIN_CAPTURE_HEIGHT),
+                    vehicle_crop=_prepare_vehicle_capture(
+                        frame,
+                        vehicle_box,
+                    ),
                     has_driver=driver is not None,
                     driver_track_id=(driver or {}).get("track_id"),
                     direction=direction,
                     event_key=event_key
                 )
+                self.captured_tracks[event_key] = current_time
+                recent_positions.append({"cx": center[0], "cy": center[1], "t": current_time})
+                self.captured_tracks[recent_veh_key] = recent_positions
+                previous_plate = (previous_meta or {}).get("plate_text", "")
+                previous_driver = bool((previous_meta or {}).get("has_driver", False))
                 self.saved_event_meta[event_key] = {
-                    "plate_text": plate_text_now,
-                    "has_driver": has_driver_now,
+                    "plate_text": plate_text_now or previous_plate,
+                    "has_driver": has_driver_now or previous_driver,
+                    "updated_at": current_time,
                 }
                 print(
                     f"[DETECTION] camera={camera_id} track_id={vehicle_id} object_type=vehicle "
@@ -1284,12 +1774,33 @@ class StreamAIService:
             # One database event per physical person track lifecycle.
             if event_key in self.captured_tracks:
                 continue
-            self.captured_tracks[event_key] = current_time
-            crop = crop_expanded_object(frame, person.get("box", [0, 0, 0, 0]), min_width=MIN_CAPTURE_WIDTH, min_height=MIN_CAPTURE_HEIGHT)
+
+            # Spatial duplicate suppression untuk person (cegah ID switch dalam 3s di posisi yang sama)
+            bx1, by1, bx2, by2 = person.get("box", [0, 0, 0, 0])
+            pcx = (bx1 + bx2) // 2
+            pcy = (by1 + by2) // 2
+            recent_person_key = f"recent_pos:p:{camera_id}"
+            recent_persons = self.captured_tracks.get(recent_person_key, [])
+            recent_persons = [p for p in recent_persons if current_time - p["t"] < 3.0]
+            if any(abs(p["cx"] - pcx) < 50 and abs(p["cy"] - pcy) < 50 for p in recent_persons):
+                continue
+
+            # Save a quality crop from the ORIGINAL CCTV frame.
+            crop = _prepare_high_quality_capture(
+                frame,
+                (bx1, by1, bx2, by2),
+                padding=0.20,
+                target_short_side=360,
+                max_scale=2.5,
+                max_long_side=960,
+                sharpen=True,
+            )
+
             if crop is None or crop.size == 0:
                 continue
+
             try:
-                db.save_detection_event(
+                result = db.save_detection_event(
                     camera_id=camera_id,
                     face_crop=crop,
                     face_conf=float(person.get("conf", 0.0) or 0),
@@ -1299,7 +1810,15 @@ class StreamAIService:
                     direction=direction,
                     event_key=event_key
                 )
-                print(f"[DETECTION] camera={camera_id} track_id={track_id} object_type=person person_confidence={float(person.get('conf', 0) or 0):.3f} direction={direction}")
+                self.captured_tracks[event_key] = current_time
+                recent_persons.append({"cx": pcx, "cy": pcy, "t": current_time})
+                self.captured_tracks[recent_person_key] = recent_persons
+                print(
+                    f"[DETECTION] camera={camera_id} track_id={track_id} "
+                    f"object_type=person person_confidence="
+                    f"{float(person.get('conf', 0) or 0):.3f} "
+                    f"direction={direction} duplicate={result.get('duplicate', False)}"
+                )
             except Exception as exc:
                 print(f"[AI STREAM ERROR] Save person event failed: {exc}")
 
@@ -1413,6 +1932,13 @@ class StreamAIService:
         camera_state = self._camera_state(camera_id)
         now = time.time()
         ai_pipeline_start = time.perf_counter()
+
+        # Always initialize these before entering nested AI stages. This
+        # prevents the classic "person_dets is not associated" failure even
+        # when an upstream model/lighting step raises unexpectedly.
+        person_dets = []
+        plate_dets = []
+        plate_raw = []
 
         try:
             # ==============================================================
@@ -1556,6 +2082,9 @@ class StreamAIService:
             # ==============================================================
             # 5. SAVE DATABASE EVENTS
             # ============================================================== 
+            person_dets = person_dets or []
+            plate_dets = plate_dets or []
+
             self._save_consistent_events(
                 frame,
                 person_dets,
@@ -1563,6 +2092,7 @@ class StreamAIService:
                 camera_id,
                 now,
             )
+            self._cleanup_runtime_state(now)
 
         except Exception as exc:
             # Never allow an AI exception to terminate the worker thread.
@@ -1620,209 +2150,268 @@ class StreamAIService:
             # a full interval if another frame has not arrived yet.
             remaining = interval - (now - camera_state["last_ai_time"])
             if remaining > 0:
-                # Put the newest frame back only when the queue is empty; this
-                # allows the next incoming CCTV frame to replace it naturally.
+                # IMPORTANT: never requeue the frame we just popped. A newer
+                # CCTV frame may arrive while we sleep; requeueing the old
+                # frame would put stale data back in front of it and increase
+                # latency. The next incoming frame will wake the worker.
                 time.sleep(min(remaining, 0.05))
-                with self.frame_queue_lock:
-                    self.frame_queue.append((frame, camera_id))
-                self.ai_wakeup.set()
                 continue
 
             camera_state["last_ai_time"] = now
             self._run_ai_pipeline(frame, camera_id)
 
         print("[AI THREAD] Background AI worker stopped")
->>>>>>> Stashed changes
 
     def process_frame(self, frame, draw_bbox=True, camera_id=1):
+        """Return CCTV immediately while AI runs asynchronously.
+
+        The previous implementation accidentally removed the background AI
+        worker. This version restores it while keeping the CCTV path cheap:
+        only a frame copy, queue operation and drawing of cached results occur
+        here. YOLO/PlateDetector/OCR/DB work is performed by _ai_loop().
         """
-        Memproses 1 frame video:
-        1. Menjalankan deteksi AI (YOLO + ByteTrack + OCR) pada interval ~0.2s
-        2. Menyimpan hasil deteksi baru secara lokal dan mencatat ke database
-        3. Menggambar bounding box bersih (hanya box & label, tanpa FPS) jika draw_bbox=True
-        """
-        if frame is None or frame.size == 0:
+        if frame is None or not hasattr(frame, "size") or frame.size == 0:
             return frame
 
-        cam_key = int(camera_id) if camera_id else 1
-        now = time.time()
-        self._cleanup_old_tracks(now)
+        try:
+            with self.frame_queue_lock:
+                # Keep at most one pending frame per camera. AI always wants
+                # the newest frame, not a backlog.
+                self.frame_queue.append((frame.copy(), camera_id))
+                while len(self.frame_queue) > 1:
+                    self.frame_queue.popleft()
+            self.ai_wakeup.set()
+        except Exception as exc:
+            # Queue problems must never stop CCTV display.
+            if DEBUG_PERFORMANCE:
+                print(f"[AI QUEUE WARNING] {exc}")
 
-        h, w = frame.shape[:2]
-        last_time = self.last_ai_times.get(cam_key, 0.0)
+        camera_state = self._camera_state(camera_id)
 
-        # Jalankan AI inference setiap interval ~0.2s per kamera agar performa optimal
-        if now - last_time >= 0.2:
-            self.last_ai_times[cam_key] = now
+        if not draw_bbox:
+            return self._display_frame(frame, camera_id)
 
-            person_dets = []
-            plate_dets = []
+        # Display uses the latest completed AI result. It never waits for AI.
+        output = frame.copy()
 
-            # Ambil model lock agar thread-safe saat banyak kamera berjalan paralel
-            with self.lock:
-                # 1. Deteksi Orang / Kendaraan (Person 0, Car 2, Motorcycle 3)
-                try:
-                    p_results = self.yolo_person(frame, classes=[0, 2, 3], imgsz=416, verbose=False)[0]
-                    if len(p_results.boxes) > 0:
-                        sv_dets = sv.Detections.from_ultralytics(p_results)
-                        tracker = self._get_tracker(cam_key)
-                        tracked = tracker.update_with_detections(sv_dets)
-                        for i in range(len(tracked)):
-                            box = tracked.xyxy[i].astype(int)
-                            tid = int(tracked.tracker_id[i]) if tracked.tracker_id is not None else -1
-                            conf = float(tracked.confidence[i]) if tracked.confidence is not None else 0.5
-                            cls_id = int(tracked.class_id[i]) if tracked.class_id is not None else 0
-                            person_dets.append({"box": box, "track_id": tid, "conf": conf, "cls": cls_id})
-                except Exception as e:
-                    pass
+        # Draw the perspective distance zones first, then detections.
+        self._draw_detection_zones(output, camera_id)
+        self._draw_clean_bboxes(output, camera_state["last_results"])
+        self._draw_dynamic_focus(output)
 
-                # 2. Deteksi Plat Nomor
-                try:
-                    plate_boxes = self.plate_detector.detect(frame)
-                    for pb in plate_boxes:
-                        bx = [int(pb[0]), int(pb[1]), int(pb[2]), int(pb[3])]
-                        p_conf = float(pb[4]) if len(pb) > 4 else 0.5
+        return self._display_frame(output, camera_id)
 
-                        px1, py1, px2, py2 = max(0, bx[0]), max(0, bx[1]), min(w, bx[2]), min(h, bx[3])
-                        plate_crop = frame[py1:py2, px1:px2]
-                        plate_text = ""
-                        ocr_conf = 0.0
+    def stop(self):
+        """Stop the background AI worker cleanly."""
+        self.running = False
+        self.ai_wakeup.set()
+        thread = getattr(self, "ai_thread", None)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
 
-                        if plate_crop.size > 0 and (px2 - px1) > 25 and (py2 - py1) > 12:
-                            try:
-                                plate_text, ocr_conf, _ = self.plate_ocr.read_plate(plate_crop)
-                            except Exception:
-                                pass
+    def _display_frame(self, frame, camera_id):
+        """Return frame while reporting desired display cadence.
 
-                        plate_dets.append({
-                            "box": bx,
-                            "conf": p_conf,
-                            "text": plate_text,
-                            "ocr_conf": ocr_conf,
-                            "crop": plate_crop
-                        })
-                except Exception as e:
-                    pass
-
-            self.last_results[cam_key] = {"persons": person_dets, "plates": plate_dets}
-
-            # 3. Simpan Deteksi Baru ke Database & Lokal
-            self._save_new_events(frame, person_dets, plate_dets, cam_key, now)
-
-        # 4. Gambar Bounding Box jika draw_bbox diaktifkan
-        cam_results = self.last_results.get(cam_key, {"persons": [], "plates": []})
-        if draw_bbox:
-            output_frame = frame.copy()
-            self._draw_clean_bboxes(output_frame, cam_results)
-            return output_frame
-
+        This intentionally does not sleep: sleeping inside Flask's frame
+        generator would increase latency. The actual generator should cap
+        outgoing frames to DISPLAY_FPS if needed.
+        """
+        self.last_display_time[camera_id] = time.time()
         return frame
 
-    def _save_new_events(self, frame, person_dets, plate_dets, camera_id, current_time):
-        """Menyimpan deteksi ke database MySQL dan file lokal (dengan filter cooldown)."""
+    # ------------------------------------------------------------
+    # DRAW
+    # ------------------------------------------------------------
+
+    def _draw_detection_zones(self, frame, camera_id):
+        """Draw MID and NEAR perspective zones on the CCTV preview."""
+        if not ENABLE_DISTANCE_ZONE:
+            return
+
         h, w = frame.shape[:2]
 
-        # A. Cek Plat Nomor
-        for p in plate_dets:
-            p_text = p.get("text")
-            p_crop = p.get("crop")
-            p_conf = p.get("conf", 0.0)
-            ocr_conf = p.get("ocr_conf", 0.0)
+        mid = _normalized_polygon_to_pixels(
+            _camera_zone_points(camera_id, "mid"),
+            w,
+            h,
+        )
 
-            # Jika plat terbaca atau confidence bagus
-            if p_text or (p_crop is not None and p_conf >= 0.45):
-                cache_key = f"cam{camera_id}_plate_{p_text or id(p_crop)}"
-                if cache_key not in self.captured_tracks or (current_time - self.captured_tracks[cache_key] > 5.0):
-                    self.captured_tracks[cache_key] = current_time
+        near = _normalized_polygon_to_pixels(
+            _camera_zone_points(camera_id, "near"),
+            w,
+            h,
+        )
 
-                    # Cari person/rider yang berdekatan dengan plat ini
-                    associated_person_crop = None
-                    associated_person_conf = 0.0
-                    for per in person_dets:
-                        px1, py1, px2, py2 = per["box"]
-                        bx1, by1, bx2, by2 = p["box"]
-                        # Jika plat berada di area bawah orang/motor
-                        if px1 <= bx2 and px2 >= bx1 and py2 >= by1 - 50:
-                            p_x1, p_y1 = max(0, px1), max(0, py1)
-                            p_x2, p_y2 = min(w, px2), min(h, py2)
-                            associated_person_crop = frame[p_y1:p_y2, p_x1:p_x2]
-                            associated_person_conf = per["conf"]
-                            break
+        # Use translucent overlays without changing the original frame
+        # permanently.
+        overlay = frame.copy()
 
-                    try:
-                        db.save_detection_event(
-                            camera_id=camera_id,
-                            plate_number=p_text if p_text else None,
-                            plate_crop=p_crop,
-                            plate_conf=p_conf,
-                            ocr_conf=ocr_conf,
-                            face_crop=associated_person_crop,
-                            face_conf=associated_person_conf
-                        )
-                        print(f"[AI STREAM] Saved Plate Event -> {p_text or 'Plate'} (Cam {camera_id})")
-                    except Exception as e:
-                        print(f"[AI STREAM ERROR] Save plate failed: {e}")
+        cv2.fillPoly(overlay, [mid], (80, 80, 80))
+        cv2.fillPoly(overlay, [near], (120, 120, 120))
 
-        # B. Cek Pejalan Kaki (Person yang tidak berdekatan dengan plat)
-        for per in person_dets:
-            tid = per.get("track_id", -1)
-            cls_id = per.get("cls", 0)
+        cv2.addWeighted(
+            overlay,
+            0.10,
+            frame,
+            0.90,
+            0,
+            frame,
+        )
 
-            # Hanya simpan pejalan kaki (class 0 = person) yang belum dicapture
-            if cls_id == 0 and tid != -1:
-                cache_key = f"cam{camera_id}_person_{tid}"
-                if cache_key not in self.captured_tracks or (current_time - self.captured_tracks[cache_key] > 8.0):
-                    self.captured_tracks[cache_key] = current_time
+        cv2.polylines(
+            frame,
+            [mid],
+            True,
+            (255, 180, 0),
+            2,
+            cv2.LINE_AA,
+        )
 
-                    bx1, by1, bx2, by2 = per["box"]
-                    x1, y1 = max(0, bx1), max(0, by1)
-                    x2, y2 = min(w, bx2), min(h, by2)
-                    person_crop = frame[y1:y2, x1:x2]
+        cv2.polylines(
+            frame,
+            [near],
+            True,
+            (0, 255, 120),
+            2,
+            cv2.LINE_AA,
+        )
 
-                    if person_crop.size > 0 and (x2 - x1) >= 30 and (y2 - y1) >= 60:
-                        try:
-                            db.save_detection_event(
-                                camera_id=camera_id,
-                                plate_number=None,
-                                plate_crop=None,
-                                face_crop=person_crop,
-                                face_conf=per["conf"],
-                                track_id=tid
-                            )
-                            print(f"[AI STREAM] Saved Pedestrian -> Track {tid} (Cam {camera_id})")
-                        except Exception as e:
-                            print(f"[AI STREAM ERROR] Save person failed: {e}")
+        # Camera-specific label makes it immediately visible which
+        # calibration is active on the dashboard.
+        camera_label = f"CAM: {_camera_zone_name(camera_id)}"
+        cv2.putText(
+            frame,
+            camera_label,
+            (10, max(24, int(h * 0.07))),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.52,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
+        # Labels
+        if len(mid) > 0:
+            mx, my = mid[0]
+            cv2.putText(
+                frame,
+                "MID: PERSON + VEHICLE",
+                (max(5, mx), max(22, my - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.50,
+                (255, 180, 0),
+                2,
+                cv2.LINE_AA,
+            )
+
+        if len(near) > 0:
+            nx, ny = near[0]
+            cv2.putText(
+                frame,
+                "NEAR: PLATE + OCR",
+                (max(5, nx), max(22, ny - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.50,
+                (0, 255, 120),
+                2,
+                cv2.LINE_AA,
+            )
+
 
     def _draw_clean_bboxes(self, frame, results):
-        """Menggambar bounding box modern & minimalis (tanpa info FPS/debug berlebihan)."""
-        # 1. Gambar Person / Pengendara (Amber / Vibrant Orange)
-        for per in results.get("persons", []):
-            x1, y1, x2, y2 = per["box"]
-            cls_id = per.get("cls", 0)
-            label = "Pengendara" if cls_id in (2, 3) else "Orang"
-            color = (0, 165, 255) if cls_id == 0 else (0, 200, 255)
+        for obj in results.get("persons", []):
+            x1, y1, x2, y2 = [int(v) for v in obj["box"]]
+            cls_id = int(obj.get("cls", 0))
+            conf = _safe_float(obj.get("conf", 0.0))
+            track_id = int(obj.get("track_id", -1))
 
-            # Rectangle border
+            zone = obj.get("distance_zone", "")
+            zone_label = f" {zone}" if zone else ""
+
+            if cls_id == 0:
+                label = f"Orang ID:{track_id} {conf:.0%}{zone_label}"
+                color = (0, 165, 255)
+            elif cls_id == 2:
+                label = f"Mobil ID:{track_id} {conf:.0%}{zone_label}"
+                color = (0, 200, 255)
+            elif cls_id == 3:
+                label = f"Motor ID:{track_id} {conf:.0%}{zone_label}"
+                color = (0, 200, 255)
+            elif cls_id == 5:
+                label = f"Bus ID:{track_id} {conf:.0%}{zone_label}"
+                color = (0, 200, 255)
+            elif cls_id == 7:
+                label = f"Truk ID:{track_id} {conf:.0%}{zone_label}"
+                color = (0, 200, 255)
+            else:
+                label = f"Objek {conf:.0%}{zone_label}"
+                color = (0, 200, 255)
+
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            (tw, th), _ = cv2.getTextSize(
+                label,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.48,
+                1,
+            )
+            by = max(0, y1 - th - 8)
+            cv2.rectangle(frame, (x1, by), (x1 + tw + 10, y1), color, -1)
+            cv2.putText(
+                frame,
+                label,
+                (x1 + 5, max(12, y1 - 4)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.48,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
 
-            # Badge Label
-            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 1)
-            bg_y1 = max(0, y1 - th - 8)
-            cv2.rectangle(frame, (x1, bg_y1), (x1 + tw + 10, y1), color, -1)
-            cv2.putText(frame, label, (x1 + 5, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1, cv2.LINE_AA)
+        for plate in results.get("plates", []):
+            bbox = plate.get("box", plate.get("bbox"))
+            if not bbox or len(bbox) != 4:
+                continue
 
-        # 2. Gambar Plat Nomor (Emerald Green / Neon Cyan)
-        for p in results.get("plates", []):
-            x1, y1, x2, y2 = p["box"]
-            plate_text = p.get("text")
-            label = plate_text if plate_text else "Plat Nomor"
-            color = (0, 230, 118) if plate_text else (255, 215, 0)
+            x1, y1, x2, y2 = [int(v) for v in bbox]
+            text = plate.get("text", "")
+            ocr_conf = _safe_float(plate.get("ocr_conf", 0.0))
+            p_conf = _safe_float(plate.get("conf", 0.0))
+            valid = bool(plate.get("valid", False))
+            votes = int(plate.get("votes", 0) or 0)
 
-            # Rectangle border
+            if valid and text:
+                label = f"{text} OCR:{ocr_conf:.0%} V:{votes}"
+                color = (0, 230, 118)
+            elif text:
+                label = f"Review {text} {ocr_conf:.0%}"
+                color = (0, 215, 255)
+            else:
+                ocr_ready = bool(
+                    plate.get("ocr_ready", False)
+                )
+                readiness = " OCR-READY" if ocr_ready else " TERLALU KECIL"
+                label = (
+                    f"Plat YOLO:{p_conf:.0%}"
+                    f"{readiness}"
+                )
+                color = (0, 215, 255)
+
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-
-            # Badge Label
-            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.52, 2)
-            bg_y1 = max(0, y1 - th - 8)
-            cv2.rectangle(frame, (x1, bg_y1), (x1 + tw + 12, y1), color, -1)
-            cv2.putText(frame, label, (x1 + 6, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 0, 0), 2, cv2.LINE_AA)
+            (tw, th), _ = cv2.getTextSize(
+                label,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.50,
+                2,
+            )
+            by = max(0, y1 - th - 8)
+            cv2.rectangle(frame, (x1, by), (x1 + tw + 12, y1), color, -1)
+            cv2.putText(
+                frame,
+                label,
+                (x1 + 6, max(14, y1 - 4)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.50,
+                (0, 0, 0),
+                2,
+                cv2.LINE_AA,
+            )

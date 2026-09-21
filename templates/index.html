@@ -4,11 +4,213 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{ title or 'PlateVision' }}</title>
+    <title>{{ title or 'WIKOVISION' }}</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <!-- Theme Anti-FOUC Script -->
+    <script>
+        (function () {
+            try {
+                var savedTheme = localStorage.getItem('platevision_theme') || localStorage.getItem('theme');
+                var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+                if (savedTheme === 'dark' || (!savedTheme && prefersDark)) {
+                    document.documentElement.classList.add('dark');
+                    document.documentElement.setAttribute('data-bs-theme', 'dark');
+                } else {
+                    document.documentElement.classList.remove('dark');
+                    document.documentElement.setAttribute('data-bs-theme', 'light');
+                }
+            } catch (e) { }
+        })();
+    </script>
+    <!-- Tailwind CSS with custom config (preflight disabled to preserve existing Bootstrap styles) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        darkbg: '#0c121e',
+                        darkpanel: '#111a2e',
+                        darkborder: '#1e293b'
+                    }
+                }
+            },
+            corePlugins: {
+                preflight: false
+            }
+        };
+    </script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=2.7">
+    <!-- ============================================================
+         DETECTION CAPTURE PREVIEW - COMPACT + LARGER IMAGE
+         Modal tetap proporsional, tetapi capture dibuat lebih besar.
+         Tidak mengubah file capture asli.
+         ============================================================ -->
+    <style>
+        /* ============================================================
+           MODAL
+           ============================================================ */
+
+        .detection-image-modal {
+            width: 820px;
+            max-width: 90vw;
+            margin: 1rem auto;
+        }
+
+        .detection-image-modal .modal-content {
+            max-height: 90vh;
+            overflow: hidden;
+            border-radius: 12px;
+        }
+
+        .detection-image-modal .modal-header {
+            padding: 14px 18px 8px;
+        }
+
+        .detection-image-modal .modal-title {
+            font-size: 1rem;
+        }
+
+        /* ============================================================
+           BODY PREVIEW
+           ============================================================ */
+
+        .detection-image-body {
+            padding: 8px 18px 10px !important;
+        }
+
+        /* Area tempat capture ditampilkan */
+        .preview-img-container {
+            width: 100%;
+            height: 400px;
+
+            min-height: 300px;
+            max-height: 400px;
+
+            background: #171c22 !important;
+
+            border: 1px solid rgba(255, 255, 255, 0.10);
+            border-radius: 10px;
+
+            display: flex;
+            align-items: center;
+            justify-content: center;
+
+            overflow: hidden;
+            position: relative;
+        }
+
+        /* ============================================================
+           CAPTURE IMAGE
+
+           Berbeda dari versi sebelumnya:
+           - width 78% memaksa capture kecil menjadi lebih besar
+           - height auto menjaga aspect ratio
+           - max-height mencegah capture portrait terlalu tinggi
+           - max-width mencegah gambar memenuhi seluruh modal
+           ============================================================ */
+
+        .detection-preview-image {
+            width: 78%;
+            height: auto;
+
+            max-width: 620px;
+            max-height: 360px;
+
+            display: block;
+
+            object-fit: contain;
+            object-position: center;
+
+            border-radius: 6px;
+
+            image-rendering: auto;
+
+            transform: none !important;
+            transition: none !important;
+        }
+
+        /* Tidak ada zoom tambahan saat hover */
+        .detection-preview-image:hover {
+            transform: none !important;
+        }
+
+        /* ============================================================
+           FOOTER
+           ============================================================ */
+
+        .detection-image-modal .modal-footer {
+            padding: 6px 18px 12px;
+        }
+
+        #imagePreviewDetails {
+            font-size: 0.78rem;
+        }
+
+        /* ============================================================
+           TABLET
+           ============================================================ */
+
+        @media (max-width: 768px) {
+
+            .detection-image-modal {
+                width: 92vw;
+                max-width: 92vw;
+            }
+
+            .preview-img-container {
+                height: 350px;
+                min-height: 270px;
+                max-height: 350px;
+            }
+
+            .detection-preview-image {
+                width: 82%;
+                max-width: 560px;
+                max-height: 315px;
+            }
+        }
+
+        /* ============================================================
+           MOBILE
+           ============================================================ */
+
+        @media (max-width: 576px) {
+
+            .detection-image-modal {
+                width: 95vw;
+                max-width: 95vw;
+                margin: 0.5rem auto;
+            }
+
+            .detection-image-body {
+                padding: 6px 10px 8px !important;
+            }
+
+            .preview-img-container {
+                height: 300px;
+                min-height: 220px;
+                max-height: 300px;
+            }
+
+            .detection-preview-image {
+                width: 88%;
+                max-width: 100%;
+                max-height: 270px;
+            }
+
+            .detection-image-modal .modal-header {
+                padding: 12px 12px 6px;
+            }
+
+            .detection-image-modal .modal-footer {
+                padding: 4px 12px 10px;
+            }
+        }
+    </style>
 </head>
 
 <body>
@@ -22,8 +224,8 @@
                 <div class="brand-wrap">
                     <div class="brand-mark">P</div>
                     <div class="brand-text">
-                        <h2>PlateVision</h2>
-                        <small>AI CCTV MONITORING</small>
+                        <h2>WIKO VISION</h2>
+                        <small>DETEKSI MONITORING</small>
                     </div>
                 </div>
                 <button id="sidebarCloseBtn" class="sidebar-close-btn" aria-label="Tutup Menu">
@@ -54,6 +256,11 @@
                         <i class="bi bi-clock-history"></i>
                         <span>Riwayat Plat</span>
                     </a>
+                    <a class="nav-link {% if page == 'recap' %}active{% endif %}"
+                        href="{{ url_for('recap_page.recap') }}" title="Rekapitulasi">
+                        <i class="bi bi-table"></i>
+                        <span>Rekapitulasi</span>
+                    </a>
                     <a class="nav-link {% if page == 'statistics' %}active{% endif %}"
                         href="{{ url_for('statistics_page.statistics') }}" title="Statistik">
                         <i class="bi bi-bar-chart-line-fill"></i>
@@ -63,9 +270,9 @@
                 <div class="nav-section mt-4">Sistem</div>
                 <nav class="nav flex-column gap-1">
                     <a class="nav-link {% if page == 'settings' %}active{% endif %}"
-                        href="{{ url_for('settings_page.settings') }}" title="Pengaturan">
-                        <i class="bi bi-gear-fill"></i>
-                        <span>Pengaturan</span>
+                        href="{{ url_for('settings_page.settings') }}" title="Profil">
+                        <i class="bi bi-person-circle"></i>
+                        <span>Profil</span>
                     </a>
                 </nav>
             </div>
@@ -85,18 +292,14 @@
                     </div>
                 </div>
                 <div class="topbar-actions">
-<<<<<<< Updated upstream
-                    <div class="search-box">
-                        <i class="bi bi-search"></i>
-                        <input placeholder="Cari plat atau CCTV...">
-                    </div>
-=======
-
->>>>>>> Stashed changes
-                    <button class="icon-btn" aria-label="Notifikasi"><i class="bi bi-bell"></i></button>
+                    <!-- Theme Toggle Switcher (Dark / Light Mode) -->
+                    <button id="themeToggleBtn" type="button" class="theme-toggle-btn icon-btn"
+                        aria-label="Ganti Mode Gelap / Terang" title="Ganti Mode Gelap / Terang">
+                        <i id="themeToggleIcon" class="bi bi-moon-stars-fill"></i>
+                    </button>
                     <div class="user-pill">
-                        <div class="avatar">A</div>
-                        <div><strong>Administrator</strong><span>Operator</span></div>
+                        <div id="topbarAvatar" class="avatar">A</div>
+                        <div><strong id="topbarName">Administrator</strong><span id="topbarRole">Operator</span></div>
                     </div>
                 </div>
             </div>
@@ -105,137 +308,135 @@
             <section class="row g-3 stats-row">
                 <div class="col-xl-3 col-md-6 col-sm-6 col-12">
                     <div class="stat-card">
-<<<<<<< Updated upstream
-                        <div class="stat-icon blue"><i class="bi bi-person-fill"></i></div>
-                        <div><span>Orang Terdeteksi</span><strong id="totalVehicle">0</strong><small>Data realtime</small></div>
-=======
                         <div class="stat-icon blue"><i class="bi bi-car-front-fill"></i></div>
                         <div><span>Total Kendaraan</span><strong id="totalVehicle">0</strong><small
                                 id="vehicleFlowLabel">Masuk 0 · Keluar 0</small></div>
->>>>>>> Stashed changes
                     </div>
                 </div>
                 <div class="col-xl-3 col-md-6 col-sm-6 col-12">
                     <div class="stat-card">
                         <div class="stat-icon green"><i class="bi bi-check-circle-fill"></i></div>
-<<<<<<< Updated upstream
-                        <div><span>Plat Berhasil Dibaca</span><strong id="plateRead">0</strong><small>Confidence &gt;= 80%</small></div>
-=======
                         <div><span>Total Plat Terdeteksi</span><strong id="plateRead">0</strong><small>Plat unik: <b
                                     id="uniquePlateCount">0</b></small></div>
->>>>>>> Stashed changes
                     </div>
                 </div>
                 <div class="col-xl-3 col-md-6 col-sm-6 col-12">
                     <div class="stat-card">
                         <div class="stat-icon orange"><i class="bi bi-exclamation-circle-fill"></i></div>
-<<<<<<< Updated upstream
-                        <div><span>Perlu Pemeriksaan</span><strong id="needCheck">0</strong><small>Confidence &lt; 80%</small></div>
-=======
                         <div><span>Total Orang</span><strong id="peopleTotal">0</strong><small
                                 id="peopleFlowLabel">Masuk 0 · Keluar 0</small></div>
->>>>>>> Stashed changes
                     </div>
                 </div>
                 <div class="col-xl-3 col-md-6 col-sm-6 col-12">
                     <div class="stat-card">
                         <div class="stat-icon purple"><i class="bi bi-camera-video-fill"></i></div>
-<<<<<<< Updated upstream
-                        <div><span>CCTV Aktif</span><strong id="cameraStatus">0 / 0</strong><small>Status sistem</small></div>
-=======
                         <div><span>CCTV Aktif</span><strong id="cameraStatus">0 / 0</strong><small>Online dari total
                                 CCTV</small></div>
->>>>>>> Stashed changes
                     </div>
                 </div>
             </section>
             <section class="row g-4 mt-1">
-<<<<<<< Updated upstream
-=======
-                <div class="col-xl-7">
-                    <div class="panel shadow-sm p-4">
+                <div class="col-lg-6 col-12">
+                    <div class="panel shadow-sm p-4 h-100 d-flex flex-column">
                         <div class="panel-header p-0 mb-3">
                             <div>
                                 <h3>Ringkasan Arus</h3>
                                 <p>Perbandingan kendaraan dan orang berdasarkan arah kamera.</p>
                             </div>
                         </div>
-                        <div class="row g-3">
+                        <div class="row g-3 flex-grow-1 align-items-stretch">
                             <div class="col-md-6">
-                                <div class="flow-summary vehicle-flow"><span>Kendaraan</span><strong
-                                        id="vehicleFlowTotal">0</strong><small id="vehicleFlowDetail">Masuk 0 · Keluar
-                                        0</small></div>
+                                <div class="flow-summary vehicle-flow h-100">
+                                    <span>Kendaraan</span>
+                                    <strong id="vehicleFlowTotal">0</strong>
+                                    <small id="vehicleFlowDetail">Masuk 0 · Keluar 0</small>
+                                </div>
                             </div>
                             <div class="col-md-6">
-                                <div class="flow-summary people-flow"><span>Orang</span><strong
-                                        id="peopleFlowTotal">0</strong><small id="peopleFlowDetail">Masuk 0 · Keluar
-                                        0</small></div>
+                                <div class="flow-summary people-flow h-100">
+                                    <span>Orang</span>
+                                    <strong id="peopleFlowTotal">0</strong>
+                                    <small id="peopleFlowDetail">Masuk 0 · Keluar 0</small>
+                                </div>
                             </div>
                         </div>
                     </div>
                 </div>
-                <div class="col-xl-5">
-                    <div class="panel shadow-sm p-4 h-100">
-                        <div class="panel-header p-0 mb-2">
+                <div class="col-lg-6 col-12">
+                    <div class="panel shadow-sm p-4 h-100 d-flex flex-column">
+                        <div class="panel-header p-0 mb-3">
                             <div>
                                 <h3>Insight Terkini</h3>
                                 <p>Berbasis data tersaring hari ini.</p>
                             </div>
                         </div>
-                        <ul id="dashboardInsights" class="insight-list mb-0">
+                        <ul id="dashboardInsights" class="insight-list mb-0 flex-grow-1">
                             <li>Memuat insight...</li>
                         </ul>
                     </div>
                 </div>
             </section>
             <section class="row g-4 mt-1">
->>>>>>> Stashed changes
                 <div class="col-xl-8 col-lg-7">
                     <div class="panel shadow-sm">
-                        <div class="panel-header">
-                            <div>
-                                <h3>Live Monitoring CCTV</h3>
-                                <p>Satu frame untuk deteksi wajah dan plat nomor.</p>
-                            </div>
-                            <div class="d-flex gap-2 align-items-center flex-wrap">
-<<<<<<< Updated upstream
-                                <div class="form-check form-switch mb-0 d-flex align-items-center gap-2 me-1 bbox-switch-container" title="Aktifkan / Nonaktifkan Bounding Box AI">
-                                    <input class="form-check-input" type="checkbox" id="bboxToggle" checked>
-                                    <label class="form-check-label small fw-semibold text-nowrap" for="bboxToggle">
-                                        <i class="bi bi-bounding-box"></i> Bounding Box
-                                    </label>
+                        <div class="livestream-banner">
+                            <!-- Header Title & Subtitle 1 Baris Memanjang -->
+                            <div class="livestream-title-area">
+                                <div class="livestream-heading-group">
+                                    <h3 class="livestream-heading">
+                                        Live Monitoring CCTV
+                                    </h3>
+                                    <p class="livestream-subtitle">Satu frame untuk deteksi wajah dan plat nomor.</p>
                                 </div>
-                                <select id="cameraSelect" class="form-select form-select-sm"></select>
-                                <button id="startStreamBtn" class="btn btn-primary btn-sm" title="Mulai Stream"><i class="bi bi-play-fill"></i></button>
-                                <button id="stopStreamBtn" class="btn btn-outline-danger btn-sm" title="Hentikan Stream"><i class="bi bi-stop-fill"></i></button>
                             </div>
-                        </div>
-                        <div class="video-stage">
-                            <img id="liveStreamImg" class="live-stream-feed" alt="Live CCTV Feed" style="display: none;" />
-=======
-                                <select id="detectionMode" class="form-select form-select-sm"
-                                    title="Pilih sumber deteksi">
-                                    <option value="stream">Stream CCTV</option>
-                                    <option value="video">File Video</option>
-                                </select>
-                                <div class="form-check form-switch mb-0 d-flex align-items-center gap-2 me-1 bbox-switch-container"
-                                    title="Aktifkan / Nonaktifkan Bounding Box AI">
-                                    <input class="form-check-input" type="checkbox" id="bboxToggle" checked>
-                                    <label class="form-check-label small fw-semibold text-nowrap" for="bboxToggle">
 
-                                    </label>
+                            <!-- Controls Box 2 Baris -->
+                            <div class="livestream-controls-box">
+                                <!-- Baris 1: Dropdown Stream CCTV/File Video -->
+                                <div class="control-row">
+                                    <div class="control-row-left w-100">
+                                        <div class="input-group input-group-sm w-100">
+                                            <span class="input-group-text text-muted border-end-0">
+                                                <i class="bi bi-collection-play"></i>
+                                            </span>
+                                            <select id="detectionMode" class="form-select form-select-sm border-start-0"
+                                                title="Pilih sumber deteksi">
+                                                <option value="stream">Stream CCTV</option>
+                                                <option value="video">File Video</option>
+                                            </select>
+                                        </div>
+                                    </div>
                                 </div>
-                                <select id="cameraSelect" class="form-select form-select-sm"></select>
-                                <label id="videoFileLabel" class="btn btn-outline-secondary btn-sm mb-0"
-                                    style="display: none;" title="Pilih file video">
-                                    <i class="bi bi-file-earmark-play"></i>
-                                    <span>Pilih Video</span>
-                                    <input id="videoFileInput" type="file" accept="video/*" hidden>
-                                </label>
-                                <button id="startStreamBtn" class="btn btn-primary btn-sm" title="Mulai Stream"><i
-                                        class="bi bi-play-fill"></i></button>
-                                <button id="stopStreamBtn" class="btn btn-outline-danger btn-sm"
-                                    title="Hentikan Stream"><i class="bi bi-stop-fill"></i></button>
+
+                                <!-- Baris 2: Dropdown Pilihan CCTV (Kiri) + Button Play & Stop (Kanan) -->
+                                <div class="control-row">
+                                    <div class="control-row-left">
+                                        <div class="input-group input-group-sm w-100">
+                                            <span class="input-group-text text-muted border-end-0">
+                                                <i class="bi bi-camera"></i>
+                                            </span>
+                                            <select id="cameraSelect" class="form-select form-select-sm border-start-0"
+                                                title="Pilih kamera CCTV yang tersedia"></select>
+                                        </div>
+                                        <label id="videoFileLabel"
+                                            class="btn btn-outline-secondary btn-sm mb-0 text-nowrap"
+                                            style="display: none;" title="Pilih file video">
+                                            <i class="bi bi-file-earmark-play"></i>
+                                            <span>Pilih Video</span>
+                                            <input id="videoFileInput" type="file" accept="video/*" hidden>
+                                        </label>
+                                    </div>
+                                    <div class="control-row-right">
+                                        <button id="startStreamBtn" class="btn-stream-start" title="Mulai Stream">
+                                            <i class="bi bi-play-fill fs-6"></i>
+                                            <span>Mulai Stream</span>
+                                        </button>
+                                        <button id="stopStreamBtn" class="btn-stream-stop" title="Hentikan Stream">
+                                            <i class="bi bi-stop-fill fs-6"></i>
+                                            <span>Stop Stream</span>
+                                        </button>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                         <div class="video-stage">
@@ -243,7 +444,6 @@
                                 style="display: none;" />
                             <video id="processedVideo" class="live-stream-feed" controls playsinline
                                 style="display: none;" aria-label="Hasil deteksi video"></video>
->>>>>>> Stashed changes
                             <div class="video-placeholder" id="videoPlaceholder">
                                 <div class="camera-icon"><i class="bi bi-camera-video"></i></div>
                                 <strong id="cameraName">Tidak Ada Kamera</strong>
@@ -252,7 +452,7 @@
                                     <span>Tambah Kamera Sekarang</span>
                                 </a>
                             </div>
-                            <div class="live-tag">● LIVE</div>
+
                             <div class="video-time" id="clock">00:00:00 WIB</div>
                         </div>
                     </div>
@@ -273,42 +473,71 @@
             </section>
             {% elif page == 'monitoring' %}
             <section class="panel shadow-sm">
-                <div class="panel-header flex-wrap">
+                <div class="panel-header flex-wrap gap-3">
                     <div>
-                        <h3>Daftar Kamera CCTV (<span id="cameraCountTitle">0</span>)</h3>
+                        <h3>Daftar Kamera CCTV</h3>
                         <p>Kelola kamera CCTV untuk monitoring dan deteksi.</p>
                     </div>
-                    <div class="playlist-actions">
-                        <button type="button" class="btn-action-outline" onclick="exportCameras('xspf')">
-                            <i class="bi bi-filetype-xml"></i>
-                            <span>Ekspor XSPF</span>
-                        </button>
-                        <button type="button" class="btn-action-outline" onclick="exportCameras('excel')">
-                            <i class="bi bi-file-earmark-spreadsheet"></i>
-                            <span>Ekspor Excel</span>
-                        </button>
-                        <button type="button" class="btn-action-primary" onclick="openCameraModal()">
-                            <i class="bi bi-plus-lg"></i>
-                            <span>Tambah Kamera</span>
-                        </button>
+                    <div class="d-flex align-items-center gap-2 flex-wrap ms-auto">
+                        <div class="playlist-actions">
+
+                            <button type="button" class="btn-action-outline" onclick="exportCameras('xspf')">
+                                <i class="bi bi-filetype-xml"></i>
+                                <span>Ekspor XSPF</span>
+                            </button>
+                            <button type="button" class="btn-action-outline" onclick="exportCameras('excel')">
+                                <i class="bi bi-file-earmark-spreadsheet"></i>
+                                <span>Ekspor Excel</span>
+                            </button>
+                            <button type="button" class="btn-action-outline" onclick="exportCameras('pdf')">
+                                <i class="bi bi-file-earmark-pdf"></i>
+                                <span>Download PDF</span>
+                            </button>
+                            <div class="input-group input-group-sm" style="width: 220px;">
+                                <span class="input-group-text text-muted border-end-0"><i
+                                        class="bi bi-search"></i></span>
+                                <input id="cameraSearchInput" type="text" class="form-control border-start-0"
+                                    placeholder="Cari nama kamera...">
+                            </div>
+                            <button type="button" class="btn-action-primary" onclick="openCameraModal()">
+                                <i class="bi bi-plus-lg"></i>
+                                <span>Tambah Kamera</span>
+                            </button>
+                        </div>
                     </div>
                 </div>
                 <div class="table-responsive">
                     <table class="table align-middle mb-0 playlist-table">
                         <thead>
                             <tr>
+                                <th class="text-center" style="width: 60px;">No</th>
                                 <th>Nama</th>
                                 <th>URL</th>
-                                <th>Status</th>
-                                <th>Aksi</th>
+                                <th class="text-center" style="width: 120px;">Status</th>
+                                <th class="text-center" style="width: 250px;">Aksi</th>
                             </tr>
                         </thead>
                         <tbody id="cameraTable">
                             <tr>
-                                <td colspan="4" class="text-center text-muted py-5">Belum ada kamera.</td>
+                                <td colspan="5" class="text-center text-muted py-5">Memuat data kamera...</td>
                             </tr>
                         </tbody>
                     </table>
+                </div>
+
+                <!-- Pagination Footer (Max 10 Data per Halaman) -->
+                <div
+                    class="panel-footer p-3 d-flex justify-content-between align-items-center flex-wrap gap-2 border-top">
+                    <div class="small text-muted" id="cameraPaginationInfo">Menampilkan 0 kamera</div>
+                    <div class="d-flex gap-2 align-items-center">
+                        <button id="cameraPrevBtn" class="btn btn-outline-secondary btn-sm" disabled>
+                            <i class="bi bi-chevron-left"></i> Sebelumnya
+                        </button>
+                        <span id="cameraPageNumber" class="small fw-bold px-2">Hal 1</span>
+                        <button id="cameraNextBtn" class="btn btn-outline-secondary btn-sm" disabled>
+                            Selanjutnya <i class="bi bi-chevron-right"></i>
+                        </button>
+                    </div>
                 </div>
             </section>
             {% elif page == 'detections' %}
@@ -321,56 +550,77 @@
                     <div class="d-flex gap-2 align-items-center flex-wrap">
                         <button type="button" class="btn-action-outline" onclick="exportDetections()">
                             <i class="bi bi-file-earmark-spreadsheet"></i>
-                            <span>Ekspor CSV</span>
+                            <span>Ekspor Excel</span>
                         </button>
+                        <button type="button" class="btn-action-outline" onclick="exportDetectionsPdf()">
+                            <i class="bi bi-file-earmark-pdf"></i>
+                            <span>Ekspor PDF</span>
+                        </button>
+                        <div class="input-group input-group-sm" style="width: 240px;">
+                            <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
+                            <input id="detectionSearch" class="form-control" placeholder="Cari plat atau lokasi...">
+                        </div>
                     </div>
                 </div>
 
                 <!-- Filter Bar -->
-                <div class="filter-toolbar p-3 border-bottom bg-light d-flex gap-2 flex-wrap align-items-center">
-                    <div class="btn-group btn-group-sm" role="group" id="detTypeButtonGroup">
-                        <button type="button" class="btn btn-outline-primary active" data-type="all">Semua Tipe</button>
-                        <button type="button" class="btn btn-outline-primary" data-type="plate"><i
-                                class="bi bi-card-heading"></i> Plat Nomor</button>
-                        <button type="button" class="btn btn-outline-primary" data-type="face"><i
-                                class="bi bi-person"></i> Wajah / Orang</button>
+                <div class="filter-toolbar p-3 border-bottom">
+                    <div class="row g-2 align-items-end">
+                        <div class="col-xl-2 col-md-4 col-sm-6 col-12">
+                            <label class="form-label small text-muted mb-1 fw-semibold">Jenis Deteksi</label>
+                            <select id="detTypeFilter" class="form-select form-select-sm" title="Filter jenis deteksi">
+                                <option value="all">Semua Jenis</option>
+                                <option value="person">Orang</option>
+                                <option value="vehicle">Kendaraan</option>
+                                <option value="plate">Plat Nomor</option>
+                            </select>
+                        </div>
+                        <div class="col-xl-2 col-md-4 col-sm-6 col-12">
+                            <label class="form-label small text-muted mb-1 fw-semibold">Kamera CCTV</label>
+                            <select id="detCameraFilter" class="form-select form-select-sm">
+                                <option value="">Semua Kamera</option>
+                            </select>
+                        </div>
+                        <div class="col-xl-2 col-md-4 col-sm-6 col-12">
+                            <label class="form-label small text-muted mb-1 fw-semibold">Status Validasi</label>
+                            <select id="detStatusFilter" class="form-select form-select-sm">
+                                <option value="all">Semua Status</option>
+                                <option value="1">Terbaca / Valid</option>
+                                <option value="2">Perlu Pemeriksaan</option>
+                                <option value="0">Gagal / Buram</option>
+                            </select>
+                        </div>
+                        <div class="col-xl-2 col-md-4 col-sm-6 col-12">
+                            <label class="form-label small text-muted mb-1 fw-semibold">Periode</label>
+                            <select id="detPeriodFilter" class="form-select form-select-sm"
+                                title="Filter periode deteksi">
+                                <option value="today">Hari Ini</option>
+                                <option value="7d">7 Hari Terakhir</option>
+                                <option value="30d">30 Hari Terakhir</option>
+                                <option value="all">Semua Waktu</option>
+                                <option value="custom">Kustom Tanggal</option>
+                            </select>
+                        </div>
+                        <div class="col-xl-4 col-md-8 col-sm-12 col-12">
+                            <label class="form-label small text-muted mb-1 fw-semibold">Rentang Tanggal</label>
+                            <div class="d-flex align-items-center gap-1">
+                                <input id="detStartDate" type="date" class="form-control form-control-sm"
+                                    title="Tanggal mulai" aria-label="Tanggal mulai deteksi">
+                                <span class="small text-muted">-</span>
+                                <input id="detEndDate" type="date" class="form-control form-control-sm"
+                                    title="Tanggal akhir" aria-label="Tanggal akhir deteksi">
+                            </div>
+                        </div>
                     </div>
-
-                    <select id="detCameraFilter" class="form-select form-select-sm" style="max-width: 180px;">
-                        <option value="">Semua Kamera</option>
-                    </select>
-
-                    <select id="detStatusFilter" class="form-select form-select-sm" style="max-width: 160px;">
-                        <option value="all">Semua Status</option>
-                        <option value="1">Terbaca / Valid</option>
-                        <option value="2">Perlu Pemeriksaan</option>
-                        <option value="0">Gagal / Buram</option>
-                    </select>
-
-<<<<<<< Updated upstream
-                    <div class="input-group input-group-sm ms-auto" style="max-width: 240px;">
-                        <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
-                        <input id="detectionSearch" class="form-control" placeholder="Cari plat atau lokasi...">
-=======
-                    <div class="date-filter-group d-flex align-items-center gap-2 flex-nowrap">
-                        <select id="detPeriodFilter" class="form-select form-select-sm" title="Filter periode deteksi">
-                            <option value="today">Hari Ini</option>
-                            <option value="2d">2 Hari</option>
-                            <option value="7d">7 Hari</option>
-                            <option value="30d">1 Bulan</option>
-                            <option value="all">Semua</option>
-                        </select>
-
-                        <input id="detStartDate" type="date" class="form-control form-control-sm" title="Tanggal mulai"
-                            aria-label="Tanggal mulai deteksi">
-                        <span class="small text-muted text-nowrap">sampai</span>
-                        <input id="detEndDate" type="date" class="form-control form-control-sm" title="Tanggal akhir"
-                            aria-label="Tanggal akhir deteksi">
+                    <div class="d-flex gap-2 align-items-center pt-2 mt-2 border-top filter-action-row">
                         <button id="detDateApply" type="button" class="btn btn-primary btn-sm text-nowrap"
                             title="Terapkan rentang tanggal">
                             <i class="bi bi-funnel"></i> Terapkan
                         </button>
->>>>>>> Stashed changes
+                        <button id="detResetBtn" type="button" class="btn btn-outline-secondary btn-sm text-nowrap"
+                            title="Reset semua filter">
+                            <i class="bi bi-arrow-counterclockwise"></i> Reset
+                        </button>
                     </div>
                 </div>
 
@@ -421,52 +671,69 @@
                     <div class="d-flex gap-2 align-items-center flex-wrap">
                         <button type="button" class="btn-action-outline" onclick="exportPlates()">
                             <i class="bi bi-file-earmark-spreadsheet"></i>
-                            <span>Ekspor CSV</span>
+                            <span>Ekspor Excel</span>
                         </button>
+                        <button type="button" class="btn-action-outline" onclick="exportPlatesPdf()">
+                            <i class="bi bi-file-earmark-pdf"></i>
+                            <span>Ekspor PDF</span>
+                        </button>
+                        <div class="input-group input-group-sm ms-md-1" style="width: 240px;">
+                            <span class="input-group-text"><i class="bi bi-search"></i></span>
+                            <input id="plateSearch" class="form-control" placeholder="Cari plat (contoh: B 1234)...">
+                        </div>
                     </div>
                 </div>
 
                 <!-- Filter Bar -->
-                <div class="filter-toolbar p-3 border-bottom bg-light d-flex gap-2 flex-wrap align-items-center">
-                    <div class="input-group input-group-sm" style="max-width: 260px;">
-                        <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
-                        <input id="plateSearch" class="form-control" placeholder="Cari plat (contoh: B 1234)...">
+                <div class="filter-toolbar p-3 border-bottom">
+                    <div class="row g-2 align-items-end">
+                        <div class="col-xl-3 col-md-6 col-sm-6 col-12">
+                            <label class="form-label small text-muted mb-1 fw-semibold">Kamera CCTV</label>
+                            <select id="plateCameraFilter" class="form-select form-select-sm">
+                                <option value="">Semua Kamera</option>
+                            </select>
+                        </div>
+                        <div class="col-xl-2 col-md-6 col-sm-6 col-12">
+                            <label class="form-label small text-muted mb-1 fw-semibold">Status Validasi</label>
+                            <select id="plateStatusFilter" class="form-select form-select-sm">
+                                <option value="all">Semua Status</option>
+                                <option value="1">Terbaca / Jelas</option>
+                                <option value="2">Perlu Cek</option>
+                                <option value="0">Gagal</option>
+                            </select>
+                        </div>
+                        <div class="col-xl-2 col-md-4 col-sm-6 col-12">
+                            <label class="form-label small text-muted mb-1 fw-semibold">Periode</label>
+                            <select id="platePeriodFilter" class="form-select form-select-sm"
+                                title="Filter periode riwayat">
+                                <option value="today">Hari Ini</option>
+                                <option value="7d">7 Hari Terakhir</option>
+                                <option value="30d">30 Hari Terakhir</option>
+                                <option value="all">Semua Waktu</option>
+                                <option value="custom">Kustom Tanggal</option>
+                            </select>
+                        </div>
+                        <div class="col-xl-5 col-md-8 col-sm-12 col-12">
+                            <label class="form-label small text-muted mb-1 fw-semibold">Rentang Tanggal</label>
+                            <div class="d-flex align-items-center gap-1">
+                                <input id="plateStartDate" type="date" class="form-control form-control-sm"
+                                    title="Tanggal mulai" aria-label="Tanggal mulai riwayat">
+                                <span class="small text-muted">-</span>
+                                <input id="plateEndDate" type="date" class="form-control form-control-sm"
+                                    title="Tanggal akhir" aria-label="Tanggal akhir riwayat">
+                            </div>
+                        </div>
                     </div>
-
-                    <select id="plateCameraFilter" class="form-select form-select-sm" style="max-width: 180px;">
-                        <option value="">Semua Kamera</option>
-                    </select>
-
-                    <select id="plateStatusFilter" class="form-select form-select-sm" style="max-width: 160px;">
-                        <option value="all">Semua Status</option>
-                        <option value="1">Terbaca / Jelas</option>
-                        <option value="2">Perlu Cek</option>
-                        <option value="0">Gagal</option>
-                    </select>
-<<<<<<< Updated upstream
-=======
-
-                    <div class="date-filter-group d-flex align-items-center gap-2 flex-nowrap">
-                        <select id="platePeriodFilter" class="form-select form-select-sm"
-                            title="Filter periode riwayat">
-                            <option value="today">Hari Ini</option>
-                            <option value="2d">2 Hari</option>
-                            <option value="7d">7 Hari</option>
-                            <option value="30d">1 Bulan</option>
-                            <option value="all">Semua</option>
-                        </select>
-
-                        <input id="plateStartDate" type="date" class="form-control form-control-sm"
-                            title="Tanggal mulai" aria-label="Tanggal mulai riwayat">
-                        <span class="small text-muted text-nowrap">sampai</span>
-                        <input id="plateEndDate" type="date" class="form-control form-control-sm" title="Tanggal akhir"
-                            aria-label="Tanggal akhir riwayat">
+                    <div class="d-flex gap-2 align-items-center pt-2 mt-2 border-top filter-action-row">
                         <button id="plateDateApply" type="button" class="btn btn-primary btn-sm text-nowrap"
                             title="Terapkan rentang tanggal">
                             <i class="bi bi-funnel"></i> Terapkan
                         </button>
+                        <button id="plateResetBtn" type="button" class="btn btn-outline-secondary btn-sm text-nowrap"
+                            title="Reset semua filter">
+                            <i class="bi bi-arrow-counterclockwise"></i> Reset
+                        </button>
                     </div>
->>>>>>> Stashed changes
                 </div>
 
                 <div class="table-responsive">
@@ -505,43 +772,73 @@
                     </div>
                 </div>
             </section>
-<<<<<<< Updated upstream
-            {% elif page == 'statistics' %}
-            <div class="statistics-enterprise-container">
-=======
             {% elif page == 'recap' %}
             <div class="analytics-page" id="recapPage">
                 <div class="panel shadow-sm p-3 mb-4 analytics-filters">
-                    <div class="d-flex flex-wrap gap-2 align-items-end">
-                        <div><label class="form-label small">Periode</label><select id="recapPeriod"
-                                class="form-select form-select-sm">
+                    <div class="row g-2 align-items-end mb-3">
+                        <div class="col-xl-2 col-md-4 col-sm-6 col-12">
+                            <label class="form-label small text-muted mb-1 fw-semibold">Periode</label>
+                            <select id="recapPeriod" class="form-select form-select-sm">
                                 <option value="today">Hari ini</option>
                                 <option value="7d">7 hari terakhir</option>
                                 <option value="30d">30 hari terakhir</option>
                                 <option value="all">Semua waktu</option>
-                            </select></div>
-                        <div><label class="form-label small">Tanggal mulai</label><input id="recapStart" type="date"
-                                class="form-control form-control-sm"></div>
-                        <div><label class="form-label small">Tanggal akhir</label><input id="recapEnd" type="date"
-                                class="form-control form-control-sm"></div>
-                        <div><label class="form-label small">CCTV</label><select id="recapCamera"
-                                class="form-select form-select-sm">
+                                <option value="custom">Kustom tanggal</option>
+                            </select>
+                        </div>
+                        <div class="col-xl-4 col-md-8 col-sm-12 col-12">
+                            <label class="form-label small text-muted mb-1 fw-semibold">Rentang Tanggal</label>
+                            <div class="d-flex align-items-center gap-1">
+                                <input id="recapStart" type="date" class="form-control form-control-sm"
+                                    title="Tanggal mulai">
+                                <span class="small text-muted">-</span>
+                                <input id="recapEnd" type="date" class="form-control form-control-sm"
+                                    title="Tanggal akhir">
+                            </div>
+                        </div>
+                        <div class="col-xl-2 col-md-4 col-sm-6 col-12">
+                            <label class="form-label small text-muted mb-1 fw-semibold">Jenis Objek</label>
+                            <select id="recapObjectType" class="form-select form-select-sm" title="Filter jenis objek">
+                                <option value="">Semua Jenis</option>
+                                <option value="person">Orang</option>
+                                <option value="vehicle">Kendaraan</option>
+                                <option value="plate">Plat Nomor</option>
+                            </select>
+                        </div>
+                        <div class="col-xl-2 col-md-4 col-sm-6 col-12">
+                            <label class="form-label small text-muted mb-1 fw-semibold">Kamera CCTV</label>
+                            <select id="recapCamera" class="form-select form-select-sm">
                                 <option value="">Semua CCTV</option>
-                            </select></div>
-                        <div><label class="form-label small">Wilayah</label><input id="recapRegion"
-                                class="form-control form-control-sm" placeholder="Cari wilayah"></div>
-                        <div><label class="form-label small">Gerbang</label><input id="recapGate"
-                                class="form-control form-control-sm" placeholder="Cari gerbang"></div>
-                        <div><label class="form-label small">Arah</label><select id="recapDirection"
-                                class="form-select form-select-sm">
+                            </select>
+                        </div>
+                        <div class="col-xl-2 col-md-4 col-sm-6 col-12">
+                            <label class="form-label small text-muted mb-1 fw-semibold">Arah Gerbang</label>
+                            <select id="recapDirection" class="form-select form-select-sm">
                                 <option value="">Semua arah</option>
                                 <option value="entry">Masuk</option>
                                 <option value="exit">Keluar</option>
-                            </select></div>
-                        <button id="recapApply" class="btn btn-primary btn-sm"><i class="bi bi-funnel"></i>
-                            Terapkan</button>
-                        <button id="recapExport" class="btn btn-outline-success btn-sm"><i class="bi bi-download"></i>
-                            CSV</button>
+                            </select>
+                        </div>
+                    </div>
+                    <div
+                        class="d-flex flex-wrap gap-2 align-items-center justify-content-between pt-2 border-top filter-action-row">
+                        <div class="d-flex gap-2 align-items-center">
+                            <button id="recapApply" type="button" class="btn btn-primary btn-sm text-nowrap">
+                                <i class="bi bi-funnel"></i> Terapkan
+                            </button>
+                            <button id="recapResetBtn" type="button"
+                                class="btn btn-outline-secondary btn-sm text-nowrap" title="Reset semua filter">
+                                <i class="bi bi-arrow-counterclockwise"></i> Reset
+                            </button>
+                        </div>
+                        <div class="d-flex gap-2 align-items-center">
+                            <button id="recapExport" type="button" class="btn btn-outline-success btn-sm text-nowrap">
+                                <i class="bi bi-file-earmark-spreadsheet"></i> Ekspor Excel
+                            </button>
+                            <button id="recapExportPdf" type="button" class="btn btn-outline-danger btn-sm text-nowrap">
+                                <i class="bi bi-file-earmark-pdf"></i> Ekspor PDF
+                            </button>
+                        </div>
                     </div>
                 </div>
                 <div class="row g-3 mb-4" id="recapTotals"></div>
@@ -603,74 +900,70 @@
             {% elif page == 'statistics' %}
             <div class="statistics-enterprise-container">
                 <div class="panel shadow-sm p-3 mb-4 analytics-filters">
-                    <div class="d-flex flex-wrap gap-2 align-items-end">
-                        <div><label class="form-label small">Periode</label><select id="statsPeriod"
-                                class="form-select form-select-sm">
+                    <div class="row g-2 align-items-end mb-3">
+                        <div class="col-xl-2 col-md-4 col-sm-6 col-12">
+                            <label class="form-label small text-muted mb-1 fw-semibold">Periode</label>
+                            <select id="statsPeriod" class="form-select form-select-sm">
                                 <option value="today">Hari ini</option>
                                 <option value="7d">7 hari terakhir</option>
                                 <option value="30d">30 hari terakhir</option>
                                 <option value="all">Semua waktu</option>
-                            </select></div>
-                        <div><label class="form-label small">Tanggal mulai</label><input id="statsStart" type="date"
-                                class="form-control form-control-sm"></div>
-                        <div><label class="form-label small">Tanggal akhir</label><input id="statsEnd" type="date"
-                                class="form-control form-control-sm"></div>
-                        <div><label class="form-label small">CCTV</label><select id="statsCamera"
-                                class="form-select form-select-sm">
-                                <option value="">Semua CCTV</option>
-                            </select></div>
-                        <div><label class="form-label small">Wilayah</label><input id="statsRegion"
-                                class="form-control form-control-sm" placeholder="Cari wilayah"></div>
-                        <div><label class="form-label small">Gerbang</label><input id="statsGate"
-                                class="form-control form-control-sm" placeholder="Cari gerbang"></div>
-                        <div><label class="form-label small">Jenis</label><select id="statsObjectType"
-                                class="form-select form-select-sm">
-                                <option value="">Semua</option>
-                                <option value="vehicle">Kendaraan</option>
-                                <option value="person">Orang</option>
-                            </select></div>
-                        <button id="statsApply" class="btn btn-primary btn-sm"><i class="bi bi-funnel"></i>
-                            Terapkan</button>
-                    </div>
-                </div>
->>>>>>> Stashed changes
-                <!-- Enterprise Toolbar & Period Switcher -->
-                <div class="panel shadow-sm p-3 mb-4 d-flex justify-content-between align-items-center flex-wrap gap-3">
-                    <div class="d-flex align-items-center gap-3">
-                        <div class="period-btn-group btn-group" role="group" id="statsPeriodGroup">
-                            <button type="button" class="btn btn-sm btn-outline-primary active" data-period="today">Hari
-                                Ini</button>
-                            <button type="button" class="btn btn-sm btn-outline-primary" data-period="7d">7 Hari
-                                Terakhir</button>
-                            <button type="button" class="btn btn-sm btn-outline-primary" data-period="30d">30
-                                Hari</button>
-                            <button type="button" class="btn btn-sm btn-outline-primary" data-period="all">Semua
-                                Waktu</button>
+                                <option value="custom">Kustom tanggal</option>
+                            </select>
                         </div>
-                        <span id="statsPeriodBadge"
-                            class="badge bg-primary-subtle text-primary border border-primary-subtle px-3 py-2">Hari
-                            Ini</span>
+                        <div class="col-xl-5 col-md-8 col-sm-12 col-12">
+                            <label class="form-label small text-muted mb-1 fw-semibold">Rentang Tanggal</label>
+                            <div class="d-flex align-items-center gap-1">
+                                <input id="statsStart" type="date" class="form-control form-control-sm"
+                                    title="Tanggal mulai">
+                                <span class="small text-muted">-</span>
+                                <input id="statsEnd" type="date" class="form-control form-control-sm"
+                                    title="Tanggal akhir">
+                            </div>
+                        </div>
+                        <div class="col-xl-2 col-md-4 col-sm-6 col-12">
+                            <label class="form-label small text-muted mb-1 fw-semibold">Jenis Objek</label>
+                            <select id="statsObjectType" class="form-select form-select-sm" title="Filter jenis objek">
+                                <option value="">Semua Jenis</option>
+                                <option value="person">Orang</option>
+                                <option value="vehicle">Kendaraan</option>
+                                <option value="plate">Plat Nomor</option>
+                            </select>
+                        </div>
+                        <div class="col-xl-3 col-md-8 col-sm-6 col-12">
+                            <label class="form-label small text-muted mb-1 fw-semibold">Kamera CCTV</label>
+                            <select id="statsCamera" class="form-select form-select-sm">
+                                <option value="">Semua CCTV</option>
+                            </select>
+                        </div>
                     </div>
-
-                    <div class="d-flex align-items-center gap-2">
-                        <button type="button" class="btn btn-sm btn-outline-secondary"
-                            onclick="loadEnterpriseStatistics()" title="Muat Ulang Data">
-                            <i class="bi bi-arrow-clockwise"></i> Refresh
-                        </button>
-                        <button type="button" class="btn btn-sm btn-outline-success" onclick="exportStatsReport()"
-                            title="Ekspor Rekap CSV">
-                            <i class="bi bi-file-earmark-spreadsheet"></i> Ekspor CSV
-                        </button>
-                        <button type="button" class="btn btn-sm btn-primary" onclick="window.print()"
-                            title="Cetak Laporan PDF">
-                            <i class="bi bi-printer"></i> Cetak / PDF
-                        </button>
+                    <div
+                        class="d-flex flex-wrap gap-2 align-items-center justify-content-between pt-2 border-top filter-action-row">
+                        <div class="d-flex gap-2 align-items-center">
+                            <button id="statsApply" type="button" class="btn btn-primary btn-sm text-nowrap">
+                                <i class="bi bi-funnel"></i> Terapkan
+                            </button>
+                            <button id="statsResetBtn" type="button"
+                                class="btn btn-outline-secondary btn-sm text-nowrap" title="Reset semua filter">
+                                <i class="bi bi-arrow-counterclockwise"></i> Reset
+                            </button>
+                        </div>
+                        <div class="d-flex gap-2 align-items-center">
+                            <button type="button" class="btn btn-outline-success btn-sm text-nowrap"
+                                onclick="exportStatsReport()" title="Ekspor Excel"><i
+                                    class="bi bi-file-earmark-spreadsheet"></i> Ekspor Excel</button>
+                            <button type="button" class="btn btn-primary btn-sm text-nowrap" onclick="exportStatsPdf()"
+                                title="Download Laporan PDF"><i class="bi bi-file-earmark-pdf"></i> Ekspor PDF</button>
+                            <button type="button" class="btn btn-outline-secondary btn-sm text-nowrap"
+                                onclick="loadEnterpriseStatistics()" title="Muat Ulang Data"><i
+                                    class="bi bi-arrow-clockwise"></i> Refresh</button>
+                        </div>
                     </div>
                 </div>
 
-                <!-- 6 Executive KPI Metric Cards -->
+                <!-- Executive KPI Metric Cards (Stretched horizontally 100%) -->
                 <div class="row g-3 mb-4">
-                    <div class="col-xl-2 col-md-4 col-sm-6 col-12">
+                    <div class="col-xl-3 col-md-6 col-sm-6 col-12">
                         <div class="stat-card p-3 h-100 shadow-sm">
                             <div class="stat-icon blue"><i class="bi bi-activity"></i></div>
                             <div class="w-100">
@@ -681,7 +974,7 @@
                             </div>
                         </div>
                     </div>
-                    <div class="col-xl-2 col-md-4 col-sm-6 col-12">
+                    <div class="col-xl-3 col-md-6 col-sm-6 col-12">
                         <div class="stat-card p-3 h-100 shadow-sm">
                             <div class="stat-icon green"><i class="bi bi-card-heading"></i></div>
                             <div class="w-100">
@@ -692,7 +985,7 @@
                             </div>
                         </div>
                     </div>
-                    <div class="col-xl-2 col-md-4 col-sm-6 col-12">
+                    <div class="col-xl-3 col-md-6 col-sm-6 col-12">
                         <div class="stat-card p-3 h-100 shadow-sm">
                             <div class="stat-icon purple"><i class="bi bi-people-fill"></i></div>
                             <div class="w-100">
@@ -702,27 +995,7 @@
                             </div>
                         </div>
                     </div>
-                    <div class="col-xl-2 col-md-4 col-sm-6 col-12">
-                        <div class="stat-card p-3 h-100 shadow-sm">
-                            <div class="stat-icon blue"><i class="bi bi-shield-check"></i></div>
-                            <div class="w-100">
-                                <span class="text-muted small">Akurasi Rata-rata AI</span>
-                                <strong id="kpiAvgConf" class="fs-4 d-block my-1">0%</strong>
-                                <small class="text-info">Model SLA Score</small>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="col-xl-2 col-md-4 col-sm-6 col-12">
-                        <div class="stat-card p-3 h-100 shadow-sm">
-                            <div class="stat-icon orange"><i class="bi bi-exclamation-triangle-fill"></i></div>
-                            <div class="w-100">
-                                <span class="text-muted small">Perlu Verifikasi</span>
-                                <strong id="kpiNeedCheck" class="fs-4 d-block my-1 text-warning">0</strong>
-                                <small class="text-warning">Confidence &lt; 70%</small>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="col-xl-2 col-md-4 col-sm-6 col-12">
+                    <div class="col-xl-3 col-md-6 col-sm-6 col-12">
                         <div class="stat-card p-3 h-100 shadow-sm">
                             <div class="stat-icon green"><i class="bi bi-camera-video-fill"></i></div>
                             <div class="w-100">
@@ -734,53 +1007,7 @@
                     </div>
                 </div>
 
-                <!-- Row 1: Tren Waktu Nyata & Donut SLA -->
-                <div class="row g-4 mb-4">
-                    <div class="col-xl-8 col-lg-7">
-                        <div class="panel p-4 shadow-sm h-100">
-                            <div class="d-flex justify-content-between align-items-center mb-3">
-                                <div>
-                                    <h4 class="fw-bold mb-1">Tren Volume Deteksi Waktu Nyata</h4>
-                                    <p class="text-muted small mb-0">Analisis perbandingan deteksi plat kendaraan vs wajah/orang sepanjang waktu.</p>
-                                </div>
-                                <span class="badge bg-light text-dark border">Chart.js Analytics</span>
-                            </div>
-                            <div style="position: relative; height: 320px; width: 100%;">
-                                <canvas id="trendChartCanvas"></canvas>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="col-xl-4 col-lg-5">
-                        <div class="panel p-4 shadow-sm h-100">
-                            <div class="d-flex justify-content-between align-items-center mb-3">
-                                <div>
-                                    <h4 class="fw-bold mb-1">Kualitas Deteksi AI (SLA)</h4>
-                                    <p class="text-muted small mb-0">Distribusi tingkat kepercayaan klasifikasi.</p>
-                                </div>
-                            </div>
-                            <div style="position: relative; height: 230px; width: 100%;">
-                                <canvas id="qualityDonutCanvas"></canvas>
-                            </div>
-                            <div class="d-flex justify-content-around text-center mt-3 pt-2 border-top">
-                                <div>
-                                    <span class="badge rounded-pill bg-success-subtle text-success border border-success-subtle px-2 py-1">Valid (Jelas)</span>
-                                    <h6 id="donutValValid" class="fw-bold mt-1 mb-0">0</h6>
-                                </div>
-                                <div>
-                                    <span class="badge rounded-pill bg-warning-subtle text-warning border border-warning-subtle px-2 py-1">Perlu Cek</span>
-                                    <h6 id="donutValWarning" class="fw-bold mt-1 mb-0">0</h6>
-                                </div>
-                                <div>
-                                    <span class="badge rounded-pill bg-danger-subtle text-danger border border-danger-subtle px-2 py-1">Gagal</span>
-                                    <h6 id="donutValFailed" class="fw-bold mt-1 mb-0">0</h6>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Row 2: Distribusi CCTV & Analisis Jam Sibuk -->
+                <!-- Distribusi CCTV & Analisis Jam Sibuk -->
                 <div class="row g-4 mb-4">
                     <div class="col-xl-7 col-lg-6">
                         <div class="panel p-4 shadow-sm h-100">
@@ -801,7 +1028,7 @@
                         <div class="panel p-4 shadow-sm h-100">
                             <div class="d-flex justify-content-between align-items-center mb-3">
                                 <div>
-                                    <h4 class="fw-bold mb-1">Analisis Jam Sibuk (Peak Hours)</h4>
+                                    <h4 class="fw-bold mb-1">Analisis Jam Sibuk</h4>
                                     <p class="text-muted small mb-0">Waktu dengan kepadatan lalu lintas tertinggi.</p>
                                 </div>
                                 <span class="badge bg-danger-subtle text-danger border border-danger-subtle"><i
@@ -814,7 +1041,7 @@
                     </div>
                 </div>
 
-                <!-- Row 3: Top 10 Plat Paling Sering Terdeteksi -->
+                <!-- Top 10 Plat Paling Sering Terdeteksi -->
                 <div class="panel shadow-sm p-4">
                     <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
                         <div>
@@ -847,52 +1074,7 @@
             </div>
             {% elif page == 'settings' %}
             <div class="row g-4">
-                <!-- System Diagnostics Card -->
                 <div class="col-xl-4 col-lg-5">
-<<<<<<< Updated upstream
-                    <div class="panel shadow-sm p-4 h-100">
-                        <div class="d-flex align-items-center gap-2 mb-3">
-                            <div class="stat-icon blue"><i class="bi bi-cpu-fill"></i></div>
-                            <div>
-                                <h4 class="fw-bold mb-0">Status Sistem</h4>
-                                <small class="text-muted">Kesehatan & Diagnostik</small>
-                            </div>
-                        </div>
-
-                        <ul class="list-group list-group-flush small mb-4">
-                            <li class="list-group-item d-flex justify-content-between align-items-center px-0">
-                                <span>Koneksi MySQL (Laragon)</span>
-                                <span id="diagDbStatus" class="badge bg-success-subtle text-success border border-success-subtle">Terhubung</span>
-                            </li>
-                            <li class="list-group-item d-flex justify-content-between align-items-center px-0">
-                                <span>Database Aktif</span>
-                                <strong id="diagDbName" class="text-dark">real_cctv</strong>
-                            </li>
-                            <li class="list-group-item d-flex justify-content-between align-items-center px-0">
-                                <span>Total Deteksi Tersimpan</span>
-                                <strong id="diagTotalDets" class="text-dark">0</strong>
-                            </li>
-                            <li class="list-group-item d-flex justify-content-between align-items-center px-0">
-                                <span>Total Plat di Database</span>
-                                <strong id="diagTotalPlates" class="text-dark">0</strong>
-                            </li>
-                            <li class="list-group-item d-flex justify-content-between align-items-center px-0">
-                                <span>Penyimpanan Foto Capture</span>
-                                <strong id="diagStorage" class="text-dark">0 MB (0 files)</strong>
-                            </li>
-                            <li class="list-group-item d-flex justify-content-between align-items-center px-0">
-                                <span>Waktu Server</span>
-                                <strong id="diagServerTime" class="text-muted">-</strong>
-                            </li>
-                        </ul>
-
-                        <div class="p-3 bg-light rounded border">
-                            <strong class="d-block mb-1 text-dark"><i class="bi bi-magic"></i> Simulasi Data Korporat</strong>
-                            <p class="text-muted small mb-2">Isi database dengan data simulasi realistis untuk keperluan pengujian atau presentasi analitik.</p>
-                            <button type="button" class="btn btn-outline-primary btn-sm w-100" id="btnSeedDemoData" onclick="seedDemoData()">
-                                <i class="bi bi-database-fill-add"></i> Generate Data Simulasi (+35 data)
-                            </button>
-=======
                     <div class="panel shadow-sm p-4 h-100 text-center">
                         <div class="avatar profile-avatar mx-auto mb-3">A</div>
                         <h3 id="profileDisplayName" class="fw-bold mb-1">Administrator</h3>
@@ -902,59 +1084,34 @@
                                     class="text-success fw-semibold">Aktif</span></div>
                             <div class="d-flex justify-content-between"><span
                                     class="text-muted">Akses</span><span>Monitoring CCTV</span></div>
->>>>>>> Stashed changes
                         </div>
                     </div>
                 </div>
-
-                <!-- Settings Form -->
                 <div class="col-xl-8 col-lg-7">
                     <div class="panel shadow-sm p-4 h-100">
-                        <h4 class="fw-bold mb-1">Pengaturan Operasional Sistem</h4>
-                        <p class="text-muted small mb-4">Pengaturan ini tersimpan permanen di database MySQL (tabel <code>system_settings</code>).</p>
-
+                        <h4 class="fw-bold mb-1">Profil Saya</h4>
+                        <p class="text-muted small mb-4">Kelola informasi profil operator yang tampil di aplikasi.</p>
                         <form id="settingsForm" class="row g-3">
                             <div class="col-md-6">
-                                <label class="form-label small fw-semibold">Nama Operator / Petugas</label>
+                                <label class="form-label small fw-semibold">Nama Lengkap</label>
                                 <input id="operatorName" class="form-control" placeholder="Administrator">
                             </div>
                             <div class="col-md-6">
-<<<<<<< Updated upstream
-                                <label class="form-label small fw-semibold">Nama Perusahaan / Institusi</label>
-                                <input id="companyName" class="form-control" placeholder="PT CCTV Security Solusindo">
-                            </div>
-
-                            <div class="col-md-6">
-                                <label class="form-label small fw-semibold">Interval Refresh Dashboard (detik)</label>
-                                <input id="refreshInterval" class="form-control" type="number" min="1" max="60" value="2">
-=======
                                 <label class="form-label small fw-semibold">Email</label>
                                 <input id="profileEmail" class="form-control" type="email"
                                     placeholder="operator@perusahaan.com">
->>>>>>> Stashed changes
                             </div>
                             <div class="col-md-6">
-                                <label class="form-label small fw-semibold">Judul Sistem</label>
-                                <input id="systemTitle" class="form-control" placeholder="PlateVision Enterprise Monitoring">
-                            </div>
-
-                            <div class="col-md-6">
-                                <label class="form-label small fw-semibold">Batas Minimum Akurasi Plat (%)</label>
-                                <input id="minConfPlate" class="form-control" type="number" min="10" max="99" value="70">
+                                <label class="form-label small fw-semibold">Nomor Telepon</label>
+                                <input id="profilePhone" class="form-control" placeholder="08xxxxxxxxxx">
                             </div>
                             <div class="col-md-6">
-                                <label class="form-label small fw-semibold">Batas Minimum Akurasi Wajah (%)</label>
-                                <input id="minConfFace" class="form-control" type="number" min="10" max="99" value="65">
+                                <label class="form-label small fw-semibold">Jabatan</label>
+                                <input id="profileRole" class="form-control" placeholder="Operator">
                             </div>
-
-                            <div class="col-12">
-                                <label class="form-label small fw-semibold">URL Default CCTV Stream</label>
-                                <input id="streamUrl" class="form-control" placeholder="http://.../playlist.m3u8 atau rtmp://...">
-                            </div>
-
                             <div class="col-12 mt-4 d-flex align-items-center gap-3">
                                 <button type="submit" class="btn btn-primary">
-                                    <i class="bi bi-check2-circle"></i> Simpan Pengaturan ke Database
+                                    <i class="bi bi-check2-circle"></i> Simpan Profil
                                 </button>
                                 <span id="settingsMessage" class="small fw-semibold text-success"></span>
                             </div>
@@ -999,35 +1156,50 @@
         </div>
     </div>
 
-    <!-- Modal Preview Foto Deteksi -->
+    <!-- ============================================================
+         Modal Preview Foto Deteksi
+         Capture kecil akan di-upscale memenuhi area preview.
+         ============================================================ -->
     <div class="modal fade" id="imagePreviewModal" tabindex="-1" aria-hidden="true">
-        <div class="modal-dialog modal-dialog-centered modal-lg">
+        <div class="modal-dialog modal-dialog-centered detection-image-modal">
             <div class="modal-content border-0 shadow-lg">
-                <div class="modal-header border-0 pb-0">
+
+                <!-- Header -->
+                <div class="modal-header border-0 pb-2">
                     <div>
-                        <h5 class="modal-title fw-bold" id="imagePreviewTitle">Detail Foto Tangkapan CCTV</h5>
+                        <h5 class="modal-title fw-bold" id="imagePreviewTitle">
+                            Detail Foto Tangkapan CCTV
+                        </h5>
                         <p class="text-muted small mb-0" id="imagePreviewMeta"></p>
                     </div>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Tutup">
+                    </button>
                 </div>
-                <div class="modal-body text-center p-3">
-                    <div class="preview-img-container rounded p-2 bg-dark d-flex align-items-center justify-content-center"
-                        id="imagePreviewContainer"
-                        style="min-height: 280px; max-height: 520px; overflow: hidden; user-select: none;">
-                        <img id="imagePreviewSrc" src="" alt="Capture" class="img-fluid rounded"
-                            style="max-height: 480px; object-fit: contain; pointer-events: none;">
+
+                <!-- Capture Preview -->
+                <div class="modal-body detection-image-body">
+                    <div class="preview-img-container" role="img" aria-label="Preview capture hasil deteksi CCTV">
+
+                        <img id="imagePreviewSrc" src="" alt="Capture hasil deteksi CCTV"
+                            class="detection-preview-image">
+
                     </div>
                 </div>
+
+                <!-- Footer -->
                 <div class="modal-footer border-0 pt-0 justify-content-between">
                     <div id="imagePreviewDetails" class="small text-muted"></div>
-                    <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Tutup</button>
+
+                    <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">
+                        Tutup
+                    </button>
                 </div>
+
             </div>
         </div>
     </div>
 
-<<<<<<< Updated upstream
-=======
     <!-- Bootstrap confirmation modal -->
     <div class="modal fade" id="appConfirmModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered modal-sm">
@@ -1062,9 +1234,8 @@
         </div>
     </div>
 
->>>>>>> Stashed changes
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/app.js') }}?v=2.3"></script>
 </body>
 
 </html>
