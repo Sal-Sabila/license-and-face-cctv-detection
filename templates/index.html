@@ -469,11 +469,12 @@
 
                 <!-- Filter Bar -->
                 <div class="filter-toolbar p-3 border-bottom bg-light d-flex gap-2 flex-wrap align-items-center">
-                    <div class="btn-group btn-group-sm" role="group" id="detTypeButtonGroup">
-                        <button type="button" class="btn btn-outline-primary active" data-type="all">Semua Tipe</button>
-                        <button type="button" class="btn btn-outline-primary" data-type="plate"><i class="bi bi-card-heading"></i> Plat Nomor</button>
-                        <button type="button" class="btn btn-outline-primary" data-type="face"><i class="bi bi-person"></i> Wajah / Orang</button>
-                    </div>
+                    <select id="detTypeFilter" class="form-select form-select-sm" style="max-width: 170px;" title="Filter jenis deteksi">
+                        <option value="all">Semua Jenis</option>
+                        <option value="person">Orang</option>
+                        <option value="vehicle">Kendaraan</option>
+                        <option value="plate">Plat Nomor</option>
+                    </select>
 
                     <select id="detCameraFilter" class="form-select form-select-sm" style="max-width: 180px;">
                         <option value="">Semua Kamera</option>
@@ -486,20 +487,23 @@
                         <option value="0">Gagal / Buram</option>
                     </select>
 
-                    <div class="date-filter-group d-flex align-items-center gap-2 flex-nowrap">
-                        <select id="detPeriodFilter" class="form-select form-select-sm" title="Filter periode deteksi">
+                    <div class="date-filter-group d-flex align-items-center gap-2 flex-wrap">
+                        <select id="detPeriodFilter" class="form-select form-select-sm" style="max-width: 155px;" title="Filter periode deteksi">
                             <option value="today">Hari Ini</option>
-                            <option value="2d">2 Hari</option>
-                            <option value="7d">7 Hari</option>
-                            <option value="30d">1 Bulan</option>
-                            <option value="all">Semua</option>
+                            <option value="7d">7 Hari Terakhir</option>
+                            <option value="30d">30 Hari Terakhir</option>
+                            <option value="all">Semua Waktu</option>
+                            <option value="custom">Kustom Tanggal</option>
                         </select>
 
-                        <input id="detStartDate" type="date" class="form-control form-control-sm" title="Tanggal mulai" aria-label="Tanggal mulai deteksi">
+                        <input id="detStartDate" type="date" class="form-control form-control-sm" style="width: 135px;" title="Tanggal mulai" aria-label="Tanggal mulai deteksi">
                         <span class="small text-muted text-nowrap">sampai</span>
-                        <input id="detEndDate" type="date" class="form-control form-control-sm" title="Tanggal akhir" aria-label="Tanggal akhir deteksi">
+                        <input id="detEndDate" type="date" class="form-control form-control-sm" style="width: 135px;" title="Tanggal akhir" aria-label="Tanggal akhir deteksi">
                         <button id="detDateApply" type="button" class="btn btn-primary btn-sm text-nowrap" title="Terapkan rentang tanggal">
                             <i class="bi bi-funnel"></i> Terapkan
+                        </button>
+                        <button id="detResetBtn" type="button" class="btn btn-outline-secondary btn-sm text-nowrap" title="Reset semua filter">
+                            <i class="bi bi-arrow-counterclockwise"></i> Reset
                         </button>
                     </div>
 
@@ -578,20 +582,23 @@
                         <option value="0">Gagal</option>
                     </select>
 
-                    <div class="date-filter-group d-flex align-items-center gap-2 flex-nowrap">
-                        <select id="platePeriodFilter" class="form-select form-select-sm" title="Filter periode riwayat">
+                    <div class="date-filter-group d-flex align-items-center gap-2 flex-wrap">
+                        <select id="platePeriodFilter" class="form-select form-select-sm" style="max-width: 155px;" title="Filter periode riwayat">
                             <option value="today">Hari Ini</option>
-                            <option value="2d">2 Hari</option>
-                            <option value="7d">7 Hari</option>
-                            <option value="30d">1 Bulan</option>
-                            <option value="all">Semua</option>
+                            <option value="7d">7 Hari Terakhir</option>
+                            <option value="30d">30 Hari Terakhir</option>
+                            <option value="all">Semua Waktu</option>
+                            <option value="custom">Kustom Tanggal</option>
                         </select>
 
-                        <input id="plateStartDate" type="date" class="form-control form-control-sm" title="Tanggal mulai" aria-label="Tanggal mulai riwayat">
+                        <input id="plateStartDate" type="date" class="form-control form-control-sm" style="width: 135px;" title="Tanggal mulai" aria-label="Tanggal mulai riwayat">
                         <span class="small text-muted text-nowrap">sampai</span>
-                        <input id="plateEndDate" type="date" class="form-control form-control-sm" title="Tanggal akhir" aria-label="Tanggal akhir riwayat">
+                        <input id="plateEndDate" type="date" class="form-control form-control-sm" style="width: 135px;" title="Tanggal akhir" aria-label="Tanggal akhir riwayat">
                         <button id="plateDateApply" type="button" class="btn btn-primary btn-sm text-nowrap" title="Terapkan rentang tanggal">
                             <i class="bi bi-funnel"></i> Terapkan
+                        </button>
+                        <button id="plateResetBtn" type="button" class="btn btn-outline-secondary btn-sm text-nowrap" title="Reset semua filter">
+                            <i class="bi bi-arrow-counterclockwise"></i> Reset
                         </button>
                     </div>
                 </div>
@@ -635,16 +642,33 @@
             <div class="analytics-page" id="recapPage">
                 <div class="panel shadow-sm p-3 mb-4 analytics-filters">
                     <div class="d-flex flex-wrap gap-2 align-items-end">
-                        <div><label class="form-label small">Periode</label><select id="recapPeriod" class="form-select form-select-sm"><option value="today">Hari ini</option><option value="7d">7 hari terakhir</option><option value="30d">30 hari terakhir</option><option value="all">Semua waktu</option></select></div>
+                        <div>
+                            <label class="form-label small">Periode</label>
+                            <select id="recapPeriod" class="form-select form-select-sm">
+                                <option value="today">Hari ini</option>
+                                <option value="7d">7 hari terakhir</option>
+                                <option value="30d">30 hari terakhir</option>
+                                <option value="all">Semua waktu</option>
+                                <option value="custom">Kustom tanggal</option>
+                            </select>
+                        </div>
                         <div><label class="form-label small">Tanggal mulai</label><input id="recapStart" type="date" class="form-control form-control-sm"></div>
                         <div><label class="form-label small">Tanggal akhir</label><input id="recapEnd" type="date" class="form-control form-control-sm"></div>
+                        <div>
+                            <label class="form-label small">Jenis</label>
+                            <select id="recapObjectType" class="form-select form-select-sm" title="Filter jenis objek">
+                                <option value="">Semua Jenis</option>
+                                <option value="person">Orang</option>
+                                <option value="vehicle">Kendaraan</option>
+                                <option value="plate">Plat Nomor</option>
+                            </select>
+                        </div>
                         <div><label class="form-label small">CCTV</label><select id="recapCamera" class="form-select form-select-sm"><option value="">Semua CCTV</option></select></div>
-                        <div><label class="form-label small">Wilayah</label><input id="recapRegion" class="form-control form-control-sm" placeholder="Cari wilayah"></div>
-                        <div><label class="form-label small">Gerbang</label><input id="recapGate" class="form-control form-control-sm" placeholder="Cari gerbang"></div>
                         <div><label class="form-label small">Arah</label><select id="recapDirection" class="form-select form-select-sm"><option value="">Semua arah</option><option value="entry">Masuk</option><option value="exit">Keluar</option></select></div>
                         <button id="recapApply" class="btn btn-primary btn-sm"><i class="bi bi-funnel"></i> Terapkan</button>
-                        <button id="recapExport" class="btn btn-outline-success btn-sm"><i class="bi bi-download"></i> Excel</button>
-                        <button id="recapExportPdf" class="btn btn-outline-danger btn-sm"><i class="bi bi-file-earmark-pdf"></i> PDF</button>
+                        <button id="recapResetBtn" type="button" class="btn btn-outline-secondary btn-sm" title="Reset semua filter"><i class="bi bi-arrow-counterclockwise"></i> Reset</button>
+                        <button id="recapExport" class="btn btn-outline-success btn-sm"><i class="bi bi-file-earmark-spreadsheet"></i> Ekspor Excel</button>
+                        <button id="recapExportPdf" class="btn btn-outline-danger btn-sm"><i class="bi bi-file-earmark-pdf"></i> Ekspor PDF</button>
                     </div>
                 </div>
                 <div class="row g-3 mb-4" id="recapTotals"></div>
@@ -655,38 +679,33 @@
             <div class="statistics-enterprise-container">
                 <div class="panel shadow-sm p-3 mb-4 analytics-filters">
                     <div class="d-flex flex-wrap gap-2 align-items-end">
-                        <div><label class="form-label small">Periode</label><select id="statsPeriod" class="form-select form-select-sm"><option value="today">Hari ini</option><option value="7d">7 hari terakhir</option><option value="30d">30 hari terakhir</option><option value="all">Semua waktu</option></select></div>
+                        <div>
+                            <label class="form-label small">Periode</label>
+                            <select id="statsPeriod" class="form-select form-select-sm">
+                                <option value="today">Hari ini</option>
+                                <option value="7d">7 hari terakhir</option>
+                                <option value="30d">30 hari terakhir</option>
+                                <option value="all">Semua waktu</option>
+                                <option value="custom">Kustom tanggal</option>
+                            </select>
+                        </div>
                         <div><label class="form-label small">Tanggal mulai</label><input id="statsStart" type="date" class="form-control form-control-sm"></div>
                         <div><label class="form-label small">Tanggal akhir</label><input id="statsEnd" type="date" class="form-control form-control-sm"></div>
-                        <div><label class="form-label small">CCTV</label><select id="statsCamera" class="form-select form-select-sm"><option value="">Semua CCTV</option></select></div>
-                        <div><label class="form-label small">Wilayah</label><input id="statsRegion" class="form-control form-control-sm" placeholder="Cari wilayah"></div>
-                        <div><label class="form-label small">Gerbang</label><input id="statsGate" class="form-control form-control-sm" placeholder="Cari gerbang"></div>
-                        <div><label class="form-label small">Jenis</label><select id="statsObjectType" class="form-select form-select-sm"><option value="">Semua</option><option value="vehicle">Kendaraan</option><option value="person">Orang</option></select></div>
-                        <button id="statsApply" class="btn btn-primary btn-sm"><i class="bi bi-funnel"></i> Terapkan</button>
-                    </div>
-                </div>
-                <!-- Enterprise Toolbar & Period Switcher -->
-                <div class="panel shadow-sm p-3 mb-4 d-flex justify-content-between align-items-center flex-wrap gap-3">
-                    <div class="d-flex align-items-center gap-3">
-                        <div class="period-btn-group btn-group" role="group" id="statsPeriodGroup">
-                            <button type="button" class="btn btn-sm btn-outline-primary active" data-period="today">Hari Ini</button>
-                            <button type="button" class="btn btn-sm btn-outline-primary" data-period="7d">7 Hari Terakhir</button>
-                            <button type="button" class="btn btn-sm btn-outline-primary" data-period="30d">30 Hari</button>
-                            <button type="button" class="btn btn-sm btn-outline-primary" data-period="all">Semua Waktu</button>
+                        <div>
+                            <label class="form-label small">Jenis</label>
+                            <select id="statsObjectType" class="form-select form-select-sm" title="Filter jenis objek">
+                                <option value="">Semua Jenis</option>
+                                <option value="person">Orang</option>
+                                <option value="vehicle">Kendaraan</option>
+                                <option value="plate">Plat Nomor</option>
+                            </select>
                         </div>
-                        <span id="statsPeriodBadge" class="badge bg-primary-subtle text-primary border border-primary-subtle px-3 py-2">Hari Ini</span>
-                    </div>
-
-                    <div class="d-flex align-items-center gap-2">
-                        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="loadEnterpriseStatistics()" title="Muat Ulang Data">
-                            <i class="bi bi-arrow-clockwise"></i> Refresh
-                        </button>
-                        <button type="button" class="btn btn-sm btn-outline-success" onclick="exportStatsReport()" title="Ekspor Excel">
-                            <i class="bi bi-file-earmark-spreadsheet"></i> Ekspor Excel
-                        </button>
-                        <button type="button" class="btn btn-sm btn-primary" onclick="exportStatsPdf()" title="Download Laporan PDF">
-                            <i class="bi bi-file-earmark-pdf"></i> Ekspor PDF
-                        </button>
+                        <div><label class="form-label small">CCTV</label><select id="statsCamera" class="form-select form-select-sm"><option value="">Semua CCTV</option></select></div>
+                        <button id="statsApply" class="btn btn-primary btn-sm"><i class="bi bi-funnel"></i> Terapkan</button>
+                        <button id="statsResetBtn" type="button" class="btn btn-outline-secondary btn-sm" title="Reset semua filter"><i class="bi bi-arrow-counterclockwise"></i> Reset</button>
+                        <button type="button" class="btn btn-outline-success btn-sm" onclick="exportStatsReport()" title="Ekspor Excel"><i class="bi bi-file-earmark-spreadsheet"></i> Ekspor Excel</button>
+                        <button type="button" class="btn btn-primary btn-sm" onclick="exportStatsPdf()" title="Download Laporan PDF"><i class="bi bi-file-earmark-pdf"></i> Ekspor PDF</button>
+                        <button type="button" class="btn btn-outline-secondary btn-sm" onclick="loadEnterpriseStatistics()" title="Muat Ulang Data"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
                     </div>
                 </div>
 

@@ -1105,19 +1105,22 @@ def _analytics_filters(args=None):
     start_date = args.get("start_date")
     end_date = args.get("end_date")
 
-    has_custom_dates = bool(start_date or end_date)
-    if period == "today" and not has_custom_dates:
+    has_custom_dates = bool(start_date or end_date) and period == "custom"
+    if period == "today":
         start_date = end_date = datetime.now().strftime("%Y-%m-%d")
-    elif period == "7d" and not has_custom_dates:
+    elif period == "7d":
         start_date = (datetime.now() - timedelta(days=6)).strftime("%Y-%m-%d")
         end_date = datetime.now().strftime("%Y-%m-%d")
-    elif period == "30d" and not has_custom_dates:
+    elif period == "30d":
         start_date = (datetime.now() - timedelta(days=29)).strftime("%Y-%m-%d")
         end_date = datetime.now().strftime("%Y-%m-%d")
-    elif period == "all" and not has_custom_dates:
+    elif period == "all":
         start_date = end_date = None
-    elif period not in ("today", "7d", "30d", "all"):
+    elif period == "custom" or has_custom_dates:
         period = "custom"
+    else:
+        # Default fallback to today
+        start_date = end_date = datetime.now().strftime("%Y-%m-%d")
 
     clauses = ["1=1"]
     params = []
@@ -1139,10 +1142,13 @@ def _analytics_filters(args=None):
     if args.get("direction") in ("entry", "exit"):
         clauses.append("COALESCE(c.direction, 'unknown') = %s")
         params.append(args["direction"])
-    if args.get("object_type") == "vehicle":
+    obj_type = str(args.get("object_type") or "").lower()
+    if obj_type == "vehicle":
         clauses.append("fd.object_type = 'vehicle'")
-    elif args.get("object_type") == "person":
+    elif obj_type in ("person", "face"):
         clauses.append("fd.object_type = 'person'")
+    elif obj_type in ("plate", "license_plate"):
+        clauses.append("fd.object_type = 'vehicle' AND fd.has_plate = 1")
     return " AND ".join(clauses), params, period, start_date, end_date
 
 
@@ -1392,10 +1398,13 @@ def get_all_detections_paginated(
     where_clauses = ["1=1"]
     params = []
 
-    if type_filter == "plate":
+    tf = str(type_filter or "all").lower()
+    if tf in ("plate", "license_plate"):
         where_clauses.append("fd.object_type = 'vehicle' AND fd.has_plate = 1")
-    elif type_filter == "face":
+    elif tf in ("face", "person"):
         where_clauses.append("fd.object_type = 'person'")
+    elif tf == "vehicle":
+        where_clauses.append("fd.object_type = 'vehicle'")
 
     if status_filter in ("0", "1", "2"):
         where_clauses.append("fd.detection_status = %s")

@@ -218,12 +218,18 @@ def _resolve_image_path(path):
 
 def _apply_excel_header(ws, row, start_col, end_col):
     fill = PatternFill("solid", fgColor=HEADER)
+    header_border = Border(
+        left=Side(style="thin", color="1E40AF"),
+        right=Side(style="thin", color="1E40AF"),
+        top=Side(style="thin", color="1E40AF"),
+        bottom=Side(style="thin", color="1E40AF"),
+    )
 
     for col in range(start_col, end_col + 1):
         cell = ws.cell(row=row, column=col)
-
         cell.fill = fill
         cell.font = Font(
+            name="Calibri",
             color=WHITE,
             bold=True,
             size=11,
@@ -233,40 +239,126 @@ def _apply_excel_header(ws, row, start_col, end_col):
             vertical="center",
             wrap_text=True,
         )
+        cell.border = header_border
 
-        cell.border = Border(
-            bottom=Side(
-                style="thin",
-                color=BORDER_COLOR,
-            )
-        )
+    ws.row_dimensions[row].height = 26
 
 
-def _style_excel_sheet(ws):
-    ws.freeze_panes = "A4"
-    ws.sheet_view.showGridLines = False
+def _apply_section_header(ws, row, title, end_col):
+    fill = PatternFill("solid", fgColor="334155")
+    section_border = Border(
+        left=Side(style="thin", color="1E293B"),
+        right=Side(style="thin", color="1E293B"),
+        top=Side(style="thin", color="1E293B"),
+        bottom=Side(style="thin", color="1E293B"),
+    )
 
-    for row in ws.iter_rows():
-        for cell in row:
-            cell.font = Font(
-                name="Calibri",
-                size=10,
-                color=TEXT,
-            )
-            cell.alignment = Alignment(
-                vertical="center",
-                wrap_text=True,
-            )
+    for col in range(1, end_col + 1):
+        c = ws.cell(row=row, column=col)
+        c.fill = fill
+        c.border = section_border
 
-            cell.border = Border(
-                left=Side(style="thin", color=BORDER_COLOR),
-                right=Side(style="thin", color=BORDER_COLOR),
-                top=Side(style="thin", color=BORDER_COLOR),
-                bottom=Side(style="thin", color=BORDER_COLOR),
-            )
+    ws.merge_cells(
+        start_row=row,
+        start_column=1,
+        end_row=row,
+        end_column=end_col,
+    )
+    cell = ws.cell(row=row, column=1)
+    cell.value = title
+    cell.font = Font(
+        name="Calibri",
+        size=11,
+        bold=True,
+        color=WHITE,
+    )
+    cell.alignment = Alignment(
+        horizontal="left",
+        vertical="center",
+        indent=1,
+    )
+    ws.row_dimensions[row].height = 24
+
+
+def _style_excel_sheet(ws, header_row=4, data_start_row=None, data_end_row=None, freeze=True):
+    if freeze and header_row:
+        ws.freeze_panes = f"A{header_row + 1}"
+
+    try:
+        ws.sheet_view.showGridLines = True
+    except Exception:
+        pass
+    try:
+        if hasattr(ws, "views") and ws.views and ws.views.sheetView:
+            ws.views.sheetView[0].showGridLines = True
+    except Exception:
+        pass
+
+    border_thin = Border(
+        left=Side(style="thin", color=BORDER_COLOR),
+        right=Side(style="thin", color=BORDER_COLOR),
+        top=Side(style="thin", color=BORDER_COLOR),
+        bottom=Side(style="thin", color=BORDER_COLOR),
+    )
+
+    start_r = data_start_row if data_start_row is not None else (header_row + 1 if header_row else 1)
+    end_r = data_end_row if data_end_row is not None else ws.max_row
+
+    if end_r >= start_r:
+        for r in range(start_r, end_r + 1):
+            is_odd = (r - start_r) % 2 == 1
+            row_default_fill = PatternFill("solid", fgColor="F8FAFC") if is_odd else PatternFill("solid", fgColor="FFFFFF")
+
+            for c in range(1, ws.max_column + 1):
+                cell = ws.cell(row=r, column=c)
+
+                # Keep custom fills (e.g. status green/yellow/red)
+                has_custom_fill = False
+                if cell.fill and getattr(cell.fill, "fill_type", None) == "solid":
+                    fg = getattr(cell.fill, "fgColor", None)
+                    rgb = getattr(fg, "rgb", None) if fg else None
+                    if rgb and rgb not in ["00000000", "00FFFFFF", "FFFFFFFF", "00F8FAFC", None]:
+                        has_custom_fill = True
+
+                if not has_custom_fill:
+                    cell.fill = row_default_fill
+
+                cell.font = Font(
+                    name="Calibri",
+                    size=10,
+                    color=TEXT,
+                )
+                cell.border = border_thin
+
+                # Alignments
+                if c == 1:
+                    cell.alignment = Alignment(
+                        horizontal="center",
+                        vertical="center",
+                    )
+                elif cell.alignment and cell.alignment.horizontal:
+                    cell.alignment = Alignment(
+                        horizontal=cell.alignment.horizontal,
+                        vertical="center",
+                        wrap_text=True,
+                    )
+                else:
+                    cell.alignment = Alignment(
+                        vertical="center",
+                        wrap_text=True,
+                    )
+
+            if ws.row_dimensions[r].height is None or ws.row_dimensions[r].height < 20:
+                ws.row_dimensions[r].height = 22
 
 
 def _add_excel_title(ws, title, subtitle, columns):
+    for col in range(1, columns + 1):
+        c1 = ws.cell(row=1, column=col)
+        c1.fill = PatternFill("solid", fgColor=DARK)
+        c2 = ws.cell(row=2, column=col)
+        c2.fill = PatternFill("solid", fgColor=LIGHT_GRAY)
+
     ws.merge_cells(
         start_row=1,
         start_column=1,
@@ -277,13 +369,10 @@ def _add_excel_title(ws, title, subtitle, columns):
     title_cell = ws.cell(row=1, column=1)
     title_cell.value = title
     title_cell.font = Font(
-        size=16,
+        name="Calibri",
+        size=15,
         bold=True,
         color=WHITE,
-    )
-    title_cell.fill = PatternFill(
-        "solid",
-        fgColor=DARK,
     )
     title_cell.alignment = Alignment(
         horizontal="center",
@@ -302,20 +391,18 @@ def _add_excel_title(ws, title, subtitle, columns):
     subtitle_cell = ws.cell(row=2, column=1)
     subtitle_cell.value = subtitle
     subtitle_cell.font = Font(
-        size=10,
-        color=TEXT,
+        name="Calibri",
+        size=9,
+        color="475569",
         italic=True,
-    )
-    subtitle_cell.fill = PatternFill(
-        "solid",
-        fgColor=LIGHT_GRAY,
     )
     subtitle_cell.alignment = Alignment(
         horizontal="center",
         vertical="center",
     )
 
-    ws.row_dimensions[2].height = 22
+    ws.row_dimensions[2].height = 20
+    ws.row_dimensions[3].height = 10
 
 
 def _set_widths(ws, widths):
@@ -333,11 +420,23 @@ def _status_excel_fill(cell, status):
             "solid",
             fgColor=LIGHT_GREEN,
         )
+        cell.font = Font(
+            name="Calibri",
+            size=10,
+            color="166534",
+            bold=True,
+        )
 
     elif "dicek" in text or "unclear" in text or "gagal" in text:
         cell.fill = PatternFill(
             "solid",
             fgColor=LIGHT_YELLOW,
+        )
+        cell.font = Font(
+            name="Calibri",
+            size=10,
+            color="92400E",
+            bold=True,
         )
 
 
@@ -349,30 +448,28 @@ def _confidence_excel_fill(cell, confidence):
             "solid",
             fgColor=LIGHT_GREEN,
         )
+        cell.font = Font(
+            name="Calibri",
+            size=10,
+            color="166534",
+            bold=True,
+        )
     else:
         cell.fill = PatternFill(
             "solid",
             fgColor=LIGHT_YELLOW,
         )
+        cell.font = Font(
+            name="Calibri",
+            size=10,
+            color="92400E",
+            bold=True,
+        )
 
 
 def _add_excel_table(ws, ref, name):
     try:
-        table = Table(
-            displayName=name,
-            ref=ref,
-        )
-
-        style = TableStyleInfo(
-            name="TableStyleMedium2",
-            showFirstColumn=False,
-            showLastColumn=False,
-            showRowStripes=True,
-            showColumnStripes=False,
-        )
-
-        table.tableStyleInfo = style
-        ws.add_table(table)
+        ws.auto_filter.ref = ref
     except Exception:
         pass
 
@@ -2106,7 +2203,13 @@ def build_statistics_excel(analytics, period="today"):
         [25, 16, 40, 18, 25],
     )
 
-    _style_excel_sheet(ws)
+    _style_excel_sheet(
+        ws,
+        header_row=4,
+        data_start_row=5,
+        data_end_row=4 + len(rows),
+        freeze=False,
+    )
 
     # --------------------------------------------------------
     # JAM SIBUK
@@ -2114,34 +2217,11 @@ def build_statistics_excel(analytics, period="today"):
 
     start_row = 12
 
-    ws.cell(
-        row=start_row,
-        column=1,
-        value="BEBAN LALU LINTAS PER JAM",
-    )
-
-    ws.merge_cells(
-        start_row=start_row,
-        start_column=1,
-        end_row=start_row,
-        end_column=3,
-    )
-
-    ws.cell(
-        row=start_row,
-        column=1,
-    ).font = Font(
-        bold=True,
-        size=12,
-        color=WHITE,
-    )
-
-    ws.cell(
-        row=start_row,
-        column=1,
-    ).fill = PatternFill(
-        "solid",
-        fgColor=DARK,
+    _apply_section_header(
+        ws,
+        start_row,
+        "BEBAN LALU LINTAS PER JAM",
+        3,
     )
 
     hourly_header = start_row + 1
@@ -2198,40 +2278,27 @@ def build_statistics_excel(analytics, period="today"):
                 value=value,
             )
 
+    hourly_last_row = hourly_header + len(hourly or [])
+    if len(hourly or []) > 0:
+        _style_excel_sheet(
+            ws,
+            header_row=hourly_header,
+            data_start_row=hourly_header + 1,
+            data_end_row=hourly_last_row,
+            freeze=False,
+        )
+
     # --------------------------------------------------------
     # PERFORMA CCTV
     # --------------------------------------------------------
 
     camera_start = hourly_header + len(hourly or []) + 3
 
-    ws.cell(
-        row=camera_start,
-        column=1,
-        value="PERFORMA CCTV",
-    )
-
-    ws.merge_cells(
-        start_row=camera_start,
-        start_column=1,
-        end_row=camera_start,
-        end_column=5,
-    )
-
-    ws.cell(
-        row=camera_start,
-        column=1,
-    ).font = Font(
-        bold=True,
-        size=12,
-        color=WHITE,
-    )
-
-    ws.cell(
-        row=camera_start,
-        column=1,
-    ).fill = PatternFill(
-        "solid",
-        fgColor=DARK,
+    _apply_section_header(
+        ws,
+        camera_start,
+        "PERFORMA CCTV",
+        5,
     )
 
     camera_header = camera_start + 1
@@ -2282,7 +2349,20 @@ def build_statistics_excel(analytics, period="today"):
                 value=value,
             )
 
-    _style_excel_sheet(ws)
+    camera_last_row = camera_header + len(cameras or [])
+    if len(cameras or []) > 0:
+        _style_excel_sheet(
+            ws,
+            header_row=camera_header,
+            data_start_row=camera_header + 1,
+            data_end_row=camera_last_row,
+            freeze=False,
+        )
+
+    try:
+        ws.sheet_view.showGridLines = True
+    except Exception:
+        pass
 
     # --------------------------------------------------------
     # SHEET TOP 10
