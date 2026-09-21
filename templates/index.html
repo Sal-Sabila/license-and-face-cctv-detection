@@ -43,7 +43,7 @@
             }
         };
     </script>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=2.7">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=2.8">
     <!-- ============================================================
          DETECTION CAPTURE PREVIEW - COMPACT + LARGER IMAGE
          Modal tetap proporsional, tetapi capture dibuat lebih besar.
@@ -603,7 +603,7 @@
                         </div>
                         <div class="col-xl-4 col-md-8 col-sm-12 col-12">
                             <label class="form-label small text-muted mb-1 fw-semibold">Rentang Tanggal</label>
-                            <div class="d-flex align-items-center gap-1">
+                            <div class="date-range-group">
                                 <input id="detStartDate" type="date" class="form-control form-control-sm"
                                     title="Tanggal mulai" aria-label="Tanggal mulai deteksi">
                                 <span class="small text-muted">-</span>
@@ -715,7 +715,7 @@
                         </div>
                         <div class="col-xl-5 col-md-8 col-sm-12 col-12">
                             <label class="form-label small text-muted mb-1 fw-semibold">Rentang Tanggal</label>
-                            <div class="d-flex align-items-center gap-1">
+                            <div class="date-range-group">
                                 <input id="plateStartDate" type="date" class="form-control form-control-sm"
                                     title="Tanggal mulai" aria-label="Tanggal mulai riwayat">
                                 <span class="small text-muted">-</span>
@@ -776,7 +776,7 @@
             <div class="analytics-page" id="recapPage">
                 <div class="panel shadow-sm p-3 mb-4 analytics-filters">
                     <div class="row g-2 align-items-end mb-3">
-                        <div class="col-xl-2 col-md-4 col-sm-6 col-12">
+                        <div class="col-xl-2 col-lg-2 col-md-4 col-sm-6 col-12">
                             <label class="form-label small text-muted mb-1 fw-semibold">Periode</label>
                             <select id="recapPeriod" class="form-select form-select-sm">
                                 <option value="today">Hari ini</option>
@@ -786,9 +786,9 @@
                                 <option value="custom">Kustom tanggal</option>
                             </select>
                         </div>
-                        <div class="col-xl-4 col-md-8 col-sm-12 col-12">
+                        <div class="col-xl-4 col-lg-4 col-md-8 col-sm-12 col-12">
                             <label class="form-label small text-muted mb-1 fw-semibold">Rentang Tanggal</label>
-                            <div class="d-flex align-items-center gap-1">
+                            <div class="date-range-group">
                                 <input id="recapStart" type="date" class="form-control form-control-sm"
                                     title="Tanggal mulai">
                                 <span class="small text-muted">-</span>
@@ -796,7 +796,7 @@
                                     title="Tanggal akhir">
                             </div>
                         </div>
-                        <div class="col-xl-2 col-md-4 col-sm-6 col-12">
+                        <div class="col-xl-2 col-lg-2 col-md-4 col-sm-6 col-12 filter-col-compact">
                             <label class="form-label small text-muted mb-1 fw-semibold">Jenis Objek</label>
                             <select id="recapObjectType" class="form-select form-select-sm" title="Filter jenis objek">
                                 <option value="">Semua Jenis</option>
@@ -805,13 +805,13 @@
                                 <option value="plate">Plat Nomor</option>
                             </select>
                         </div>
-                        <div class="col-xl-2 col-md-4 col-sm-6 col-12">
+                        <div class="col-xl-2 col-lg-2 col-md-4 col-sm-6 col-12 filter-col-compact">
                             <label class="form-label small text-muted mb-1 fw-semibold">Kamera CCTV</label>
                             <select id="recapCamera" class="form-select form-select-sm">
                                 <option value="">Semua CCTV</option>
                             </select>
                         </div>
-                        <div class="col-xl-2 col-md-4 col-sm-6 col-12">
+                        <div class="col-xl-2 col-lg-2 col-md-4 col-sm-6 col-12 filter-col-compact">
                             <label class="form-label small text-muted mb-1 fw-semibold">Arah Gerbang</label>
                             <select id="recapDirection" class="form-select form-select-sm">
                                 <option value="">Semua arah</option>
@@ -901,7 +901,7 @@
             <div class="statistics-enterprise-container">
                 <div class="panel shadow-sm p-3 mb-4 analytics-filters">
                     <div class="row g-2 align-items-end mb-3">
-                        <div class="col-xl-2 col-md-4 col-sm-6 col-12">
+                        <div class="col-xl-2 col-lg-2 col-md-3 col-sm-6 col-12">
                             <label class="form-label small text-muted mb-1 fw-semibold">Periode</label>
                             <select id="statsPeriod" class="form-select form-select-sm">
                                 <option value="today">Hari ini</option>
@@ -911,9 +911,9 @@
                                 <option value="custom">Kustom tanggal</option>
                             </select>
                         </div>
-                        <div class="col-xl-5 col-md-8 col-sm-12 col-12">
+                        <div class="col-xl-6 col-lg-6 col-md-5 col-sm-12 col-12">
                             <label class="form-label small text-muted mb-1 fw-semibold">Rentang Tanggal</label>
-                            <div class="d-flex align-items-center gap-1">
+                            <div class="date-range-group">
                                 <input id="statsStart" type="date" class="form-control form-control-sm"
                                     title="Tanggal mulai">
                                 <span class="small text-muted">-</span>
@@ -921,7 +921,7 @@
                                     title="Tanggal akhir">
                             </div>
                         </div>
-                        <div class="col-xl-2 col-md-4 col-sm-6 col-12">
+                        <div class="col-xl-2 col-lg-2 col-md-2 col-sm-6 col-12 filter-col-compact">
                             <label class="form-label small text-muted mb-1 fw-semibold">Jenis Objek</label>
                             <select id="statsObjectType" class="form-select form-select-sm" title="Filter jenis objek">
                                 <option value="">Semua Jenis</option>
@@ -930,7 +930,7 @@
                                 <option value="plate">Plat Nomor</option>
                             </select>
                         </div>
-                        <div class="col-xl-3 col-md-8 col-sm-6 col-12">
+                        <div class="col-xl-2 col-lg-2 col-md-2 col-sm-6 col-12 filter-col-compact">
                             <label class="form-label small text-muted mb-1 fw-semibold">Kamera CCTV</label>
                             <select id="statsCamera" class="form-select form-select-sm">
                                 <option value="">Semua CCTV</option>

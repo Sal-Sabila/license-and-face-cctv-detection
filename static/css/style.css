@@ -1440,12 +1440,36 @@ select {
     margin-bottom: 0.25rem;
 }
 
-.filter-toolbar input[type="date"],
-.analytics-filters input[type="date"] {
+.date-range-group {
+    display: flex;
+    align-items: center;
+    gap: 5px;
     width: 100%;
     min-width: 0;
-    max-width: 160px;
-    font-size: 0.82rem;
+}
+
+.date-range-group input[type="date"],
+.filter-toolbar input[type="date"],
+.analytics-filters input[type="date"] {
+    flex: 1 1 0 !important;
+    min-width: 0 !important;
+    width: 100% !important;
+    max-width: none !important;
+    font-size: 0.8rem !important;
+    padding: 0.28rem 0.35rem !important;
+    border-radius: 6px;
+}
+
+.filter-col-compact {
+    min-width: 0;
+}
+
+.filter-col-compact .form-select {
+    width: 100%;
+    min-width: 0;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    overflow: hidden;
 }
 
 .filter-action-row {
