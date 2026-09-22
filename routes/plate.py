@@ -225,12 +225,7 @@ def create_camera():
         return jsonify({"success": False, "message": "Nama dan URL kamera wajib diisi"}), 400
 
     try:
-        new_id = db.add_camera(location=name, stream_url=url, stream_type=1, status=1 if active else 0)
-        try:
-            from services.background_detector import BackgroundDetectionManager
-            BackgroundDetectionManager.get_instance().sync_active_cameras()
-        except Exception:
-            pass
+        new_id = db.add_camera(location=name, stream_url=url, stream_type=1, status=1 if active else 0, direction=direction)
         return jsonify({
             "success": True,
             "data": {
@@ -258,13 +253,6 @@ def update_camera(camera_id):
         ok = db.update_camera(camera_id, location=location, stream_url=stream_url, status=status, direction=direction)
         if not ok:
             return jsonify({"success": False, "message": "Kamera tidak ditemukan atau tidak ada perubahan"}), 404
-
-        try:
-            from services.background_detector import BackgroundDetectionManager
-            BackgroundDetectionManager.get_instance().sync_active_cameras()
-        except Exception:
-            pass
-
         return jsonify({"success": True, "message": "Kamera berhasil diperbarui"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
@@ -277,13 +265,6 @@ def delete_camera(camera_id):
         ok = db.delete_camera(camera_id)
         if not ok:
             return jsonify({"success": False, "message": "Kamera tidak ditemukan"}), 404
-
-        try:
-            from services.background_detector import BackgroundDetectionManager
-            BackgroundDetectionManager.get_instance().sync_active_cameras()
-        except Exception:
-            pass
-
         return jsonify({"success": True, "message": "Kamera berhasil dihapus"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
@@ -305,10 +286,6 @@ def list_detections():
     start_date = request.args.get("start_date", type=str)
     end_date = request.args.get("end_date", type=str)
 
-    valid_only = request.args.get("valid_only", "0").lower() in ("1", "true", "yes") or request.args.get("exclude_failed", "0").lower() in ("1", "true", "yes")
-    if valid_only:
-        status_filter = "valid"
-
     try:
         res = db.get_all_detections_paginated(
             page=page,
@@ -318,8 +295,7 @@ def list_detections():
             camera_id=camera_id,
             search=search,
             start_date=start_date,
-            end_date=end_date,
-            exclude_failed=valid_only
+            end_date=end_date
         )
         return jsonify({
             "success": True,
@@ -521,47 +497,6 @@ def stats_enterprise():
             "peak_hours": [{"time_range": f"{item['label']} - {(item['hour'] + 1) % 24:02d}:00 WIB", "count": item["vehicles"], "percentage": 0} for item in sorted(hourly, key=lambda value: value["vehicles"], reverse=True)[:3]],
             "top_plates": [{"plate_number": item["plate"], "total_seen": item["count"], "last_camera": item["camera"], "last_seen": item["last_seen"], "status": "Aktual", "status_code": 1, "avg_confidence_percent": item["confidence"]} for item in analytics["top_plates"]]
         }})
-    except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 500
-
-
-@plate_bp.route("/analytics", methods=["GET"])
-def get_analytics_api():
-    """Mengambil data analitik dashboard & rekapitulasi langsung dari database."""
-    try:
-        data = db.get_analytics(request.args)
-        return jsonify({
-            "success": True,
-            "data": data
-        })
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "message": str(e),
-            "data": {}
-        }), 500
-
-
-@plate_bp.route("/detections/<int:detection_id>", methods=["DELETE"])
-def delete_detection_endpoint(detection_id):
-    """Menghapus rekaman deteksi dari database."""
-    try:
-        success = db.delete_detection(detection_id)
-        if success:
-            return jsonify({"success": True, "message": "Data deteksi berhasil dihapus"})
-        return jsonify({"success": False, "message": "Data deteksi tidak ditemukan"}), 404
-    except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 500
-
-
-@plate_bp.route("/plate/history/<int:plate_id>", methods=["DELETE"])
-def delete_plate_endpoint(plate_id):
-    """Menghapus rekaman plat nomor dari database."""
-    try:
-        success = db.delete_plate(plate_id)
-        if success:
-            return jsonify({"success": True, "message": "Data plat berhasil dihapus"})
-        return jsonify({"success": False, "message": "Data plat tidak ditemukan"}), 404
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
@@ -842,41 +777,14 @@ def export_cameras_pdf():
         return jsonify({"success": False, "message": str(e)}), 500
 
 
-@plate_bp.route("/export/recap", methods=["GET"])
-def export_recap_csv():
-    """Mengekspor data rekapitulasi ke format CSV."""
-    try:
-        data = db.get_analytics(request.args)
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow(["CCTV / Gerbang", "Arah", "Kendaraan", "Orang", "Plat Unik", "Status"])
-        for c in data.get("cameras", []):
-            writer.writerow([
-                c.get("camera"),
-                c.get("direction"),
-                c.get("vehicles", 0),
-                c.get("people", 0),
-                c.get("unique_plates", 0),
-                c.get("status")
-            ])
-        output.seek(0)
-        return Response(
-            output.getvalue(),
-            mimetype="text/csv",
-            headers={"Content-Disposition": f"attachment; filename=rekapitulasi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"}
-        )
-    except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 500
-
-
 # ============================================================
 # ENDPOINT LIVE CCTV STREAM (MJPEG UNTUK BROWSER)
 # ============================================================
 
 def generate_mjpeg_stream(stream_url, width=960, height=540, draw_bbox=True, camera_id=1):
-    """Membaca frame dari CCTV via BackgroundDetectionManager atau FFmpegStreamReader dan stream MJPEG ke browser dengan AI bounding box."""
-    from services.background_detector import BackgroundDetectionManager
-    bg_mgr = BackgroundDetectionManager.get_instance()
+    """Membaca frame dari CCTV via FFmpegStreamReader dan stream MJPEG ke browser dengan AI bounding box."""
+    norm_url = normalize_stream_url(stream_url)
+    reader = FFmpegStreamReader(norm_url, width=width, height=height)
 
     ai_service = None
     try:
@@ -886,36 +794,40 @@ def generate_mjpeg_stream(stream_url, width=960, height=540, draw_bbox=True, cam
     except Exception as e:
         print(f"[AI STREAM WARNING] AI Service load error: {e}")
 
-    # Prioritas 1: Jika worker background sudah berjalan untuk kamera ini, pakai frame dari worker
-    # Ini sangat hemat CPU & bandwidth karena tidak membuka 2 proses FFmpeg ganda!
-    if bg_mgr.is_camera_running(camera_id):
-        try:
-            while bg_mgr.is_camera_running(camera_id):
-                frame = bg_mgr.get_frame(camera_id)
-                if frame is None:
-                    time.sleep(0.04)
-                    continue
+    # Pembacaan dan pengiriman frame tidak boleh menunggu inferensi AI.
+    # Queue satu item menjaga latency tetap rendah saat CPU sedang penuh.
+    ai_input = queue.Queue(maxsize=1)
+    ai_output = queue.Queue(maxsize=1)
+    stop_worker = threading.Event()
 
-                if ai_service is not None:
+    def run_ai_worker():
+        while not stop_worker.is_set():
+            try:
+                source_frame = ai_input.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            try:
+                result_frame = ai_service.process_frame(
+                    source_frame,
+                    draw_bbox=draw_bbox,
+                    camera_id=camera_id
+                )
+                while True:
                     try:
-                        frame = ai_service.process_frame(frame, draw_bbox=draw_bbox, camera_id=camera_id)
-                    except Exception:
-                        pass
+                        ai_output.get_nowait()
+                    except queue.Empty:
+                        break
+                if result_frame is not None and getattr(result_frame, "size", 0):
+                    ai_output.put_nowait(result_frame)
+                else:
+                    print(f"[AI STREAM ERROR] Invalid processed frame for camera={camera_id}")
+            except Exception as e:
+                print(f"[AI STREAM ERROR] Frame processing failed: {e}")
 
-                ret, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-                if ret:
-                    yield (b'--frame\r\n'
-                           b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
-                time.sleep(0.035)
-            return
-        except GeneratorExit:
-            return
-        except Exception:
-            pass
-
-    # Prioritas 2 (Fallback): Gunakan FFmpegStreamReader mandiri jika background worker belum aktif
-    norm_url = normalize_stream_url(stream_url)
-    reader = FFmpegStreamReader(norm_url, width=width, height=height)
+    worker = None
+    if ai_service is not None:
+        worker = threading.Thread(target=run_ai_worker, daemon=True)
+        worker.start()
 
     try:
         failed_reads = 0
@@ -937,10 +849,15 @@ def generate_mjpeg_stream(stream_url, width=960, height=540, draw_bbox=True, cam
                            b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
                 break
 
-            # Jalankan deteksi AI (dan gambar bounding box jika aktif)
+            # Jalankan AI di worker; frame terbaru tetap dikirim tanpa menunggu.
             if ai_service is not None:
                 try:
-                    frame = ai_service.process_frame(frame, draw_bbox=draw_bbox, camera_id=camera_id)
+                    while True:
+                        ai_input.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    ai_input.put_nowait(frame.copy())
                 except Exception as e:
                     print(f"[AI STREAM ERROR] Queue frame failed: {e}")
 
