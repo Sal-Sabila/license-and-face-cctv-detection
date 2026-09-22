@@ -455,6 +455,54 @@ def save_detection_event(
                 )
                 existing = cur.fetchone()
 
+            # ------------------------------------------------------
+            # 1b. DEDUPLIKASI PLAT BERBASIS NOMOR KENDARAAN
+            # Jika kendaraan memiliki nomor plat yang sama pada kamera
+            # yang sama dalam jendela waktu 10 detik terakhir:
+            # ------------------------------------------------------
+
+            if not existing and normalized_plate:
+                cur.execute(
+                    """
+                    SELECT
+                        fd.detection_id,
+                        fd.plate_id,
+                        fd.object_type,
+                        fd.vehicle_type,
+                        fd.has_plate,
+                        fd.has_driver,
+                        fd.vehicle_confidence,
+                        fd.plate_detection_confidence,
+                        fd.ocr_confidence AS event_ocr_confidence,
+                        fd.person_confidence,
+                        fd.face_confidence,
+                        fd.direction,
+                        fd.driver_track_id,
+                        fd.driver_face_path,
+                        fd.face_image_path,
+                        fd.vehicle_image_path,
+                        fd.detection_status,
+                        fd.detection_confidence,
+                        fd.created_at,
+                        p.plate_number,
+                        p.raw_ocr_text,
+                        p.normalized_plate_number,
+                        p.detection_status AS plate_status,
+                        p.detection_confidence AS plate_confidence,
+                        p.ocr_confidence AS plate_ocr_confidence,
+                        p.plate_image_path
+                    FROM full_detection fd
+                    JOIN plate p ON p.plate_id = fd.plate_id
+                    WHERE fd.camera_id = %s
+                      AND (p.normalized_plate_number = %s OR p.plate_number = %s)
+                      AND fd.created_at >= NOW() - INTERVAL 15 SECOND
+                    ORDER BY fd.detection_id DESC
+                    LIMIT 1
+                    """,
+                    (camera_id, normalized_plate, normalized_plate)
+                )
+                existing = cur.fetchone()
+
             # ======================================================
             # 2. DUPLICATE / ENRICHMENT
             # ======================================================
@@ -973,6 +1021,7 @@ def save_detection_event(
                     vehicle_rel_path if object_type == "vehicle" else None,
                     event_key
                 )
+
             )
 
             detection_id = cur.lastrowid
@@ -1141,8 +1190,10 @@ def _analytics_filters(args=None):
         params.append(args["direction"])
     if args.get("object_type") == "vehicle":
         clauses.append("fd.object_type = 'vehicle'")
-    elif args.get("object_type") == "person":
+    elif args.get("object_type") in ("person", "face"):
         clauses.append("fd.object_type = 'person'")
+    elif args.get("object_type") == "plate":
+        clauses.append("fd.object_type = 'vehicle' AND fd.has_plate = 1")
     return " AND ".join(clauses), params, period, start_date, end_date
 
 
@@ -1399,7 +1450,8 @@ def get_all_detections_paginated(
     camera_id: int = None,
     search: str = None,
     start_date: str = None,
-    end_date: str = None
+    end_date: str = None,
+    exclude_failed: bool = False
 ) -> dict:
     """
     Mengambil data deteksi gabungan (Wajah & Plat) dengan filter lengkap dan paginasi.
@@ -1410,16 +1462,17 @@ def get_all_detections_paginated(
 
     where_clauses = ["1=1"]
     params = []
-
-    if type_filter in ("vehicle", "person"):
-        where_clauses.append("fd.object_type = %s")
-        params.append(type_filter)
-    elif type_filter == "plate":
+    if type_filter == "plate":
         where_clauses.append("fd.object_type = 'vehicle' AND fd.has_plate = 1")
-    elif type_filter == "face":
+    elif type_filter == "vehicle":
+        where_clauses.append("fd.object_type = 'vehicle'")
+    elif type_filter in ("person", "face"):
         where_clauses.append("fd.object_type = 'person'")
 
-    if status_filter in ("0", "1", "2"):
+    if exclude_failed or status_filter == "valid":
+        where_clauses.append("fd.detection_status IN (1, 2)")
+    elif status_filter in ("0", "1", "2"):
+
         where_clauses.append("fd.detection_status = %s")
         params.append(int(status_filter))
 

@@ -279,14 +279,15 @@ PLATE_TRACKER_MAX_HISTORY = 5
 PLATE_PADDING = 0.08
 
 PLATE_REVIEW_CONFIDENCE = 0.60
-PLATE_COOLDOWN = 30.0
-PERSON_COOLDOWN = 30.0
+PLATE_COOLDOWN = 20.0
+PERSON_COOLDOWN = 20.0
+VEHICLE_COOLDOWN = 20.0
 
 # ByteTrack IDs can be reused after an object disappears. Treat a track as a
 # new physical event only after it has been absent for this long.
-TRACK_REUSE_GAP = 2.5
+TRACK_REUSE_GAP = 6.0
 
-PERSON_CAPTURE_CONFIDENCE = 0.40
+PERSON_CAPTURE_CONFIDENCE = 0.30
 MIN_PERSON_CROP_WIDTH = 25
 MIN_PERSON_CROP_HEIGHT = 45
 
@@ -963,9 +964,9 @@ class StreamAIService:
             print(f"[AI STREAM WARNING] OCR tidak tersedia: {exc}")
 
         self.person_tracker = sv.ByteTrack(
-            track_activation_threshold=0.35,
-            lost_track_buffer=60,
-            minimum_matching_threshold=0.7,
+            track_activation_threshold=0.30,
+            lost_track_buffer=90,
+            minimum_matching_threshold=0.70,
             frame_rate=25,
         )
 
@@ -1653,10 +1654,17 @@ class StreamAIService:
                 if index in associated_people:
                     continue
                 person_box = person.get("box", [0, 0, 0, 0])
-                if self._intersection_ratio(person_box, vehicle_box) >= 0.25:
-                    driver = person
+                ratio = self._intersection_ratio(person_box, vehicle_box)
+                pcx = (person_box[0] + person_box[2]) / 2.0
+                pcy = (person_box[1] + person_box[3]) / 2.0
+                center_near = (
+                    vehicle_box[0] <= pcx <= vehicle_box[2]
+                    and (vehicle_box[1] - 40) <= pcy <= vehicle_box[3]
+                )
+                if ratio >= 0.20 or center_near:
+                    if driver is None:
+                        driver = person
                     associated_people.add(index)
-                    break
 
             center = ((vehicle_box[0] + vehicle_box[2]) // 2, (vehicle_box[1] + vehicle_box[3]) // 2)
             stable_id = vehicle_id if vehicle_id >= 0 else f"{center[0]}_{center[1]}"
@@ -1684,6 +1692,18 @@ class StreamAIService:
             has_driver_now = driver is not None
             previous_meta = self.saved_event_meta.get(event_key)
             is_new_event = event_key not in self.captured_tracks
+
+            # Spatial duplicate suppression (cegah ID switch menyimpan kendaraan yang sama di posisi yang sama dalam 3s)
+            recent_veh_key = f"recent_pos:v:{camera_id}"
+            recent_positions = self.captured_tracks.get(recent_veh_key, [])
+            recent_positions = [p for p in recent_positions if current_time - p["t"] < 3.0]
+            is_spatial_duplicate = any(
+                abs(p["cx"] - center[0]) < 70 and abs(p["cy"] - center[1]) < 70
+                for p in recent_positions
+            )
+            if is_new_event and is_spatial_duplicate:
+                continue
+
             needs_enrichment = (
                 not is_new_event
                 and previous_meta is not None
@@ -1717,6 +1737,8 @@ class StreamAIService:
                     event_key=event_key
                 )
                 self.captured_tracks[event_key] = current_time
+                recent_positions.append({"cx": center[0], "cy": center[1], "t": current_time})
+                self.captured_tracks[recent_veh_key] = recent_positions
                 previous_plate = (previous_meta or {}).get("plate_text", "")
                 previous_driver = bool((previous_meta or {}).get("has_driver", False))
                 self.saved_event_meta[event_key] = {
@@ -1752,8 +1774,15 @@ class StreamAIService:
             # One database event per physical person track lifecycle.
             if event_key in self.captured_tracks:
                 continue
+            # Spatial duplicate suppression untuk person (cegah ID switch dalam 3s di posisi yang sama)
             bx1, by1, bx2, by2 = person.get("box", [0, 0, 0, 0])
-
+            pcx = (bx1 + bx2) // 2
+            pcy = (by1 + by2) // 2
+            recent_person_key = f"recent_pos:p:{camera_id}"
+            recent_persons = self.captured_tracks.get(recent_person_key, [])
+            recent_persons = [p for p in recent_persons if current_time - p["t"] < 3.0]
+            if any(abs(p["cx"] - pcx) < 50 and abs(p["cy"] - pcy) < 50 for p in recent_persons):
+                continue
             # Save a quality crop from the ORIGINAL CCTV frame.
             crop = _prepare_high_quality_capture(
                 frame,
@@ -1780,6 +1809,9 @@ class StreamAIService:
                     event_key=event_key
                 )
                 self.captured_tracks[event_key] = current_time
+                recent_persons.append({"cx": pcx, "cy": pcy, "t": current_time})
+                self.captured_tracks[recent_person_key] = recent_persons
+
                 print(
                     f"[DETECTION] camera={camera_id} track_id={track_id} "
                     f"object_type=person person_confidence="
