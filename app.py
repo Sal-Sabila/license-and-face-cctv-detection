@@ -27,7 +27,6 @@ app.register_blueprint(detections_bp)
 app.register_blueprint(history_bp)
 app.register_blueprint(recap_bp)
 app.register_blueprint(statistics_bp)
-app.register_blueprint(recap_bp)
 app.register_blueprint(settings_bp)
 
 
