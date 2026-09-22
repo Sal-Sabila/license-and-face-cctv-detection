@@ -59,10 +59,14 @@ function applyCustomDateRange(state, startInputId, endInputId) {
         String(today.getDate()).padStart(2, '0')
     ].join('-');
 
+    const periodId = startInputId.replace('StartDate', 'PeriodFilter');
+    const periodSelect = document.getElementById(periodId);
+    const selectedPeriod = periodSelect?.value || state.period || 'today';
+
     if (!startDate && !endDate) {
         state.start_date = '';
         state.end_date = '';
-        state.period = 'today';
+        state.period = selectedPeriod === 'custom' ? 'today' : selectedPeriod;
         return true;
     }
     if ((startDate && endDate) && startDate > endDate) {
@@ -806,6 +810,15 @@ async function initDetectionsPage() {
         }
     } catch (e) {}
 
+    const typeSelect = document.getElementById('detTypeFilter');
+    if (typeSelect) {
+        typeSelect.addEventListener('change', () => {
+            detState.type = typeSelect.value || 'all';
+            detState.page = 1;
+            loadDetections();
+        });
+    }
+
     const typeGroup = document.getElementById('detTypeButtonGroup');
     if (typeGroup) {
         typeGroup.addEventListener('click', e => {
@@ -814,6 +827,7 @@ async function initDetectionsPage() {
             typeGroup.querySelectorAll('button').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
             detState.type = btn.dataset.type || 'all';
+            if (typeSelect) typeSelect.value = detState.type;
             detState.page = 1;
             loadDetections();
         });
@@ -871,6 +885,34 @@ async function initDetectionsPage() {
     document.getElementById('detNextBtn')?.addEventListener('click', () => {
         detState.page++;
         loadDetections();
+    });
+
+    document.getElementById('detResetBtn')?.addEventListener('click', () => {
+        detState.page = 1;
+        detState.type = 'all';
+        detState.status = 'all';
+        detState.camera_id = '';
+        detState.search = '';
+        detState.period = 'today';
+        detState.start_date = '';
+        detState.end_date = '';
+
+        const searchInput = document.getElementById('detectionSearch');
+        if (searchInput) searchInput.value = '';
+        const typeSelect = document.getElementById('detTypeFilter');
+        if (typeSelect) typeSelect.value = 'all';
+        const cameraSelect = document.getElementById('detCameraFilter');
+        if (cameraSelect) cameraSelect.value = '';
+        const statusSelect = document.getElementById('detStatusFilter');
+        if (statusSelect) statusSelect.value = 'all';
+        const periodSelect = document.getElementById('detPeriodFilter');
+        if (periodSelect) periodSelect.value = 'today';
+        const startInput = document.getElementById('detStartDate');
+        if (startInput) startInput.value = '';
+        const endInput = document.getElementById('detEndDate');
+        if (endInput) endInput.value = '';
+
+        loadDetections().catch(err => console.error('Error reset detections filter:', err));
     });
 
     await loadDetections();
@@ -1080,6 +1122,31 @@ async function initHistoryPage() {
         loadPlateHistory();
     });
 
+    document.getElementById('plateResetBtn')?.addEventListener('click', () => {
+        plateState.page = 1;
+        plateState.search = '';
+        plateState.camera_id = '';
+        plateState.status = 'all';
+        plateState.period = 'today';
+        plateState.start_date = '';
+        plateState.end_date = '';
+
+        const searchInput = document.getElementById('plateSearch');
+        if (searchInput) searchInput.value = '';
+        const cameraSelect = document.getElementById('plateCameraFilter');
+        if (cameraSelect) cameraSelect.value = '';
+        const statusSelect = document.getElementById('plateStatusFilter');
+        if (statusSelect) statusSelect.value = 'all';
+        const periodSelect = document.getElementById('platePeriodFilter');
+        if (periodSelect) periodSelect.value = 'today';
+        const startInput = document.getElementById('plateStartDate');
+        if (startInput) startInput.value = '';
+        const endInput = document.getElementById('plateEndDate');
+        if (endInput) endInput.value = '';
+
+        loadPlateHistory().catch(err => console.error('Error reset plate history filter:', err));
+    });
+
     await loadPlateHistory();
 }
 
@@ -1192,6 +1259,21 @@ async function initRecap() {
         loadRecap().catch(err => {
             if (err.message) showNotification(err.message, 'warning');
         });
+    });
+    document.getElementById('recapResetBtn')?.addEventListener('click', () => {
+        const periodSelect = document.getElementById('recapPeriod');
+        const cameraSelect = document.getElementById('recapCamera');
+        const directionSelect = document.getElementById('recapDirection');
+        const startInput = document.getElementById('recapStart');
+        const endInput = document.getElementById('recapEnd');
+
+        if (periodSelect) periodSelect.value = 'today';
+        if (cameraSelect) cameraSelect.value = '';
+        if (directionSelect) directionSelect.value = '';
+        if (startInput) startInput.value = '';
+        if (endInput) endInput.value = '';
+
+        loadRecap().catch(err => console.error('Error reset recap filter:', err));
     });
     document.getElementById('recapExport')?.addEventListener('click', exportRecap);
     document.getElementById('recapExportPdf')?.addEventListener('click', exportRecapPdf);
@@ -1509,6 +1591,22 @@ async function initStatistics() {
     await populateAnalyticsCameraSelect('statsCamera');
     document.getElementById('statsApply')?.addEventListener('click', () => {
         loadEnterpriseStatistics(document.getElementById('statsPeriod')?.value || 'today').catch(err => showNotification(err.message, 'warning'));
+    });
+    document.getElementById('statsResetBtn')?.addEventListener('click', () => {
+        const periodSelect = document.getElementById('statsPeriod');
+        const startInput = document.getElementById('statsStart');
+        const endInput = document.getElementById('statsEnd');
+        const objectType = document.getElementById('statsObjectType');
+        const cameraSelect = document.getElementById('statsCamera');
+
+        if (periodSelect) periodSelect.value = 'today';
+        if (startInput) startInput.value = '';
+        if (endInput) endInput.value = '';
+        if (objectType) objectType.value = '';
+        if (cameraSelect) cameraSelect.value = '';
+        window._currentStatsPeriod = 'today';
+
+        loadEnterpriseStatistics('today').catch(err => console.error('Error reset stats filter:', err));
     });
     const periodGroup = document.getElementById('statsPeriodGroup');
     if (periodGroup) {

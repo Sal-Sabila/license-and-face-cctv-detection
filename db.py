@@ -1411,7 +1411,10 @@ def get_all_detections_paginated(
     where_clauses = ["1=1"]
     params = []
 
-    if type_filter == "plate":
+    if type_filter in ("vehicle", "person"):
+        where_clauses.append("fd.object_type = %s")
+        params.append(type_filter)
+    elif type_filter == "plate":
         where_clauses.append("fd.object_type = 'vehicle' AND fd.has_plate = 1")
     elif type_filter == "face":
         where_clauses.append("fd.object_type = 'person'")
