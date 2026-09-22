@@ -197,6 +197,55 @@ CAMERA_ZONE_CONFIG = {
     },
 }
 
+# ============================================================
+# RUNTIME ZONE OVERRIDE (diatur dari web)
+# ============================================================
+
+_runtime_zone_override = {}
+
+
+def reload_camera_zone(camera_id, mid, near):
+    """Update zona runtime tanpa restart server."""
+    try:
+        camera_id = int(camera_id)
+    except (TypeError, ValueError):
+        pass
+
+    _runtime_zone_override[camera_id] = {
+        "mid": [(float(x), float(y)) for x, y in mid],
+        "near": [(float(x), float(y)) for x, y in near],
+    }
+    print(f"[ZONES] Runtime override aktif untuk CAM {camera_id}")
+
+
+def get_default_zone(camera_id):
+    """Kembalikan zona default (mid, near) untuk kamera."""
+    config = CAMERA_ZONE_CONFIG.get(camera_id, {})
+    if not config and isinstance(camera_id, str):
+        try:
+            config = CAMERA_ZONE_CONFIG.get(int(camera_id.strip()), {})
+        except (TypeError, ValueError):
+            pass
+    return (
+        config.get("mid", DEFAULT_MID_ZONE),
+        config.get("near", DEFAULT_NEAR_ZONE),
+    )
+
+
+def load_all_zones_from_db():
+    """Panggil saat startup — muat semua zona dari DB."""
+    try:
+        import db as _db
+        if not hasattr(_db, "get_all_camera_zones"):
+            return
+        rows = _db.get_all_camera_zones()
+        for row in rows:
+            reload_camera_zone(row["camera_id"], row["mid"], row["near"])
+        if rows:
+            print(f"[ZONES] {len(rows)} zona custom dimuat dari DB")
+    except Exception as exc:
+        print(f"[ZONES] Gagal memuat zona dari DB: {exc}")
+
 # Minimum object size after it enters the detection zone.
 MIN_PERSON_WIDTH = 30
 MIN_PERSON_HEIGHT = 70
@@ -673,6 +722,21 @@ def _normalized_polygon_to_pixels(points, width, height):
 
 
 def _camera_zone_points(camera_id, zone_name):
+    """Return normalized zone points for a camera.
+
+    Prioritas:
+      1. Runtime override (dari web editor)
+      2. CAMERA_ZONE_CONFIG (hardcode)
+      3. DEFAULT_MID_ZONE / DEFAULT_NEAR_ZONE
+    """
+    # Prioritas 1: runtime override
+    override = _runtime_zone_override.get(camera_id)
+    if override:
+        if zone_name == "near":
+            return override.get("near", DEFAULT_NEAR_ZONE)
+        return override.get("mid", DEFAULT_MID_ZONE)
+
+    # Prioritas 2: config hardcode
     config = CAMERA_ZONE_CONFIG.get(camera_id, {})
     if not config and isinstance(camera_id, str):
         stripped = camera_id.strip()
@@ -680,10 +744,11 @@ def _camera_zone_points(camera_id, zone_name):
             config = CAMERA_ZONE_CONFIG.get(int(stripped), {})
         except (TypeError, ValueError):
             pass
+
     if zone_name == "near":
         return config.get("near", DEFAULT_NEAR_ZONE)
     return config.get("mid", DEFAULT_MID_ZONE)
-
+    
 
 def _camera_zone_name(camera_id):
     config = CAMERA_ZONE_CONFIG.get(camera_id, {})

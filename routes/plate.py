@@ -327,7 +327,6 @@ def delete_detection(detection_id):
 @plate_bp.route("/plate/history", methods=["GET"])
 def plate_history():
     """Mengambil riwayat deteksi plat nomor dari database MySQL dengan filter & paginasi."""
-    # Dukung paginasi jika parameter page atau search dikirimkan
     if "page" in request.args or "search" in request.args or "limit" in request.args:
         page = request.args.get("page", 1, type=int)
         limit = request.args.get("limit", 20, type=int)
@@ -358,7 +357,6 @@ def plate_history():
         except Exception as e:
             return jsonify({"success": False, "message": str(e), "data": []}), 500
 
-    # Default legacy endpoint (mengambil list 100 terbaru)
     try:
         records = db.get_recent_detections(limit=100)
         plate_list = []
@@ -462,15 +460,7 @@ def analytics():
 
 @plate_bp.route("/statistics/enterprise", methods=["GET"])
 def stats_enterprise():
-    """
-    Statistik analitik komprehensif standar perusahaan:
-    - 6 KPI Korporat
-    - Time-series trend (per jam atau per hari)
-    - Distribusi beban CCTV
-    - Status breakdown SLA (Donut)
-    - Analisis Jam Sibuk
-    - Top 10 Plat Kendaraan
-    """
+    """Statistik analitik komprehensif standar perusahaan."""
     period = request.args.get("period", "today")
     try:
         analytics = db.get_analytics(request.args.to_dict())
@@ -502,7 +492,7 @@ def stats_enterprise():
 
 
 # ============================================================
-# ENDPOINT PENGATURAN SISTEM (TERHUBUNG KE MYSQL REAL_CCTV)
+# ENDPOINT PENGATURAN SISTEM
 # ============================================================
 
 @plate_bp.route("/settings", methods=["GET"])
@@ -522,7 +512,7 @@ def get_settings():
 
 @plate_bp.route("/settings", methods=["POST"])
 def save_settings():
-    """Menyimpan konfigurasi sistem ke tabel system_settings di database MySQL."""
+    """Menyimpan konfigurasi sistem ke tabel system_settings."""
     data = request.get_json(silent=True) or {}
     try:
         db.update_system_settings(data)
@@ -536,7 +526,7 @@ def save_settings():
 
 @plate_bp.route("/settings/seed-demo", methods=["POST"])
 def seed_demo():
-    """Mengisi database dengan data simulasi realistis untuk keperluan pengujian/presentasi."""
+    """Mengisi database dengan data simulasi realistis."""
     data = request.get_json(silent=True) or {}
     count = int(data.get("count", 35))
     try:
@@ -551,10 +541,7 @@ def seed_demo():
 
 
 # ============================================================
-# ENDPOINT EKSPOR DATA KE EXCEL (.xlsx) & PDF
-# Excel dibuat dengan openpyxl, PDF dibuat dengan ReportLab,
-# keduanya lewat report_export.py agar konsisten dengan data
-# yang memang ditampilkan di halaman masing-masing.
+# ENDPOINT EKSPOR
 # ============================================================
 
 EXCEL_MIMETYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -668,7 +655,7 @@ def export_plates_pdf():
 
 @plate_bp.route("/export/recap", methods=["GET"])
 def export_recap_excel():
-    """Mengekspor Rekapitulasi ke Excel (.xlsx) - 1 file, 3 sheet: Ringkasan, Rekap CCTV, Total Harian."""
+    """Mengekspor Rekapitulasi ke Excel (.xlsx)."""
     try:
         analytics = db.get_analytics(request.args.to_dict())
         buffer = build_recap_excel(analytics)
@@ -685,7 +672,7 @@ def export_recap_excel():
 
 @plate_bp.route("/export/recap/pdf", methods=["GET"])
 def export_recap_pdf():
-    """Mengekspor Rekapitulasi ke PDF (Ringkasan, Rekap CCTV, Total Harian) menggunakan ReportLab."""
+    """Mengekspor Rekapitulasi ke PDF."""
     try:
         analytics = db.get_analytics(request.args.to_dict())
         buffer = build_recap_pdf(analytics)
@@ -702,7 +689,7 @@ def export_recap_pdf():
 
 @plate_bp.route("/export/statistics", methods=["GET"])
 def export_statistics_excel():
-    """Mengekspor Statistik ke Excel (.xlsx) - 1 file, 2 sheet: Statistik, Top 10."""
+    """Mengekspor Statistik ke Excel (.xlsx)."""
     period = request.args.get("period", "today")
     try:
         analytics = db.get_analytics(request.args.to_dict())
@@ -720,7 +707,7 @@ def export_statistics_excel():
 
 @plate_bp.route("/export/statistics/pdf", methods=["GET"])
 def export_statistics_pdf():
-    """Mengekspor Statistik ke PDF (Statistik Utama, Beban Lalu Lintas, Jam Sibuk, Top 10) menggunakan ReportLab."""
+    """Mengekspor Statistik ke PDF."""
     period = request.args.get("period", "today")
     try:
         analytics = db.get_analytics(request.args.to_dict())
@@ -737,15 +724,12 @@ def export_statistics_pdf():
 
 
 # ============================================================
-# ENDPOINT EKSPOR MONITORING CCTV (EXCEL .xlsx & PDF)
-# Data diambil dari db.get_all_cameras() -- fungsi yang sama
-# dipakai endpoint GET /cameras -- agar data website, Excel,
-# dan PDF selalu konsisten.
+# ENDPOINT EKSPOR MONITORING CCTV
 # ============================================================
 
 @plate_bp.route("/export/cameras", methods=["GET"])
 def export_cameras_excel():
-    """Mengekspor daftar kamera CCTV ke file Excel (.xlsx) menggunakan openpyxl."""
+    """Mengekspor daftar kamera CCTV ke file Excel (.xlsx)."""
     try:
         cameras_db = db.get_all_cameras()
         buffer = build_cameras_excel(cameras_db)
@@ -762,7 +746,7 @@ def export_cameras_excel():
 
 @plate_bp.route("/export/cameras/pdf", methods=["GET"])
 def export_cameras_pdf():
-    """Mengekspor daftar kamera CCTV ke file PDF menggunakan ReportLab."""
+    """Mengekspor daftar kamera CCTV ke file PDF."""
     try:
         cameras_db = db.get_all_cameras()
         buffer = build_cameras_pdf(cameras_db)
@@ -789,13 +773,10 @@ def generate_mjpeg_stream(stream_url, width=960, height=540, draw_bbox=True, cam
     ai_service = None
     try:
         from services.stream_ai_service import StreamAIService
-        # AI tetap dijalankan walaupun visual bounding box dimatikan.
         ai_service = StreamAIService.get_instance()
     except Exception as e:
         print(f"[AI STREAM WARNING] AI Service load error: {e}")
 
-    # Pembacaan dan pengiriman frame tidak boleh menunggu inferensi AI.
-    # Queue satu item menjaga latency tetap rendah saat CPU sedang penuh.
     ai_input = queue.Queue(maxsize=1)
     ai_output = queue.Queue(maxsize=1)
     stop_worker = threading.Event()
@@ -849,7 +830,6 @@ def generate_mjpeg_stream(stream_url, width=960, height=540, draw_bbox=True, cam
                            b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
                 break
 
-            # Jalankan AI di worker; frame terbaru tetap dikirim tanpa menunggu.
             if ai_service is not None:
                 try:
                     while True:
@@ -875,7 +855,7 @@ def generate_mjpeg_stream(stream_url, width=960, height=540, draw_bbox=True, cam
                 continue
             yield (b'--frame\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
-            time.sleep(0.03)  # cap ~30 FPS untuk kestabilan CPU
+            time.sleep(0.03)
     except GeneratorExit:
         pass
     except Exception as exc:
@@ -897,11 +877,9 @@ def video_feed(camera_id=None):
     if camera_id is not None:
         target_cam = next((c for c in cams if c["camera_id"] == camera_id), None)
 
-    # Jika tidak ditentukan atau tidak ketemu, pakai kamera aktif pertama
     if not target_cam:
         target_cam = next((c for c in cams if c["status"] == 1), None)
 
-    # Fallback ke kamera pertama jika ada
     if not target_cam and cams:
         target_cam = cams[0]
 
@@ -916,3 +894,123 @@ def video_feed(camera_id=None):
         ),
         mimetype='multipart/x-mixed-replace; boundary=frame'
     )
+
+
+# ============================================================
+# ENDPOINT SNAPSHOT (1 FRAME) — untuk Editor Zona
+# ============================================================
+
+def _grab_single_frame(stream_url, width=960, height=540, camera_id=1, draw_bbox=False):
+    """
+    Ambil 1 frame dari stream CCTV via FFmpegStreamReader.
+    Return: np.ndarray (BGR) atau None kalau gagal.
+    """
+    norm_url = normalize_stream_url(stream_url)
+    reader = FFmpegStreamReader(norm_url, width=width, height=height)
+
+    frame = None
+    try:
+        # Baca beberapa kali untuk skip frame pertama yang kadang korup
+        for attempt in range(8):
+            ret, f = reader.read()
+            if ret and f is not None and getattr(f, "size", 0) > 0:
+                frame = f
+                break
+            time.sleep(0.15)
+    finally:
+        try:
+            reader.release()
+        except Exception:
+            pass
+
+    if frame is None:
+        return None
+
+    # Optional: overlay bbox deteksi terakhir
+    if draw_bbox:
+        try:
+            from services.stream_ai_service import StreamAIService
+            svc = StreamAIService.get_instance()
+            processed = svc.process_frame(frame, draw_bbox=True, camera_id=camera_id)
+            if processed is not None and getattr(processed, "size", 0) > 0:
+                frame = processed
+        except Exception as exc:
+            print(f"[SNAPSHOT] Gagal overlay bbox: {exc}")
+
+    return frame
+
+
+@plate_bp.route("/video_feed/<int:camera_id>/snapshot", methods=["GET"])
+@plate_bp.route("/video_snapshot/<int:camera_id>", methods=["GET"])
+def video_snapshot(camera_id):
+    """
+    Ambil 1 frame JPEG dari kamera CCTV.
+    Dipakai oleh Editor Zona sebagai background gambar.
+
+    Query params:
+      - bbox=1  → overlay bounding box deteksi terakhir
+      - w, h    → ukuran frame (default 960x540)
+
+    Return: image/jpeg
+    """
+    draw_bbox = request.args.get("bbox", "0").lower() in ("1", "true", "yes", "on")
+    width = request.args.get("w", 960, type=int)
+    height = request.args.get("h", 540, type=int)
+
+    try:
+        cams = db.get_all_cameras()
+        target_cam = next((c for c in cams if c["camera_id"] == camera_id), None)
+
+        if not target_cam:
+            return jsonify({
+                "success": False,
+                "message": f"Kamera {camera_id} tidak ditemukan"
+            }), 404
+
+        if not target_cam.get("stream_url"):
+            return jsonify({
+                "success": False,
+                "message": f"Kamera {camera_id} tidak punya stream URL"
+            }), 404
+
+        frame = _grab_single_frame(
+            target_cam["stream_url"],
+            width=width,
+            height=height,
+            camera_id=camera_id,
+            draw_bbox=draw_bbox,
+        )
+
+        if frame is None:
+            return jsonify({
+                "success": False,
+                "message": "Gagal membaca frame dari stream CCTV"
+            }), 503
+
+        ok, buffer = cv2.imencode(
+            ".jpg",
+            frame,
+            [int(cv2.IMWRITE_JPEG_QUALITY), 88]
+        )
+        if not ok:
+            return jsonify({
+                "success": False,
+                "message": "Gagal encode frame ke JPEG"
+            }), 500
+
+        return Response(
+            buffer.tobytes(),
+            mimetype="image/jpeg",
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            }
+        )
+
+    except Exception as exc:
+        print(f"[SNAPSHOT ERROR] camera={camera_id}: {exc}")
+        return jsonify({
+            "success": False,
+            "message": str(exc)
+        }), 500

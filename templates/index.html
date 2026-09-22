@@ -63,6 +63,45 @@
         .detection-preview-image:hover { transform: none !important; }
         .detection-image-modal .modal-footer { padding: 6px 18px 12px; }
         #imagePreviewDetails { font-size: 0.78rem; }
+
+        /* === ZONA EDITOR === */
+        .zone-editor-wrap {
+            position: relative;
+            max-width: 960px;
+            margin: 0 auto;
+            background: #000;
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        .zone-editor-wrap img {
+            width: 100%;
+            display: block;
+            border-radius: 10px;
+        }
+        #zoneEditorCanvas {
+            position: absolute;
+            top: 0; left: 0;
+            cursor: crosshair;
+            border-radius: 10px;
+        }
+        .zone-legend {
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+            font-size: 0.82rem;
+        }
+        .zone-legend span {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .zone-legend .dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 3px;
+            display: inline-block;
+        }
+
         @media (max-width: 768px) {
             .detection-image-modal { width: 92vw; max-width: 92vw; }
             .preview-img-container { height: 350px; min-height: 270px; max-height: 350px; }
@@ -133,6 +172,11 @@
                 </nav>
                 <div class="nav-section mt-4">Sistem</div>
                 <nav class="nav flex-column gap-1">
+                    <a class="nav-link {% if page == 'zones' %}active{% endif %}"
+                        href="{{ url_for('zones_editor.zones_editor') }}" title="Editor Zona">
+                        <i class="bi bi-bounding-box"></i>
+                        <span>Editor Zona</span>
+                    </a>
                     <a class="nav-link {% if page == 'settings' %}active{% endif %}"
                         href="{{ url_for('settings_page.settings') }}" title="Profil">
                         <i class="bi bi-person-circle"></i>
@@ -797,6 +841,108 @@
                     </div>
                 </div>
             </div>
+                       {% elif page == 'zones' %}
+            <section class="panel shadow-sm">
+                <div class="panel-header flex-wrap gap-3">
+                    <div>
+                        <h3><i class="bi bi-bounding-box"></i> Editor Zona Deteksi</h3>
+                        <p>Atur zona deteksi MID (orang + kendaraan) & NEAR (plat + OCR) untuk setiap kamera CCTV.</p>
+                    </div>
+                    <div class="d-flex gap-2 align-items-center flex-wrap">
+                        <select id="zoneCameraSelect" class="form-select form-select-sm" style="width: 220px;"></select>
+                        <button type="button" class="btn-action-outline" onclick="refreshFrame()" title="Muat ulang frame CCTV">
+                            <i class="bi bi-arrow-clockwise"></i> Refresh Frame
+                        </button>
+                        <button type="button" class="btn-action-outline" onclick="resetZone()" title="Reset zona ke default">
+                            <i class="bi bi-arrow-counterclockwise"></i> Reset
+                        </button>
+                        <button type="button" class="btn-action-primary" onclick="saveZone()" title="Simpan zona ke database">
+                            <i class="bi bi-save"></i> Simpan Zona
+                        </button>
+                    </div>
+                </div>
+
+                <!-- PANDUAN -->
+                <div class="p-3 border-bottom">
+                    <div class="alert alert-info mb-0">
+                        <h6 class="fw-bold mb-2"><i class="bi bi-info-circle"></i> Panduan Mengatur Zona</h6>
+                        <ol class="mb-0 ps-3 small">
+                            <li><strong>Pilih kamera</strong> dari dropdown di kanan atas.</li>
+                            <li>Tunggu frame CCTV muncul sebagai latar belakang.</li>
+                            <li>Pilih mode edit:
+                                <span class="badge bg-primary ms-1">MID</span> untuk orang + kendaraan,
+                                <span class="badge bg-success ms-1">NEAR</span> untuk plat + OCR.
+                            </li>
+                            <li><strong>Klik 4 titik di gambar</strong> secara berurutan <em>searah jarum jam</em>:
+                                <ul class="mb-1">
+                                    <li>Kiri atas → Kanan atas → Kanan bawah → Kiri bawah</li>
+                                </ul>
+                            </li>
+                            <li>Minimal <strong>3 titik</strong> per zona. Titik ke-1 dan terakhir otomatis terhubung.</li>
+                            <li>Kalau salah: klik <strong>Hapus Titik Terakhir</strong> atau <strong>Kosongkan Zona</strong>.</li>
+                            <li>Klik <strong>Simpan Zona</strong> untuk menerapkan.</li>
+                            <li>Zona langsung dipakai AI tanpa restart server.</li>
+                        </ol>
+                        <hr class="my-2">
+                        <div class="small">
+                            <strong>💡 Tips:</strong>
+                            <ul class="mb-0 ps-3">
+                                <li><strong>Zona MID</strong> harus mencakup area jalan yang ingin dipantau kendaraan & orang.</li>
+                                <li><strong>Zona NEAR</strong> harus mencakup area yang lebih dekat ke kamera, di mana plat masih terbaca jelas.</li>
+                                <li>Biasanya NEAR <em>lebih kecil</em> dan ada di dalam MID, karena plat hanya bisa dibaca saat kendaraan dekat.</li>
+                                <li>Jangan menggambar garis menyilang — sistem akan menolak simpan.</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="p-3">
+                    <div class="d-flex gap-3 mb-3 flex-wrap align-items-center">
+                        <div>
+                            <label class="form-label small fw-semibold mb-1 d-block">Mode Edit</label>
+                            <div class="btn-group btn-group-sm" role="group">
+                                <input type="radio" class="btn-check" name="zoneMode" id="zoneModeMid" value="mid" checked>
+                                <label class="btn btn-outline-primary" for="zoneModeMid">
+                                    <i class="bi bi-square"></i> MID (Person + Vehicle)
+                                </label>
+                                <input type="radio" class="btn-check" name="zoneMode" id="zoneModeNear" value="near">
+                                <label class="btn btn-outline-success" for="zoneModeNear">
+                                    <i class="bi bi-square-fill"></i> NEAR (Plate + OCR)
+                                </label>
+                            </div>
+                        </div>
+                        <div class="ms-auto">
+                            <button type="button" class="btn btn-outline-secondary btn-sm" onclick="undoPoint()">
+                                <i class="bi bi-arrow-counterclockwise"></i> Hapus Titik Terakhir
+                            </button>
+                            <button type="button" class="btn btn-outline-danger btn-sm" onclick="clearCurrentZone()">
+                                <i class="bi bi-trash"></i> Kosongkan Zona
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="d-flex gap-3 mb-3 flex-wrap align-items-center">
+                        <div class="small text-muted" id="zoneModeHelper"></div>
+                        <div class="ms-auto" id="zoneDirtyIndicator"></div>
+                    </div>
+
+                    <div class="zone-legend mb-3">
+                        <span><span class="dot" style="background: rgba(37,99,235,0.85);"></span> MID (biru) — Person + Vehicle</span>
+                        <span><span class="dot" style="background: rgba(34,197,94,0.85);"></span> NEAR (hijau) — Plate + OCR</span>
+                    </div>
+
+                    <div class="zone-editor-wrap">
+                        <img id="zoneEditorImage" src="" alt="CCTV frame">
+                        <canvas id="zoneEditorCanvas"></canvas>
+                    </div>
+
+                    <div class="alert alert-warning small mt-3 mb-0">
+                        <i class="bi bi-exclamation-triangle"></i>
+                        <strong>Perhatian:</strong> Setelah simpan, zona langsung dipakai AI untuk semua kamera.
+                        Kalau hasil deteksi jadi tidak wajar, klik <strong>Reset</strong> untuk kembali ke default.
+                    </div>
+                </div>
+            </section>
             {% elif page == 'settings' %}
             <div class="row g-4">
                 <div class="col-xl-4 col-lg-5">
@@ -941,6 +1087,7 @@
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/zone_editor.js') }}"></script>
 </body>
 
 </html>
