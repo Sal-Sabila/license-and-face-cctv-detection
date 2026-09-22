@@ -1021,6 +1021,7 @@ def save_detection_event(
                     vehicle_rel_path if object_type == "vehicle" else None,
                     event_key
                 )
+
             )
 
             detection_id = cur.lastrowid
@@ -1461,7 +1462,6 @@ def get_all_detections_paginated(
 
     where_clauses = ["1=1"]
     params = []
-
     if type_filter == "plate":
         where_clauses.append("fd.object_type = 'vehicle' AND fd.has_plate = 1")
     elif type_filter == "vehicle":
@@ -1472,6 +1472,7 @@ def get_all_detections_paginated(
     if exclude_failed or status_filter == "valid":
         where_clauses.append("fd.detection_status IN (1, 2)")
     elif status_filter in ("0", "1", "2"):
+
         where_clauses.append("fd.detection_status = %s")
         params.append(int(status_filter))
 

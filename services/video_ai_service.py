@@ -463,7 +463,6 @@ def crop_expanded_object(frame, bbox, min_width=MIN_CAPTURE_WIDTH, min_height=MI
         return None
     return crop
 
-
 def save_person_capture(frame, bbox, track_id, video_time):
     if frame is None:
         return None
@@ -541,6 +540,7 @@ def get_vehicle_crop_for_plate(frame, plate_bbox, vehicle_dets):
 
         crop = crop_expanded_object(frame, [vx1, vy1, vx2, vy2], min_width=MIN_CAPTURE_WIDTH, min_height=MIN_CAPTURE_HEIGHT)
         if crop is not None and crop.size:
+
             best_crop = crop
             best_score = score
             best_track_id = vehicle.get("track_id")

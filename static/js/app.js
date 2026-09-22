@@ -904,6 +904,7 @@ async function initDetectionsPage() {
             typeGroup.querySelectorAll('button').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
             detState.type = btn.dataset.type || 'all';
+            if (typeSelect) typeSelect.value = detState.type;
             detState.page = 1;
             loadDetections();
         });
@@ -951,7 +952,6 @@ async function initDetectionsPage() {
             detState.period = 'custom';
         });
     });
-
     document.getElementById('detDateApply')?.addEventListener('click', () => {
         if (applyCustomDateRange(detState, 'detStartDate', 'detEndDate')) {
             detState.page = 1;
@@ -998,6 +998,34 @@ async function initDetectionsPage() {
     document.getElementById('detNextBtn')?.addEventListener('click', () => {
         detState.page++;
         loadDetections();
+    });
+
+    document.getElementById('detResetBtn')?.addEventListener('click', () => {
+        detState.page = 1;
+        detState.type = 'all';
+        detState.status = 'all';
+        detState.camera_id = '';
+        detState.search = '';
+        detState.period = 'today';
+        detState.start_date = '';
+        detState.end_date = '';
+
+        const searchInput = document.getElementById('detectionSearch');
+        if (searchInput) searchInput.value = '';
+        const typeSelect = document.getElementById('detTypeFilter');
+        if (typeSelect) typeSelect.value = 'all';
+        const cameraSelect = document.getElementById('detCameraFilter');
+        if (cameraSelect) cameraSelect.value = '';
+        const statusSelect = document.getElementById('detStatusFilter');
+        if (statusSelect) statusSelect.value = 'all';
+        const periodSelect = document.getElementById('detPeriodFilter');
+        if (periodSelect) periodSelect.value = 'today';
+        const startInput = document.getElementById('detStartDate');
+        if (startInput) startInput.value = '';
+        const endInput = document.getElementById('detEndDate');
+        if (endInput) endInput.value = '';
+
+        loadDetections().catch(err => console.error('Error reset detections filter:', err));
     });
 
     await loadDetections();
@@ -1239,6 +1267,31 @@ async function initHistoryPage() {
     document.getElementById('plateNextBtn')?.addEventListener('click', () => {
         plateState.page++;
         loadPlateHistory();
+    });
+
+    document.getElementById('plateResetBtn')?.addEventListener('click', () => {
+        plateState.page = 1;
+        plateState.search = '';
+        plateState.camera_id = '';
+        plateState.status = 'all';
+        plateState.period = 'today';
+        plateState.start_date = '';
+        plateState.end_date = '';
+
+        const searchInput = document.getElementById('plateSearch');
+        if (searchInput) searchInput.value = '';
+        const cameraSelect = document.getElementById('plateCameraFilter');
+        if (cameraSelect) cameraSelect.value = '';
+        const statusSelect = document.getElementById('plateStatusFilter');
+        if (statusSelect) statusSelect.value = 'all';
+        const periodSelect = document.getElementById('platePeriodFilter');
+        if (periodSelect) periodSelect.value = 'today';
+        const startInput = document.getElementById('plateStartDate');
+        if (startInput) startInput.value = '';
+        const endInput = document.getElementById('plateEndDate');
+        if (endInput) endInput.value = '';
+
+        loadPlateHistory().catch(err => console.error('Error reset plate history filter:', err));
     });
 
     await loadPlateHistory();

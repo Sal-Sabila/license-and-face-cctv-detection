@@ -1,15 +1,88 @@
 import time
 import cv2
-import csv
-import io
 import numpy as np
-# pyrefly: ignore [missing-import]
-from flask import Blueprint, jsonify, request, Response
+import os
+import threading
+import uuid
+import queue
+from flask import Blueprint, jsonify, request, Response, send_from_directory, send_file
 from datetime import datetime
 import db
 from ffmpeg_stream_reader import FFmpegStreamReader, normalize_stream_url
+from report_export import (
+    build_detections_excel,
+    build_detections_pdf,
+    build_plates_excel,
+    build_plates_pdf,
+    build_recap_excel,
+    build_recap_pdf,
+    build_statistics_excel,
+    build_statistics_pdf,
+    build_cameras_excel,
+    build_cameras_pdf,
+)
 
 plate_bp = Blueprint("plate", __name__)
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+VIDEO_DIR = os.path.join(BASE_DIR, "videos")
+VIDEO_UPLOAD_DIR = os.path.join(VIDEO_DIR, "uploads")
+VIDEO_OUTPUT_DIR = os.path.join(VIDEO_DIR, "processed")
+VIDEO_EXTENSIONS = {"mp4", "avi", "mov", "mkv", "webm", "m4v"}
+VIDEO_JOBS = {}
+VIDEO_JOBS_LOCK = threading.Lock()
+
+os.makedirs(VIDEO_UPLOAD_DIR, exist_ok=True)
+os.makedirs(VIDEO_OUTPUT_DIR, exist_ok=True)
+
+
+def _video_job(job_id, input_path, output_path, camera_id):
+    try:
+        from services.video_ai_service import VideoAIService
+
+        def update_progress(frame_number, total_frames, processed_frame=None):
+            progress = round((frame_number / total_frames) * 100, 1) if total_frames else 0
+            with VIDEO_JOBS_LOCK:
+                if job_id in VIDEO_JOBS:
+                    VIDEO_JOBS[job_id]["progress"] = progress
+                    if processed_frame is not None:
+                        encoded, buffer = cv2.imencode(
+                            ".jpg", processed_frame,
+                            [int(cv2.IMWRITE_JPEG_QUALITY), 78]
+                        )
+                        if encoded:
+                            VIDEO_JOBS[job_id]["latest_frame"] = buffer.tobytes()
+
+        with VIDEO_JOBS_LOCK:
+            VIDEO_JOBS[job_id]["status"] = "processing"
+
+        service = VideoAIService(
+            video_path=input_path,
+            output_path=output_path,
+            camera_id=camera_id,
+            show_window=False,
+            progress_callback=update_progress
+        )
+        service.run()
+
+        with VIDEO_JOBS_LOCK:
+            VIDEO_JOBS[job_id].update({
+                "status": "completed",
+                "progress": 100,
+                "output_url": f"/api/video_jobs/{job_id}/result"
+            })
+    except Exception as exc:
+        print(f"[VIDEO JOB ERROR] {job_id}: {exc}")
+        with VIDEO_JOBS_LOCK:
+            VIDEO_JOBS[job_id].update({
+                "status": "failed",
+                "error": str(exc)
+            })
+    finally:
+        try:
+            os.remove(input_path)
+        except OSError:
+            pass
 
 
 def parse_confidence(data):
@@ -17,6 +90,101 @@ def parse_confidence(data):
         return float(data.get("confidence"))
     except (TypeError, ValueError):
         return None
+
+
+@plate_bp.route("/video_jobs", methods=["POST"])
+def create_video_job():
+    """Menerima video dan memprosesnya di background agar request web tidak tertahan."""
+    uploaded = request.files.get("video")
+    if not uploaded or not uploaded.filename:
+        return jsonify({"success": False, "message": "File video wajib dipilih"}), 400
+
+    extension = uploaded.filename.rsplit(".", 1)[-1].lower() if "." in uploaded.filename else ""
+    if extension not in VIDEO_EXTENSIONS:
+        return jsonify({"success": False, "message": "Format video tidak didukung"}), 400
+
+    try:
+        camera_id = int(request.form.get("camera_id", 1))
+    except (TypeError, ValueError):
+        camera_id = 1
+
+    job_id = uuid.uuid4().hex
+    input_path = os.path.join(VIDEO_UPLOAD_DIR, f"{job_id}.{extension}")
+    output_path = os.path.join(VIDEO_OUTPUT_DIR, f"{job_id}.mp4")
+    uploaded.save(input_path)
+
+    with VIDEO_JOBS_LOCK:
+        VIDEO_JOBS[job_id] = {
+            "status": "queued",
+            "progress": 0,
+            "output_url": None,
+            "error": None,
+            "latest_frame": None
+        }
+
+    worker = threading.Thread(
+        target=_video_job,
+        args=(job_id, input_path, output_path, camera_id),
+        daemon=True
+    )
+    worker.start()
+
+    return jsonify({"success": True, "job_id": job_id}), 202
+
+
+@plate_bp.route("/video_jobs/<job_id>", methods=["GET"])
+def video_job_status(job_id):
+    with VIDEO_JOBS_LOCK:
+        job = VIDEO_JOBS.get(job_id)
+        if not job:
+            return jsonify({"success": False, "message": "Job video tidak ditemukan"}), 404
+        status = {
+            key: value
+            for key, value in job.items()
+            if key != "latest_frame"
+        }
+        return jsonify({"success": True, "data": status})
+
+
+@plate_bp.route("/video_jobs/<job_id>/result", methods=["GET"])
+def video_job_result(job_id):
+    filename = f"{job_id}.mp4"
+    with VIDEO_JOBS_LOCK:
+        job = VIDEO_JOBS.get(job_id)
+        if not job or job.get("status") != "completed":
+            return jsonify({"success": False, "message": "Video belum selesai diproses"}), 404
+    return send_from_directory(VIDEO_OUTPUT_DIR, filename, as_attachment=False)
+
+
+@plate_bp.route("/video_jobs/<job_id>/feed", methods=["GET"])
+def video_job_feed(job_id):
+    """Feed MJPEG frame deteksi terbaru selama video masih diproses."""
+    def generate_frames():
+        last_frame = None
+        while True:
+            with VIDEO_JOBS_LOCK:
+                job = VIDEO_JOBS.get(job_id)
+                if not job:
+                    return
+                status = job["status"]
+                frame = job.get("latest_frame")
+
+            if frame and frame != last_frame:
+                last_frame = frame
+                yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
+
+            if status in ("completed", "failed"):
+                return
+            time.sleep(0.12)
+
+    with VIDEO_JOBS_LOCK:
+        if job_id not in VIDEO_JOBS:
+            return jsonify({"success": False, "message": "Job video tidak ditemukan"}), 404
+
+    return Response(
+        generate_frames(),
+        mimetype="multipart/x-mixed-replace; boundary=frame"
+    )
 
 
 # ============================================================
@@ -34,7 +202,8 @@ def list_cameras():
                 "name": c["location"],
                 "url": c["stream_url"],
                 "stream_type": c.get("stream_type", 1),
-                "active": bool(c["status"])
+                "active": bool(c["status"]),
+                "direction": c.get("direction") or "unknown"
             }
             for c in cameras_db
         ]
@@ -50,6 +219,7 @@ def create_camera():
     name = str(data.get("name", "")).strip()
     url = str(data.get("url", "")).strip()
     active = bool(data.get("active", True))
+    direction = str(data.get("direction", "unknown"))
 
     if not name or not url:
         return jsonify({"success": False, "message": "Nama dan URL kamera wajib diisi"}), 400
@@ -61,14 +231,14 @@ def create_camera():
             BackgroundDetectionManager.get_instance().sync_active_cameras()
         except Exception:
             pass
-
         return jsonify({
             "success": True,
             "data": {
                 "id": new_id,
                 "name": name,
                 "url": url,
-                "active": active
+                "active": active,
+                "direction": direction
             }
         }), 201
     except Exception as e:
@@ -82,9 +252,10 @@ def update_camera(camera_id):
     location = data.get("name")
     stream_url = data.get("url")
     status = 1 if data.get("active") else (0 if "active" in data else None)
+    direction = data.get("direction")
 
     try:
-        ok = db.update_camera(camera_id, location=location, stream_url=stream_url, status=status)
+        ok = db.update_camera(camera_id, location=location, stream_url=stream_url, status=status, direction=direction)
         if not ok:
             return jsonify({"success": False, "message": "Kamera tidak ditemukan atau tidak ada perubahan"}), 404
 
@@ -162,6 +333,17 @@ def list_detections():
         return jsonify({"success": False, "message": str(e), "data": []}), 500
 
 
+@plate_bp.route("/detections/<int:detection_id>", methods=["DELETE"])
+def delete_detection(detection_id):
+    """Menghapus satu histori deteksi beserta data turunannya."""
+    try:
+        if not db.delete_detection(detection_id):
+            return jsonify({"success": False, "message": "Deteksi tidak ditemukan"}), 404
+        return jsonify({"success": True, "message": "Deteksi berhasil dihapus"})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
 # ============================================================
 # ENDPOINT RIWAYAT DETEKSI PLAT & WAJAH
 # ============================================================
@@ -225,6 +407,17 @@ def plate_history():
         return jsonify({"success": False, "message": str(e), "data": []}), 500
 
 
+@plate_bp.route("/plate/history/<int:plate_id>", methods=["DELETE"])
+def delete_plate_history(plate_id):
+    """Menghapus satu histori plat beserta event dan capture terkait."""
+    try:
+        if not db.delete_plate(plate_id):
+            return jsonify({"success": False, "message": "Riwayat plat tidak ditemukan"}), 404
+        return jsonify({"success": True, "message": "Riwayat plat berhasil dihapus"})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
 @plate_bp.route("/plate/latest", methods=["GET"])
 def latest_plate():
     """Mengambil deteksi plat paling akhir."""
@@ -240,9 +433,9 @@ def face_history():
         records = db.get_recent_detections(limit=100)
         face_list = []
         for r in records:
-            if r.get("face_image_path") or r.get("face_status") is not None:
+            if r.get("object_type") == "person" or (not r.get("object_type") and r.get("face_image_path") and not r.get("plate_id")):
                 status_text = "Terbaca" if r.get("face_status") == 1 else ("Perlu cek" if r.get("face_status") == 2 else "Gagal")
-                conf = float(r.get("face_confidence") or 0.0)
+                conf = float(r.get("person_confidence") or r.get("face_confidence") or 0.0)
                 dt_str = r["detected_at"].strftime("%Y-%m-%d %H:%M:%S") if isinstance(r.get("detected_at"), datetime) else str(r.get("detected_at") or "")
 
                 face_list.append({
@@ -282,6 +475,15 @@ def stats_summary():
         return jsonify({"success": False, "message": str(e)}), 500
 
 
+@plate_bp.route("/analytics", methods=["GET"])
+def analytics():
+    """Shared filtered analytics payload for dashboard, recap and statistics."""
+    try:
+        return jsonify({"success": True, "data": db.get_analytics(request.args.to_dict())})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e), "data": {}}), 500
+
+
 @plate_bp.route("/statistics/enterprise", methods=["GET"])
 def stats_enterprise():
     """
@@ -295,8 +497,30 @@ def stats_enterprise():
     """
     period = request.args.get("period", "today")
     try:
-        data = db.get_enterprise_statistics(period=period)
-        return jsonify({"success": True, "data": data})
+        analytics = db.get_analytics(request.args.to_dict())
+        summary = analytics["summary"]
+        daily = analytics["daily"]
+        hourly = analytics["hourly"]
+        return jsonify({"success": True, "data": {
+            "period": analytics["period"],
+            "period_label": period,
+            "kpi": {
+                "total_detections": summary["vehicles"] + summary["people"],
+                "total_plates": summary["plates"],
+                "total_faces": summary["people"],
+                "plate_read_rate": round(summary["plates"] / max(summary["vehicles"], 1) * 100, 1),
+                "avg_confidence": 0,
+                "need_check_count": 0,
+                "active_cameras": summary["active_cameras"],
+                "total_cameras": summary["total_cameras"],
+                "camera_availability": round(summary["active_cameras"] / max(summary["total_cameras"], 1) * 100, 1)
+            },
+            "trend": {"labels": [item["date"] for item in daily], "plates": [item["vehicles"] for item in daily], "faces": [item["people"] for item in daily], "totals": [item["vehicles"] + item["people"] for item in daily]},
+            "camera_distribution": [{"camera_name": item["camera"], "total_count": item["vehicles"] + item["people"], "plate_count": item["unique_plates"], "face_count": item["people"], "percentage": 0} for item in analytics["cameras"]],
+            "status_breakdown": {"valid": 0, "warning": 0, "failed": 0},
+            "peak_hours": [{"time_range": f"{item['label']} - {(item['hour'] + 1) % 24:02d}:00 WIB", "count": item["vehicles"], "percentage": 0} for item in sorted(hourly, key=lambda value: value["vehicles"], reverse=True)[:3]],
+            "top_plates": [{"plate_number": item["plate"], "total_seen": item["count"], "last_camera": item["camera"], "last_seen": item["last_seen"], "status": "Aktual", "status_code": 1, "avg_confidence_percent": item["confidence"]} for item in analytics["top_plates"]]
+        }})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
@@ -392,117 +616,227 @@ def seed_demo():
 
 
 # ============================================================
-# ENDPOINT EKSPOR DATA KE CSV (STANDAR LAPORAN AUDIT PERUSAHAAN)
+# ENDPOINT EKSPOR DATA KE EXCEL (.xlsx) & PDF
+# Excel dibuat dengan openpyxl, PDF dibuat dengan ReportLab,
+# keduanya lewat report_export.py agar konsisten dengan data
+# yang memang ditampilkan di halaman masing-masing.
 # ============================================================
 
+EXCEL_MIMETYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
 @plate_bp.route("/export/detections", methods=["GET"])
-def export_detections_csv():
-    """Mengekspor seluruh data deteksi ke format CSV."""
+def export_detections_excel():
+    """Mengekspor data Hasil Deteksi sesuai filter aktif ke file Excel (.xlsx)."""
     try:
-        res = db.get_all_detections_paginated(page=1, limit=5000)
+        res = db.get_all_detections_paginated(
+            page=1,
+            limit=5000,
+            type_filter=request.args.get("type", "all"),
+            status_filter=request.args.get("status", "all"),
+            camera_id=request.args.get("camera_id", type=int),
+            search=request.args.get("search", type=str),
+            start_date=request.args.get("start_date", type=str),
+            end_date=request.args.get("end_date", type=str)
+        )
         items = res.get("items", [])
+        buffer = build_detections_excel(items)
+        filename = f"laporan_deteksi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        return send_file(
+            buffer,
+            mimetype=EXCEL_MIMETYPE,
+            as_attachment=True,
+            download_name=filename
+        )
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
 
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow(["ID", "Tipe", "Nomor Plat", "Kamera CCTV", "Confidence (%)", "Waktu Deteksi", "Status"])
 
-        for it in items:
-            writer.writerow([
-                it["id"],
-                it["type"],
-                it["plate"],
-                it["camera"],
-                it["confidence_percent"],
-                it["timestamp"],
-                it["status"]
-            ])
-
-        output.seek(0)
-        return Response(
-            output.getvalue(),
-            mimetype="text/csv",
-            headers={"Content-Disposition": f"attachment; filename=laporan_deteksi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"}
+@plate_bp.route("/export/detections/pdf", methods=["GET"])
+def export_detections_pdf():
+    """Mengekspor data Hasil Deteksi sesuai filter aktif ke file PDF (dengan foto)."""
+    try:
+        res = db.get_all_detections_paginated(
+            page=1,
+            limit=5000,
+            type_filter=request.args.get("type", "all"),
+            status_filter=request.args.get("status", "all"),
+            camera_id=request.args.get("camera_id", type=int),
+            search=request.args.get("search", type=str),
+            start_date=request.args.get("start_date", type=str),
+            end_date=request.args.get("end_date", type=str)
+        )
+        items = res.get("items", [])
+        buffer = build_detections_pdf(items)
+        filename = f"laporan_deteksi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        return send_file(
+            buffer,
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=filename
         )
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
 
 @plate_bp.route("/export/plates", methods=["GET"])
-def export_plates_csv():
-    """Mengekspor riwayat plat nomor ke format CSV."""
+def export_plates_excel():
+    """Mengekspor riwayat plat nomor sesuai filter aktif ke file Excel (.xlsx)."""
     try:
-        res = db.get_plate_history_paginated(page=1, limit=5000)
+        res = db.get_plate_history_paginated(
+            page=1,
+            limit=5000,
+            search=request.args.get("search", type=str),
+            camera_id=request.args.get("camera_id", type=int),
+            status_filter=request.args.get("status", "all"),
+            start_date=request.args.get("start_date", type=str),
+            end_date=request.args.get("end_date", type=str)
+        )
         items = res.get("items", [])
+        buffer = build_plates_excel(items)
+        filename = f"riwayat_plat_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        return send_file(
+            buffer,
+            mimetype=EXCEL_MIMETYPE,
+            as_attachment=True,
+            download_name=filename
+        )
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
 
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow(["ID Plat", "Nomor Plat", "Kamera CCTV", "Confidence (%)", "Waktu Deteksi", "Status"])
 
-        for it in items:
-            writer.writerow([
-                it["id"],
-                it["plate"],
-                it["camera"],
-                it["confidence_percent"],
-                it["timestamp"],
-                it["status"]
-            ])
+@plate_bp.route("/export/plates/pdf", methods=["GET"])
+def export_plates_pdf():
+    """Mengekspor riwayat plat nomor sesuai filter aktif ke file PDF (dengan crop plat)."""
+    try:
+        res = db.get_plate_history_paginated(
+            page=1,
+            limit=5000,
+            search=request.args.get("search", type=str),
+            camera_id=request.args.get("camera_id", type=int),
+            status_filter=request.args.get("status", "all"),
+            start_date=request.args.get("start_date", type=str),
+            end_date=request.args.get("end_date", type=str)
+        )
+        items = res.get("items", [])
+        buffer = build_plates_pdf(items)
+        filename = f"riwayat_plat_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        return send_file(
+            buffer,
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=filename
+        )
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
 
-        output.seek(0)
-        return Response(
-            output.getvalue(),
-            mimetype="text/csv",
-            headers={"Content-Disposition": f"attachment; filename=riwayat_plat_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"}
+
+@plate_bp.route("/export/recap", methods=["GET"])
+def export_recap_excel():
+    """Mengekspor Rekapitulasi ke Excel (.xlsx) - 1 file, 3 sheet: Ringkasan, Rekap CCTV, Total Harian."""
+    try:
+        analytics = db.get_analytics(request.args.to_dict())
+        buffer = build_recap_excel(analytics)
+        filename = f"rekapitulasi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        return send_file(
+            buffer,
+            mimetype=EXCEL_MIMETYPE,
+            as_attachment=True,
+            download_name=filename
+        )
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@plate_bp.route("/export/recap/pdf", methods=["GET"])
+def export_recap_pdf():
+    """Mengekspor Rekapitulasi ke PDF (Ringkasan, Rekap CCTV, Total Harian) menggunakan ReportLab."""
+    try:
+        analytics = db.get_analytics(request.args.to_dict())
+        buffer = build_recap_pdf(analytics)
+        filename = f"rekapitulasi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        return send_file(
+            buffer,
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=filename
         )
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
 
 @plate_bp.route("/export/statistics", methods=["GET"])
-def export_statistics_csv():
-    """Mengekspor laporan statistik analitik eksekutif ke CSV."""
+def export_statistics_excel():
+    """Mengekspor Statistik ke Excel (.xlsx) - 1 file, 2 sheet: Statistik, Top 10."""
     period = request.args.get("period", "today")
     try:
-        data = db.get_enterprise_statistics(period=period)
-        kpi = data.get("kpi", {})
-        top_plates = data.get("top_plates", [])
-        cam_dist = data.get("camera_distribution", [])
+        analytics = db.get_analytics(request.args.to_dict())
+        buffer = build_statistics_excel(analytics, period=analytics.get("period", period))
+        filename = f"laporan_statistik_{period}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        return send_file(
+            buffer,
+            mimetype=EXCEL_MIMETYPE,
+            as_attachment=True,
+            download_name=filename
+        )
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
 
-        output = io.StringIO()
-        writer = csv.writer(output)
 
-        writer.writerow(["LAPORAN EKSEKUTIF ANALITIK CCTV - PLATEVISION"])
-        writer.writerow(["Periode", data.get("period_label", period)])
-        writer.writerow(["Tanggal Cetak", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
-        writer.writerow([])
+@plate_bp.route("/export/statistics/pdf", methods=["GET"])
+def export_statistics_pdf():
+    """Mengekspor Statistik ke PDF (Statistik Utama, Beban Lalu Lintas, Jam Sibuk, Top 10) menggunakan ReportLab."""
+    period = request.args.get("period", "today")
+    try:
+        analytics = db.get_analytics(request.args.to_dict())
+        buffer = build_statistics_pdf(analytics, period=analytics.get("period", period))
+        filename = f"laporan_statistik_{period}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        return send_file(
+            buffer,
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=filename
+        )
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
 
-        writer.writerow(["RINGKASAN KPI UTAMA"])
-        writer.writerow(["Metrik", "Nilai"])
-        writer.writerow(["Total Deteksi", kpi.get("total_detections", 0)])
-        writer.writerow(["Total Plat Nomor", kpi.get("total_plates", 0)])
-        writer.writerow(["Total Wajah / Orang", kpi.get("total_faces", 0)])
-        writer.writerow(["Plate Recognition Rate (%)", f"{kpi.get('plate_read_rate', 0)}%"])
-        writer.writerow(["Rata-rata Akurasi AI (%)", f"{kpi.get('avg_confidence', 0)}%"])
-        writer.writerow(["Perlu Review Manual", kpi.get("need_check_count", 0)])
-        writer.writerow(["Kamera Aktif", f"{kpi.get('active_cameras', 0)} / {kpi.get('total_cameras', 0)}"])
-        writer.writerow([])
 
-        writer.writerow(["DISTRIBUSI LALU LINTAS PER KAMERA CCTV"])
-        writer.writerow(["Nama CCTV", "Total Deteksi", "Plat", "Wajah", "Pangsa (%)"])
-        for c in cam_dist:
-            writer.writerow([c["camera_name"], c["total_count"], c["plate_count"], c["face_count"], f"{c['percentage']}%"])
-        writer.writerow([])
+# ============================================================
+# ENDPOINT EKSPOR MONITORING CCTV (EXCEL .xlsx & PDF)
+# Data diambil dari db.get_all_cameras() -- fungsi yang sama
+# dipakai endpoint GET /cameras -- agar data website, Excel,
+# dan PDF selalu konsisten.
+# ============================================================
 
-        writer.writerow(["TOP 10 PLAT PALING SERING TERDETEKSI"])
-        writer.writerow(["Nomor Plat", "Frekuensi", "Lokasi Terakhir", "Waktu Terakhir", "Status"])
-        for tp in top_plates:
-            writer.writerow([tp["plate_number"], tp["total_seen"], tp["last_camera"], tp["last_seen"], tp["status"]])
+@plate_bp.route("/export/cameras", methods=["GET"])
+def export_cameras_excel():
+    """Mengekspor daftar kamera CCTV ke file Excel (.xlsx) menggunakan openpyxl."""
+    try:
+        cameras_db = db.get_all_cameras()
+        buffer = build_cameras_excel(cameras_db)
+        filename = f"monitoring_cctv_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        return send_file(
+            buffer,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            as_attachment=True,
+            download_name=filename
+        )
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
 
-        output.seek(0)
-        return Response(
-            output.getvalue(),
-            mimetype="text/csv",
-            headers={"Content-Disposition": f"attachment; filename=laporan_statistik_{period}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"}
+
+@plate_bp.route("/export/cameras/pdf", methods=["GET"])
+def export_cameras_pdf():
+    """Mengekspor daftar kamera CCTV ke file PDF menggunakan ReportLab."""
+    try:
+        cameras_db = db.get_all_cameras()
+        buffer = build_cameras_pdf(cameras_db)
+        filename = f"monitoring_cctv_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        return send_file(
+            buffer,
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=filename
         )
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
@@ -547,6 +881,7 @@ def generate_mjpeg_stream(stream_url, width=960, height=540, draw_bbox=True, cam
     ai_service = None
     try:
         from services.stream_ai_service import StreamAIService
+        # AI tetap dijalankan walaupun visual bounding box dimatikan.
         ai_service = StreamAIService.get_instance()
     except Exception as e:
         print(f"[AI STREAM WARNING] AI Service load error: {e}")
@@ -607,19 +942,29 @@ def generate_mjpeg_stream(stream_url, width=960, height=540, draw_bbox=True, cam
                 try:
                     frame = ai_service.process_frame(frame, draw_bbox=draw_bbox, camera_id=camera_id)
                 except Exception as e:
+                    print(f"[AI STREAM ERROR] Queue frame failed: {e}")
+
+                try:
+                    frame = ai_output.get_nowait()
+                except queue.Empty:
                     pass
 
+            if frame is None or not hasattr(frame, "size") or frame.size == 0:
+                print(f"[STREAM ERROR] Empty frame skipped for camera={camera_id}")
+                continue
             ret, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
             if not ret:
+                print(f"[STREAM ERROR] JPEG encode failed for camera={camera_id}")
                 continue
             yield (b'--frame\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
             time.sleep(0.03)  # cap ~30 FPS untuk kestabilan CPU
     except GeneratorExit:
         pass
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[STREAM ERROR] MJPEG generator failed for camera={camera_id}: {exc}")
     finally:
+        stop_worker.set()
         reader.release()
 
 
@@ -654,4 +999,3 @@ def video_feed(camera_id=None):
         ),
         mimetype='multipart/x-mixed-replace; boundary=frame'
     )
-

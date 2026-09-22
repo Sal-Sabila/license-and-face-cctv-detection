@@ -946,6 +946,8 @@ class StreamAIService:
             iou=PLATE_IOU,
             min_width=PLATE_MIN_WIDTH,
             min_height=PLATE_MIN_HEIGHT,
+            min_aspect_ratio=1.5,
+            max_aspect_ratio=7.0,
         )
 
         try:
@@ -1068,9 +1070,9 @@ class StreamAIService:
                 "last_results_time": 0.0,
                 "last_results": {"persons": [], "plates": []},
                 "person_tracker": sv.ByteTrack(
-                    track_activation_threshold=0.30,
-                    lost_track_buffer=90,
-                    minimum_matching_threshold=0.70,
+                    track_activation_threshold=0.35,
+                    lost_track_buffer=60,
+                    minimum_matching_threshold=0.7,
                     frame_rate=25,
                 ),
                 "plate_tracker": PlateTracker(
@@ -1772,7 +1774,6 @@ class StreamAIService:
             # One database event per physical person track lifecycle.
             if event_key in self.captured_tracks:
                 continue
-
             # Spatial duplicate suppression untuk person (cegah ID switch dalam 3s di posisi yang sama)
             bx1, by1, bx2, by2 = person.get("box", [0, 0, 0, 0])
             pcx = (bx1 + bx2) // 2
@@ -1782,7 +1783,6 @@ class StreamAIService:
             recent_persons = [p for p in recent_persons if current_time - p["t"] < 3.0]
             if any(abs(p["cx"] - pcx) < 50 and abs(p["cy"] - pcy) < 50 for p in recent_persons):
                 continue
-
             # Save a quality crop from the ORIGINAL CCTV frame.
             crop = _prepare_high_quality_capture(
                 frame,
@@ -1811,6 +1811,7 @@ class StreamAIService:
                 self.captured_tracks[event_key] = current_time
                 recent_persons.append({"cx": pcx, "cy": pcy, "t": current_time})
                 self.captured_tracks[recent_person_key] = recent_persons
+
                 print(
                     f"[DETECTION] camera={camera_id} track_id={track_id} "
                     f"object_type=person person_confidence="

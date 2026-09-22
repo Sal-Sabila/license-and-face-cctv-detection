@@ -1,3 +1,5 @@
+import cv2
+
 from ultralytics import YOLO
 
 
@@ -14,6 +16,7 @@ class PlateDetector:
         min_width=20,
         min_height=8,
         **kwargs
+
     ):
 
         self.model = YOLO(model_path)
@@ -27,11 +30,18 @@ class PlateDetector:
         self.min_width = min_width
         self.min_height = min_height
 
-        print("[PLATE] Model berhasil dimuat")
+        self.min_aspect_ratio = min_aspect_ratio
+        self.max_aspect_ratio = max_aspect_ratio
+        self.small_roi_scale = max(1.0, float(small_roi_scale))
+
+        print("=" * 60)
+        print("[PLATE] Detector siap")
+        print("[PLATE] Model:", model_path)
         print("[PLATE] Classes:", self.model.names)
         print("[PLATE] Confidence:", self.confidence)
         print("[PLATE] Image size:", self.imgsz)
         print("[PLATE] Device:", self.device)
+        print("=" * 60)
 
     def detect(self, frame):
 
@@ -43,8 +53,25 @@ class PlateDetector:
 
         try:
 
+            original_height, original_width = frame.shape[:2]
+            inference_frame = frame
+            scale = 1.0
+            # Small vehicle ROIs lose plate characters when YOLO resizes them
+            # directly to imgsz. Upscale only those ROIs to keep CPU bounded.
+            if max(original_height, original_width) < 640:
+                scale = min(
+                    self.small_roi_scale,
+                    640.0 / max(1, max(original_height, original_width)),
+                )
+                if scale > 1.05:
+                    inference_frame = cv2.resize(
+                        frame,
+                        (int(original_width * scale), int(original_height * scale)),
+                        interpolation=cv2.INTER_CUBIC,
+                    )
+
             results = self.model.predict(
-                source=frame,
+                source=inference_frame,
                 conf=self.confidence,
                 imgsz=self.imgsz,
                 device=self.device,
@@ -56,8 +83,7 @@ class PlateDetector:
 
         except Exception as e:
 
-            print(f"[PLATE ERROR] {e}")
-
+            print(f"[PLATE ERROR] YOLO inference failed: {e}")
             return []
 
         detections = []
@@ -71,11 +97,18 @@ class PlateDetector:
 
             for box in result.boxes:
 
-                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                try:
+                    class_id = int(box.cls[0])
+                    confidence = float(box.conf[0])
 
-                confidence = float(box.conf[0])
+                    # Model kamu hanya memiliki class 0 = license_plate
+                    if class_id != 0:
+                        continue
 
-                class_id = int(box.cls[0])
+                    x1, y1, x2, y2 = [value / scale for value in box.xyxy[0].tolist()]
+
+                except Exception:
+                    continue
 
                 # Clamp koordinat
                 x1 = max(0, min(int(x1), frame_width - 1))
@@ -93,56 +126,50 @@ class PlateDetector:
                 if height < self.min_height:
                     continue
 
-                # Validasi koordinat
                 if x2 <= x1 or y2 <= y1:
                     continue
 
-                # Crop plat
-                crop = frame[y1:y2, x1:x2]
+                # Validasi rasio bentuk plat
+                aspect_ratio = width / max(height, 1)
+
+                if aspect_ratio < self.min_aspect_ratio:
+                    continue
+
+                if aspect_ratio > self.max_aspect_ratio:
+                    continue
+
+                # Crop dengan padding kontekstual agar huruf di tepi plat tidak terpotong
+                pad_w = max(2, int(width * 0.08))
+                pad_h = max(2, int(height * 0.08))
+                cy1 = max(0, y1 - pad_h)
+                cy2 = min(frame_height, y2 + pad_h)
+                cx1 = max(0, x1 - pad_w)
+                cx2 = min(frame_width, x2 + pad_w)
+                crop = frame[cy1:cy2, cx1:cx2]
 
                 if crop is None or crop.size == 0:
                     continue
 
-                # Center point
                 center_x = int((x1 + x2) / 2)
                 center_y = int((y1 + y2) / 2)
 
-                # Nama class
                 if isinstance(self.model.names, dict):
-
                     class_name = self.model.names.get(
                         class_id,
                         str(class_id)
                     )
-
                 else:
-
                     class_name = self.model.names[class_id]
 
                 detections.append({
-
-                    "bbox": [
-                        x1,
-                        y1,
-                        x2,
-                        y2
-                    ],
-
+                    "bbox": [x1, y1, x2, y2],
                     "confidence": confidence,
-
                     "class_id": class_id,
-
                     "class_name": class_name,
-
                     "width": width,
-
                     "height": height,
-
-                    "center": [
-                        center_x,
-                        center_y
-                    ],
-
+                    "aspect_ratio": aspect_ratio,
+                    "center": [center_x, center_y],
                     "crop": crop
                 })
 
