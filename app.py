@@ -1,3 +1,4 @@
+import os
 # pyrefly: ignore [missing-import]
 from flask import Flask
 from routes.plate import plate_bp
@@ -8,6 +9,7 @@ from routes.history import history_bp
 from routes.statistics import statistics_bp
 from routes.recap import recap_bp
 from routes.settings import settings_bp
+from services.camera_worker_manager import CameraWorkerManager
 
 
 app = Flask(__name__)
@@ -35,6 +37,13 @@ app.register_blueprint(settings_bp)
 # ==============================
 
 # ==============================
+# START BACKGROUND DETECTION
+# ==============================
+
+if not app.debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+    CameraWorkerManager.get_instance().start()
+
+# ==============================
 # HEALTH CHECK
 # ==============================
 
@@ -45,7 +54,6 @@ def health():
         "service": "license-and-face-cctv-detection",
         "message": "Flask server berjalan"
     }
-
 
 # ==============================
 # START BACKGROUND CCTV DETECTOR
