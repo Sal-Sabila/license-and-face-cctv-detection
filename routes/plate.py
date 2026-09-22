@@ -525,7 +525,7 @@ def stats_enterprise():
         return jsonify({"success": False, "message": str(e)}), 500
 
 
-@plate_bp.route("/analytics", methods=["GET"])
+
 def get_analytics_api():
     """Mengambil data analitik dashboard & rekapitulasi langsung dari database."""
     try:
