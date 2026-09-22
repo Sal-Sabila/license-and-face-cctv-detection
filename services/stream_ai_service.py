@@ -946,8 +946,6 @@ class StreamAIService:
             iou=PLATE_IOU,
             min_width=PLATE_MIN_WIDTH,
             min_height=PLATE_MIN_HEIGHT,
-            min_aspect_ratio=1.5,
-            max_aspect_ratio=7.0,
         )
 
         try:

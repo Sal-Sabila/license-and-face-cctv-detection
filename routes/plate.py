@@ -300,6 +300,47 @@ def stats_enterprise():
         return jsonify({"success": False, "message": str(e)}), 500
 
 
+@plate_bp.route("/analytics", methods=["GET"])
+def get_analytics_api():
+    """Mengambil data analitik dashboard & rekapitulasi langsung dari database."""
+    try:
+        data = db.get_analytics(request.args)
+        return jsonify({
+            "success": True,
+            "data": data
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "message": str(e),
+            "data": {}
+        }), 500
+
+
+@plate_bp.route("/detections/<int:detection_id>", methods=["DELETE"])
+def delete_detection_endpoint(detection_id):
+    """Menghapus rekaman deteksi dari database."""
+    try:
+        success = db.delete_detection(detection_id)
+        if success:
+            return jsonify({"success": True, "message": "Data deteksi berhasil dihapus"})
+        return jsonify({"success": False, "message": "Data deteksi tidak ditemukan"}), 404
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@plate_bp.route("/plate/history/<int:plate_id>", methods=["DELETE"])
+def delete_plate_endpoint(plate_id):
+    """Menghapus rekaman plat nomor dari database."""
+    try:
+        success = db.delete_plate(plate_id)
+        if success:
+            return jsonify({"success": True, "message": "Data plat berhasil dihapus"})
+        return jsonify({"success": False, "message": "Data plat tidak ditemukan"}), 404
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
 # ============================================================
 # ENDPOINT PENGATURAN SISTEM (TERHUBUNG KE MYSQL REAL_CCTV)
 # ============================================================
@@ -466,6 +507,33 @@ def export_statistics_csv():
         return jsonify({"success": False, "message": str(e)}), 500
 
 
+@plate_bp.route("/export/recap", methods=["GET"])
+def export_recap_csv():
+    """Mengekspor data rekapitulasi ke format CSV."""
+    try:
+        data = db.get_analytics(request.args)
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["CCTV / Gerbang", "Arah", "Kendaraan", "Orang", "Plat Unik", "Status"])
+        for c in data.get("cameras", []):
+            writer.writerow([
+                c.get("camera"),
+                c.get("direction"),
+                c.get("vehicles", 0),
+                c.get("people", 0),
+                c.get("unique_plates", 0),
+                c.get("status")
+            ])
+        output.seek(0)
+        return Response(
+            output.getvalue(),
+            mimetype="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=rekapitulasi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"}
+        )
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
 # ============================================================
 # ENDPOINT LIVE CCTV STREAM (MJPEG UNTUK BROWSER)
 # ============================================================
@@ -476,12 +544,11 @@ def generate_mjpeg_stream(stream_url, width=960, height=540, draw_bbox=True, cam
     bg_mgr = BackgroundDetectionManager.get_instance()
 
     ai_service = None
-    if draw_bbox:
-        try:
-            from services.stream_ai_service import StreamAIService
-            ai_service = StreamAIService.get_instance()
-        except Exception as e:
-            print(f"[AI STREAM WARNING] AI Service load error: {e}")
+    try:
+        from services.stream_ai_service import StreamAIService
+        ai_service = StreamAIService.get_instance()
+    except Exception as e:
+        print(f"[AI STREAM WARNING] AI Service load error: {e}")
 
     # Prioritas 1: Jika worker background sudah berjalan untuk kamera ini, pakai frame dari worker
     # Ini sangat hemat CPU & bandwidth karena tidak membuka 2 proses FFmpeg ganda!
@@ -493,9 +560,9 @@ def generate_mjpeg_stream(stream_url, width=960, height=540, draw_bbox=True, cam
                     time.sleep(0.04)
                     continue
 
-                if ai_service is not None and draw_bbox:
+                if ai_service is not None:
                     try:
-                        frame = ai_service.process_frame(frame, draw_bbox=True, camera_id=camera_id)
+                        frame = ai_service.process_frame(frame, draw_bbox=draw_bbox, camera_id=camera_id)
                     except Exception:
                         pass
 
@@ -534,10 +601,10 @@ def generate_mjpeg_stream(stream_url, width=960, height=540, draw_bbox=True, cam
                            b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
                 break
 
-            # Jalankan deteksi & gambar bounding box jika aktif
-            if ai_service is not None and draw_bbox:
+            # Jalankan deteksi AI (dan gambar bounding box jika aktif)
+            if ai_service is not None:
                 try:
-                    frame = ai_service.process_frame(frame, draw_bbox=True, camera_id=camera_id)
+                    frame = ai_service.process_frame(frame, draw_bbox=draw_bbox, camera_id=camera_id)
                 except Exception as e:
                     pass
 

@@ -12,7 +12,8 @@ class PlateDetector:
         max_det=10,
         iou=0.7,
         min_width=20,
-        min_height=8
+        min_height=8,
+        **kwargs
     ):
 
         self.model = YOLO(model_path)
