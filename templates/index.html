@@ -36,17 +36,10 @@
                     }
                 }
             },
-            corePlugins: {
-                preflight: false
-            }
+            corePlugins: { preflight: false }
         };
     </script>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=2.8">
-    <!-- ============================================================
-         DETECTION CAPTURE PREVIEW - COMPACT + LARGER IMAGE
-         Modal tetap proporsional, tetapi capture dibuat lebih besar.
-         Tidak mengubah file capture asli.
-         ============================================================ -->
     <style>
         .detection-image-modal { width: 820px; max-width: 90vw; margin: 1rem auto; }
         .detection-image-modal .modal-content { max-height: 90vh; overflow: hidden; border-radius: 12px; }
@@ -161,7 +154,6 @@
                     </div>
                 </div>
                 <div class="topbar-actions">
-                    <!-- Theme Toggle Switcher (Dark / Light Mode) -->
                     <button id="themeToggleBtn" type="button" class="theme-toggle-btn icon-btn"
                         aria-label="Ganti Mode Gelap / Terang" title="Ganti Mode Gelap / Terang">
                         <i id="themeToggleIcon" class="bi bi-moon-stars-fill"></i>
@@ -202,21 +194,16 @@
             </section>
             <section class="row g-4 mt-1">
                 <div class="col-xl-8 col-lg-7">
-                    <div class="panel shadow-sm">
+                    <div class="panel shadow-sm h-100">
                         <div class="livestream-banner">
-                            <!-- Header Title & Subtitle 1 Baris Memanjang -->
                             <div class="livestream-title-area">
                                 <div class="livestream-heading-group">
-                                    <h3 class="livestream-heading">
-                                        Live Monitoring CCTV
-                                    </h3>
+                                    <h3 class="livestream-heading">Live Monitoring CCTV</h3>
                                     <p class="livestream-subtitle">Satu frame untuk deteksi wajah dan plat nomor.</p>
                                 </div>
                             </div>
 
-                            <!-- Controls Box 2 Baris -->
                             <div class="livestream-controls-box">
-                                <!-- Baris 1: Dropdown Stream CCTV/File Video -->
                                 <div class="control-row">
                                     <div class="control-row-left w-100">
                                         <div class="input-group input-group-sm w-100">
@@ -232,7 +219,6 @@
                                     </div>
                                 </div>
 
-                                <!-- Baris 2: Dropdown Pilihan CCTV (Kiri) + Button Play & Stop (Kanan) -->
                                 <div class="control-row">
                                     <div class="control-row-left">
                                         <div class="input-group input-group-sm w-100">
@@ -252,11 +238,11 @@
                                     </div>
                                     <div class="control-row-right">
                                         <button id="startStreamBtn" class="btn-stream-start" title="Mulai Stream">
-                                            <i class="bi bi-play-fill fs-6"></i>
+                                            <i class="bi bi-play-fill"></i>
                                             <span>Mulai Stream</span>
                                         </button>
                                         <button id="stopStreamBtn" class="btn-stream-stop" title="Hentikan Stream">
-                                            <i class="bi bi-stop-fill fs-6"></i>
+                                            <i class="bi bi-stop-fill"></i>
                                             <span>Stop Stream</span>
                                         </button>
                                     </div>
@@ -280,14 +266,14 @@
                     </div>
                 </div>
                 <div class="col-xl-4 col-lg-5">
-                    <div class="panel shadow-sm">
+                    <div class="panel shadow-sm h-100 d-flex flex-column">
                         <div class="panel-header">
                             <div>
                                 <h3>Deteksi Terbaru</h3>
                                 <p>Hasil deteksi gabungan terakhir.</p>
                             </div>
                         </div>
-                        <div id="recentList" class="recent-list">
+                        <div id="recentList" class="recent-list flex-grow-1">
                             <div class="empty-state">Belum ada deteksi</div>
                         </div>
                     </div>
@@ -302,7 +288,6 @@
                     </div>
                     <div class="d-flex align-items-center gap-2 flex-wrap ms-auto">
                         <div class="playlist-actions">
-
                             <button type="button" class="btn-action-outline" onclick="exportCameras('xspf')">
                                 <i class="bi bi-filetype-xml"></i>
                                 <span>Ekspor XSPF</span>
@@ -346,9 +331,7 @@
                     </table>
                 </div>
 
-                <!-- Pagination Footer (Max 10 Data per Halaman) -->
-                <div
-                    class="panel-footer p-3 d-flex justify-content-between align-items-center flex-wrap gap-2 border-top">
+                <div class="panel-footer p-3 d-flex justify-content-between align-items-center flex-wrap gap-2 border-top">
                     <div class="small text-muted" id="cameraPaginationInfo">Menampilkan 0 kamera</div>
                     <div class="d-flex gap-2 align-items-center">
                         <button id="cameraPrevBtn" class="btn btn-outline-secondary btn-sm" disabled>
@@ -380,7 +363,6 @@
                     </div>
                 </div>
 
-                <!-- Filter Bar -->
                 <div class="filter-toolbar p-3 border-bottom">
                     <div class="row g-2 align-items-end">
                         <div class="col-xl-2 col-md-4 col-sm-6 col-12">
@@ -461,9 +443,7 @@
                     </table>
                 </div>
 
-                <!-- Pagination Footer -->
-                <div
-                    class="panel-footer p-3 d-flex justify-content-between align-items-center flex-wrap gap-2 border-top">
+                <div class="panel-footer p-3 d-flex justify-content-between align-items-center flex-wrap gap-2 border-top">
                     <div class="small text-muted" id="detPaginationInfo">Menampilkan 0 data</div>
                     <div class="d-flex gap-2 align-items-center">
                         <button id="detPrevBtn" class="btn btn-outline-secondary btn-sm" disabled>
@@ -495,7 +475,6 @@
                     </div>
                 </div>
 
-                <!-- Filter Bar -->
                 <div class="filter-toolbar p-3 border-bottom">
                     <div class="row g-2 align-items-end">
                         <div class="col-xl-3 col-md-6 col-sm-6 col-12">
@@ -567,9 +546,7 @@
                     </table>
                 </div>
 
-                <!-- Pagination Footer -->
-                <div
-                    class="panel-footer p-3 d-flex justify-content-between align-items-center flex-wrap gap-2 border-top">
+                <div class="panel-footer p-3 d-flex justify-content-between align-items-center flex-wrap gap-2 border-top">
                     <div class="small text-muted" id="platePaginationInfo">Menampilkan 0 data</div>
                     <div class="d-flex gap-2 align-items-center">
                         <button id="platePrevBtn" class="btn btn-outline-secondary btn-sm" disabled>
@@ -719,7 +696,6 @@
                     </div>
                 </div>
 
-                <!-- Executive KPI Metric Cards (Stretched horizontally 100%) -->
                 <div class="row g-3 mb-4">
                     <div class="col-xl-2 col-md-4 col-sm-6 col-12">
                         <div class="stat-card p-3 h-100 shadow-sm">
@@ -947,40 +923,6 @@
                 </div>
 
             </div>
-        </div>
-    </div>
-
-    <!-- Bootstrap confirmation modal -->
-    <div class="modal fade" id="appConfirmModal" tabindex="-1" aria-hidden="true">
-        <div class="modal-dialog modal-dialog-centered modal-sm">
-            <div class="modal-content border-0 shadow-lg">
-                <div class="modal-body text-center p-4">
-                    <div id="confirmIcon"
-                        class="rounded-circle bg-warning-subtle text-warning d-inline-flex align-items-center justify-content-center mb-3"
-                        style="width: 56px; height: 56px;">
-                        <i class="bi bi-exclamation-triangle fs-4"></i>
-                    </div>
-                    <h5 id="confirmTitle" class="fw-bold mb-2">Konfirmasi</h5>
-                    <p id="confirmMessage" class="text-muted small mb-4">Apakah Anda yakin?</p>
-                    <div class="d-flex justify-content-center gap-2">
-                        <button type="button" class="btn btn-light px-3" data-bs-dismiss="modal">Batal</button>
-                        <button type="button" id="confirmAccept" class="btn btn-danger px-3">Ya, lanjutkan</button>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Bootstrap toast notifications -->
-    <div class="toast-container position-fixed top-0 end-0 p-3" style="z-index: 1090;">
-        <div id="appToast" class="toast border-0 shadow" role="alert" aria-live="assertive" aria-atomic="true">
-            <div class="toast-header border-0">
-                <i id="toastIcon" class="bi bi-info-circle-fill text-primary me-2"></i>
-                <strong id="toastTitle" class="me-auto">Informasi</strong>
-                <small>WIKO VISION</small>
-                <button type="button" class="btn-close ms-2" data-bs-dismiss="toast" aria-label="Tutup"></button>
-            </div>
-            <div id="toastMessage" class="toast-body text-secondary"></div>
         </div>
     </div>
 
