@@ -59,10 +59,14 @@ function applyCustomDateRange(state, startInputId, endInputId) {
         String(today.getDate()).padStart(2, '0')
     ].join('-');
 
+    const periodId = startInputId.replace('StartDate', 'PeriodFilter');
+    const periodSelect = document.getElementById(periodId);
+    const selectedPeriod = periodSelect?.value || state.period || 'today';
+
     if (!startDate && !endDate) {
         state.start_date = '';
         state.end_date = '';
-        state.period = 'today';
+        state.period = selectedPeriod === 'custom' ? 'today' : selectedPeriod;
         return true;
     }
     if ((startDate && endDate) && startDate > endDate) {
