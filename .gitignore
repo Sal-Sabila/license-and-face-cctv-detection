@@ -13,6 +13,9 @@ __pycache__/
 *.pt
 *.onnx
 
+captures/
+static/captures/
+
 # IDE
 .vscode/
 .idea/
