@@ -216,38 +216,84 @@ window.openImageModal = openImageModal;
 // MODUL: MONITORING CCTV
 // ============================================================
 
+let allCameras = [];
+let cameraState = {
+    page: 1,
+    limit: 10,
+    search: ''
+};
+
+function renderCameraTable() {
+    const table = document.getElementById('cameraTable');
+    if (!table) return;
+
+    const query = (cameraState.search || '').trim().toLowerCase();
+    const filtered = allCameras.filter(c => {
+        if (!query) return true;
+        const name = (c.name || '').toLowerCase();
+        const url = (c.url || '').toLowerCase();
+        return name.includes(query) || url.includes(query);
+    });
+
+    const total = filtered.length;
+    const totalPages = Math.ceil(total / cameraState.limit) || 1;
+    if (cameraState.page > totalPages) cameraState.page = totalPages;
+    if (cameraState.page < 1) cameraState.page = 1;
+
+    const startIdx = (cameraState.page - 1) * cameraState.limit;
+    const endIdx = Math.min(startIdx + cameraState.limit, total);
+    const pageItems = filtered.slice(startIdx, endIdx);
+
+    const infoEl = document.getElementById('cameraPaginationInfo');
+    const pageEl = document.getElementById('cameraPageNumber');
+    const prevBtn = document.getElementById('cameraPrevBtn');
+    const nextBtn = document.getElementById('cameraNextBtn');
+
+    if (infoEl) infoEl.textContent = `Menampilkan ${total === 0 ? 0 : startIdx + 1} - ${endIdx} dari ${total} kamera`;
+    if (pageEl) pageEl.textContent = `Hal ${cameraState.page} dari ${totalPages}`;
+    if (prevBtn) prevBtn.disabled = cameraState.page <= 1;
+    if (nextBtn) nextBtn.disabled = cameraState.page >= totalPages;
+
+    if (pageItems.length === 0) {
+        table.innerHTML = `<tr><td colspan="5" class="text-center text-muted py-5">${query ? 'Tidak ada kamera yang cocok dengan pencarian.' : 'Belum ada kamera.'}</td></tr>`;
+        return;
+    }
+
+    table.innerHTML = pageItems.map((camera, i) => `
+        <tr>
+            <td class="text-center text-muted fw-semibold">${startIdx + i + 1}</td>
+            <td><strong>${esc(camera.name)}</strong></td>
+            <td class="camera-url">${esc(camera.url)}</td>
+            <td class="text-center">
+                <span class="status ${camera.active ? 'success' : 'warning'}">${camera.active ? 'Aktif' : 'Nonaktif'}</span>
+            </td>
+            <td class="text-center">
+                <div class="table-actions justify-content-center">
+                    <button class="action-toggle ${camera.active ? 'deactivate' : 'activate'}" data-action="toggle" data-id="${camera.id}">
+                        ${camera.active ? 'Nonaktifkan' : 'Aktifkan'}
+                    </button>
+                    <button class="action-edit" data-action="edit" data-id="${camera.id}">Edit</button>
+                    <button class="action-delete" data-action="delete" data-id="${camera.id}">Hapus</button>
+                </div>
+            </td>
+        </tr>
+    `).join('');
+}
+
 async function loadCameras() {
     try {
         const result = await json('/api/cameras');
-        const cameras = result.data || [];
+        allCameras = result.data || [];
         const count = document.getElementById('cameraCountTitle');
-        if (count) count.textContent = cameras.length;
+        if (count) count.textContent = allCameras.length;
 
         const select = document.getElementById('cameraSelect');
         if (select) {
-            select.innerHTML = cameras.map(item => `<option value="${item.id}">${esc(item.name)}</option>`).join('') || '<option value="">Belum ada kamera</option>';
+            select.innerHTML = allCameras.map(item => `<option value="${item.id}">${esc(item.name)}</option>`).join('') || '<option value="">Belum ada kamera</option>';
         }
 
-        const table = document.getElementById('cameraTable');
-        if (table) {
-            table.innerHTML = cameras.map(camera => `
-                <tr>
-                    <td><strong>${esc(camera.name)}</strong></td>
-                    <td class="camera-url">${esc(camera.url)}</td>
-                    <td><span class="status ${camera.active ? 'success' : 'warning'}">${camera.active ? 'Aktif' : 'Nonaktif'}</span></td>
-                    <td>
-                        <div class="table-actions">
-                            <button class="action-toggle ${camera.active ? 'deactivate' : 'activate'}" data-action="toggle" data-id="${camera.id}">
-                                ${camera.active ? 'Nonaktifkan' : 'Aktifkan'}
-                            </button>
-                            <button class="action-edit" data-action="edit" data-id="${camera.id}">Edit</button>
-                            <button class="action-delete" data-action="delete" data-id="${camera.id}">Hapus</button>
-                        </div>
-                    </td>
-                </tr>
-            `).join('') || '<tr><td colspan="4" class="text-center text-muted py-5">Belum ada kamera.</td></tr>';
-        }
-        return cameras;
+        renderCameraTable();
+        return allCameras;
     } catch (err) {
         console.error('Error loadCameras:', err);
         return [];
@@ -310,7 +356,41 @@ async function exportCameras(format) {
 window.exportCameras = exportCameras;
 
 async function initMonitoring() {
-    let cameras = await loadCameras();
+    await loadCameras();
+
+    const searchInput = document.getElementById('cameraSearchInput');
+    let searchTimer = null;
+    if (searchInput) {
+        searchInput.addEventListener('input', () => {
+            clearTimeout(searchTimer);
+            searchTimer = setTimeout(() => {
+                cameraState.search = searchInput.value;
+                cameraState.page = 1;
+                renderCameraTable();
+            }, 250);
+        });
+    }
+
+    document.getElementById('cameraPrevBtn')?.addEventListener('click', () => {
+        if (cameraState.page > 1) {
+            cameraState.page--;
+            renderCameraTable();
+        }
+    });
+
+    document.getElementById('cameraNextBtn')?.addEventListener('click', () => {
+        const query = (cameraState.search || '').trim().toLowerCase();
+        const filtered = allCameras.filter(c => {
+            if (!query) return true;
+            return (c.name || '').toLowerCase().includes(query) || (c.url || '').toLowerCase().includes(query);
+        });
+        const totalPages = Math.ceil(filtered.length / cameraState.limit) || 1;
+        if (cameraState.page < totalPages) {
+            cameraState.page++;
+            renderCameraTable();
+        }
+    });
+
     document.getElementById('cameraForm')?.addEventListener('submit', async event => {
         event.preventDefault();
         const id = document.getElementById('cameraId').value;
@@ -325,18 +405,18 @@ async function initMonitoring() {
             body: JSON.stringify(data)
         });
         bootstrap.Modal.getInstance(document.getElementById('cameraModal')).hide();
-        cameras = await loadCameras();
+        await loadCameras();
     });
 
     document.getElementById('cameraTable')?.addEventListener('click', async event => {
         const button = event.target.closest('button');
         if (!button) return;
         const id = Number(button.dataset.id);
-        const camera = cameras.find(item => item.id === id);
+        const camera = allCameras.find(item => item.id === id);
         if (button.dataset.action === 'edit') openCameraModal(camera);
         if (button.dataset.action === 'delete' && await askConfirmation('Hapus kamera ini?', 'Hapus Kamera')) {
             await json(`/api/cameras/${id}`, { method: 'DELETE' });
-            cameras = await loadCameras();
+            await loadCameras();
             showNotification('Kamera berhasil dihapus.', 'success');
         }
         if (button.dataset.action === 'toggle') {
@@ -345,7 +425,7 @@ async function initMonitoring() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ active: !camera.active })
             });
-            cameras = await loadCameras();
+            await loadCameras();
         }
     });
 }
@@ -812,8 +892,9 @@ async function initDetectionsPage() {
 
     const typeSelect = document.getElementById('detTypeFilter');
     if (typeSelect) {
+        typeSelect.value = detState.type || 'all';
         typeSelect.addEventListener('change', () => {
-            detState.type = typeSelect.value || 'all';
+            detState.type = typeSelect.value;
             detState.page = 1;
             loadDetections();
         });
@@ -868,11 +949,47 @@ async function initDetectionsPage() {
         });
     }
 
+    ['detStartDate', 'detEndDate'].forEach(id => {
+        document.getElementById(id)?.addEventListener('change', () => {
+            const p = document.getElementById('detPeriodFilter');
+            if (p) p.value = 'custom';
+            detState.period = 'custom';
+        });
+    });
     document.getElementById('detDateApply')?.addEventListener('click', () => {
         if (applyCustomDateRange(detState, 'detStartDate', 'detEndDate')) {
             detState.page = 1;
             loadDetections();
         }
+    });
+
+    document.getElementById('detResetBtn')?.addEventListener('click', () => {
+        detState = {
+            page: 1,
+            limit: 15,
+            type: 'all',
+            status: 'all',
+            camera_id: '',
+            search: '',
+            period: 'today',
+            start_date: '',
+            end_date: ''
+        };
+        const searchInput = document.getElementById('detectionSearch');
+        if (searchInput) searchInput.value = '';
+        const typeFilter = document.getElementById('detTypeFilter');
+        if (typeFilter) typeFilter.value = 'all';
+        const camFilter = document.getElementById('detCameraFilter');
+        if (camFilter) camFilter.value = '';
+        const statusFilter = document.getElementById('detStatusFilter');
+        if (statusFilter) statusFilter.value = 'all';
+        const periodFilter = document.getElementById('detPeriodFilter');
+        if (periodFilter) periodFilter.value = 'today';
+        const startInput = document.getElementById('detStartDate');
+        if (startInput) startInput.value = '';
+        const endInput = document.getElementById('detEndDate');
+        if (endInput) endInput.value = '';
+        loadDetections();
     });
 
     document.getElementById('detPrevBtn')?.addEventListener('click', () => {
@@ -1103,11 +1220,45 @@ async function initHistoryPage() {
         });
     }
 
+    ['plateStartDate', 'plateEndDate'].forEach(id => {
+        document.getElementById(id)?.addEventListener('change', () => {
+            const p = document.getElementById('platePeriodFilter');
+            if (p) p.value = 'custom';
+            plateState.period = 'custom';
+        });
+    });
+
     document.getElementById('plateDateApply')?.addEventListener('click', () => {
         if (applyCustomDateRange(plateState, 'plateStartDate', 'plateEndDate')) {
             plateState.page = 1;
             loadPlateHistory();
         }
+    });
+
+    document.getElementById('plateResetBtn')?.addEventListener('click', () => {
+        plateState = {
+            page: 1,
+            limit: 15,
+            search: '',
+            camera_id: '',
+            status: 'all',
+            period: 'today',
+            start_date: '',
+            end_date: ''
+        };
+        const searchInput = document.getElementById('plateSearch');
+        if (searchInput) searchInput.value = '';
+        const camFilter = document.getElementById('plateCameraFilter');
+        if (camFilter) camFilter.value = '';
+        const statusFilter = document.getElementById('plateStatusFilter');
+        if (statusFilter) statusFilter.value = 'all';
+        const periodFilter = document.getElementById('platePeriodFilter');
+        if (periodFilter) periodFilter.value = 'today';
+        const startInput = document.getElementById('plateStartDate');
+        if (startInput) startInput.value = '';
+        const endInput = document.getElementById('plateEndDate');
+        if (endInput) endInput.value = '';
+        loadPlateHistory();
     });
 
     document.getElementById('platePrevBtn')?.addEventListener('click', () => {
@@ -1255,25 +1406,56 @@ window.loadRecap = loadRecap;
 async function initRecap() {
     setDateFilterLimits();
     await populateAnalyticsCameraSelect('recapCamera');
+    const recapPeriod = document.getElementById('recapPeriod');
+    if (recapPeriod) {
+        recapPeriod.addEventListener('change', () => {
+            if (recapPeriod.value !== 'custom') {
+                const s = document.getElementById('recapStart');
+                const e = document.getElementById('recapEnd');
+                if (s) s.value = '';
+                if (e) e.value = '';
+            }
+            loadRecap().catch(err => {
+                if (err.message) showNotification(err.message, 'warning');
+            });
+        });
+    }
+
+    ['recapStart', 'recapEnd'].forEach(id => {
+        document.getElementById(id)?.addEventListener('change', () => {
+            if (recapPeriod) recapPeriod.value = 'custom';
+        });
+    });
+
+    ['recapObjectType', 'recapCamera', 'recapDirection'].forEach(id => {
+        document.getElementById(id)?.addEventListener('change', () => {
+            loadRecap().catch(err => {
+                if (err.message) showNotification(err.message, 'warning');
+            });
+        });
+    });
+
     document.getElementById('recapApply')?.addEventListener('click', () => {
         loadRecap().catch(err => {
             if (err.message) showNotification(err.message, 'warning');
         });
     });
     document.getElementById('recapResetBtn')?.addEventListener('click', () => {
-        const periodSelect = document.getElementById('recapPeriod');
-        const cameraSelect = document.getElementById('recapCamera');
-        const directionSelect = document.getElementById('recapDirection');
-        const startInput = document.getElementById('recapStart');
-        const endInput = document.getElementById('recapEnd');
-
-        if (periodSelect) periodSelect.value = 'today';
-        if (cameraSelect) cameraSelect.value = '';
-        if (directionSelect) directionSelect.value = '';
-        if (startInput) startInput.value = '';
-        if (endInput) endInput.value = '';
-
-        loadRecap().catch(err => console.error('Error reset recap filter:', err));
+        const period = document.getElementById('recapPeriod');
+        if (period) period.value = 'today';
+        const start = document.getElementById('recapStart');
+        if (start) start.value = '';
+        const end = document.getElementById('recapEnd');
+        if (end) end.value = '';
+        const objType = document.getElementById('recapObjectType');
+        if (objType) objType.value = '';
+        const cam = document.getElementById('recapCamera');
+        if (cam) cam.value = '';
+        const dir = document.getElementById('recapDirection');
+        if (dir) dir.value = '';
+        loadRecap().catch(err => {
+            if (err.message) showNotification(err.message, 'warning');
+        });
     });
     document.getElementById('recapExport')?.addEventListener('click', exportRecap);
     document.getElementById('recapExportPdf')?.addEventListener('click', exportRecapPdf);
@@ -1589,24 +1771,61 @@ window.exportStatsPdf = exportStatsPdf;
 async function initStatistics() {
     setDateFilterLimits();
     await populateAnalyticsCameraSelect('statsCamera');
+    const statsPeriodSelect = document.getElementById('statsPeriod');
+    if (statsPeriodSelect) {
+        statsPeriodSelect.addEventListener('change', () => {
+            if (statsPeriodSelect.value !== 'custom') {
+                const s = document.getElementById('statsStart');
+                const e = document.getElementById('statsEnd');
+                if (s) s.value = '';
+                if (e) e.value = '';
+            }
+            const period = statsPeriodSelect.value;
+            const periodGroup = document.getElementById('statsPeriodGroup');
+            if (periodGroup) {
+                periodGroup.querySelectorAll('button').forEach(b => {
+                    if (b.dataset.period === period) b.classList.add('active');
+                    else b.classList.remove('active');
+                });
+            }
+            loadEnterpriseStatistics(period).catch(err => console.error('Error loadEnterpriseStatistics:', err));
+        });
+    }
+
+    ['statsStart', 'statsEnd'].forEach(id => {
+        document.getElementById(id)?.addEventListener('change', () => {
+            if (statsPeriodSelect) statsPeriodSelect.value = 'custom';
+        });
+    });
+
+    ['statsObjectType', 'statsCamera'].forEach(id => {
+        document.getElementById(id)?.addEventListener('change', () => {
+            loadEnterpriseStatistics(document.getElementById('statsPeriod')?.value || 'today').catch(err => console.error('Error loadEnterpriseStatistics:', err));
+        });
+    });
+
     document.getElementById('statsApply')?.addEventListener('click', () => {
         loadEnterpriseStatistics(document.getElementById('statsPeriod')?.value || 'today').catch(err => showNotification(err.message, 'warning'));
     });
     document.getElementById('statsResetBtn')?.addEventListener('click', () => {
-        const periodSelect = document.getElementById('statsPeriod');
-        const startInput = document.getElementById('statsStart');
-        const endInput = document.getElementById('statsEnd');
-        const objectType = document.getElementById('statsObjectType');
-        const cameraSelect = document.getElementById('statsCamera');
-
-        if (periodSelect) periodSelect.value = 'today';
-        if (startInput) startInput.value = '';
-        if (endInput) endInput.value = '';
-        if (objectType) objectType.value = '';
-        if (cameraSelect) cameraSelect.value = '';
-        window._currentStatsPeriod = 'today';
-
-        loadEnterpriseStatistics('today').catch(err => console.error('Error reset stats filter:', err));
+        const period = document.getElementById('statsPeriod');
+        if (period) period.value = 'today';
+        const start = document.getElementById('statsStart');
+        if (start) start.value = '';
+        const end = document.getElementById('statsEnd');
+        if (end) end.value = '';
+        const objType = document.getElementById('statsObjectType');
+        if (objType) objType.value = '';
+        const cam = document.getElementById('statsCamera');
+        if (cam) cam.value = '';
+        const periodGroup = document.getElementById('statsPeriodGroup');
+        if (periodGroup) {
+            periodGroup.querySelectorAll('button').forEach(b => {
+                if (b.dataset.period === 'today') b.classList.add('active');
+                else b.classList.remove('active');
+            });
+        }
+        loadEnterpriseStatistics('today').catch(err => console.error('Error loadEnterpriseStatistics:', err));
     });
     const periodGroup = document.getElementById('statsPeriodGroup');
     if (periodGroup) {

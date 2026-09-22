@@ -394,6 +394,75 @@ def save_jpg(image, directory, filename, quality=94):
         return None
 
 
+MIN_CAPTURE_WIDTH = 120
+MIN_CAPTURE_HEIGHT = 180
+
+
+def crop_expanded_object(frame, bbox, min_width=MIN_CAPTURE_WIDTH, min_height=MIN_CAPTURE_HEIGHT):
+    """
+    Crop objek dari frame dengan memastikan ukuran bounding box minimal min_width x min_height.
+    Jika bounding box asli lebih kecil dari ukuran minimal, bounding box akan di-expand
+    secara simetris dari titik tengah. Jika sudah memenuhi, ukuran asli dipertahankan.
+    Pergeseran (shift) dilakukan jika box mendekati tepi frame kamera agar ukuran minimal tetap terjaga.
+    """
+    if frame is None or getattr(frame, "size", 0) == 0 or bbox is None or len(bbox) != 4:
+        return None
+    h_frame, w_frame = frame.shape[:2]
+    try:
+        x1, y1, x2, y2 = [float(v) for v in bbox]
+    except (TypeError, ValueError):
+        return None
+
+    if x2 < x1:
+        x1, x2 = x2, x1
+    if y2 < y1:
+        y1, y2 = y2, y1
+
+    cur_w = x2 - x1
+    cur_h = y2 - y1
+    if cur_w <= 0 or cur_h <= 0:
+        return None
+
+    # Expand lebar simetris dari center jika kurang dari min_width
+    if cur_w < min_width:
+        diff_w = min_width - cur_w
+        x1 -= diff_w / 2.0
+        x2 += diff_w / 2.0
+
+    # Expand tinggi simetris dari center jika kurang dari min_height
+    if cur_h < min_height:
+        diff_h = min_height - cur_h
+        y1 -= diff_h / 2.0
+        y2 += diff_h / 2.0
+
+    # Pergeseran batas X
+    if x1 < 0:
+        x2 += (0.0 - x1)
+        x1 = 0.0
+    if x2 > w_frame:
+        x1 -= (x2 - float(w_frame))
+        x2 = float(w_frame)
+    x1 = max(0, min(int(round(x1)), w_frame))
+    x2 = max(0, min(int(round(x2)), w_frame))
+
+    # Pergeseran batas Y
+    if y1 < 0:
+        y2 += (0.0 - y1)
+        y1 = 0.0
+    if y2 > h_frame:
+        y1 -= (y2 - float(h_frame))
+        y2 = float(h_frame)
+    y1 = max(0, min(int(round(y1)), h_frame))
+    y2 = max(0, min(int(round(y2)), h_frame))
+
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    crop = frame[y1:y2, x1:x2]
+    if crop is None or getattr(crop, "size", 0) == 0:
+        return None
+    return crop
+
 def save_person_capture(frame, bbox, track_id, video_time):
     if frame is None:
         return None
@@ -414,7 +483,9 @@ def save_person_capture(frame, bbox, track_id, video_time):
     if x2 - x1 < 25 or y2 - y1 < 45:
         return None
 
-    crop = frame[y1:y2, x1:x2]
+    crop = crop_expanded_object(frame, bbox, min_width=MIN_CAPTURE_WIDTH, min_height=MIN_CAPTURE_HEIGHT)
+    if crop is None or crop.size == 0:
+        return None
     date_dir = os.path.join(CAPTURE_DIR, datetime.now().strftime("%Y%m%d"))
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
     filename = (
@@ -467,13 +538,9 @@ def get_vehicle_crop_for_plate(frame, plate_bbox, vehicle_dets):
         if score <= best_score:
             continue
 
-        h, w = frame.shape[:2]
-        vx1 = max(0, min(vx1, w - 1))
-        vy1 = max(0, min(vy1, h - 1))
-        vx2 = max(0, min(vx2, w))
-        vy2 = max(0, min(vy2, h))
-        crop = frame[vy1:vy2, vx1:vx2]
-        if crop.size:
+        crop = crop_expanded_object(frame, [vx1, vy1, vx2, vy2], min_width=MIN_CAPTURE_WIDTH, min_height=MIN_CAPTURE_HEIGHT)
+        if crop is not None and crop.size:
+
             best_crop = crop
             best_score = score
             best_track_id = vehicle.get("track_id")
@@ -1172,19 +1239,18 @@ class VideoAIService:
             y1 = max(0, min(y1, h - 1))
             x2 = max(0, min(x2, w))
             y2 = max(0, min(y2, h))
-            if x2 <= x1 or y2 <= y1:
+            crop = crop_expanded_object(frame, item["box"], min_width=MIN_CAPTURE_WIDTH, min_height=MIN_CAPTURE_HEIGHT)
+            if crop is None or crop.size == 0:
                 continue
-
-            crop = frame[y1:y2, x1:x2]
             if any(self._intersection_ratio(item["box"], box) >= 0.25 for box in vehicle_boxes):
                 continue
             path = save_person_capture(
                 frame,
-                [x1, y1, x2, y2],
+                item["box"],
                 track_id,
                 video_time,
             )
-            if not path or crop.size == 0:
+            if not path:
                 continue
 
             self.person_capture_state[track_id] = video_time
@@ -1231,9 +1297,8 @@ class VideoAIService:
             event_key = f"vehicle:{self.camera_id}:{track_id}:{direction}"
             if event_key in self.person_capture_state:
                 continue
-            x1, y1, x2, y2 = [int(v) for v in item["box"]]
-            crop = frame[max(0, y1):min(frame.shape[0], y2), max(0, x1):min(frame.shape[1], x2)]
-            if crop.size == 0:
+            crop = crop_expanded_object(frame, item["box"], min_width=MIN_CAPTURE_WIDTH, min_height=MIN_CAPTURE_HEIGHT)
+            if crop is None or crop.size == 0:
                 continue
             self.person_capture_state[event_key] = video_time
             try:
