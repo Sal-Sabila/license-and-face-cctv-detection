@@ -1015,6 +1015,63 @@ html.dark .btn-stream-stop:hover { background: #7f1d1d; color: #fecaca; }
 .theme-toggle-btn:hover i { transform: rotate(20deg) scale(1.12); }
 
 /* ============================================================
+   ZONE EDITOR
+   ============================================================ */
+
+.zone-editor-wrap {
+    position: relative;
+    max-width: 960px;
+    margin: 0 auto;
+    background: #000;
+    border-radius: 10px;
+    overflow: hidden;
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+}
+
+.zone-editor-wrap img {
+    width: 100%;
+    display: block;
+    border-radius: 10px;
+    min-height: 300px;
+    object-fit: contain;
+    background: #000;
+}
+
+#zoneEditorCanvas {
+    position: absolute;
+    top: 0; left: 0;
+    cursor: crosshair;
+    border-radius: 10px;
+}
+
+.zone-legend {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    font-size: 0.82rem;
+    color: var(--muted);
+}
+
+.zone-legend span {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.zone-legend .dot {
+    width: 14px;
+    height: 14px;
+    border-radius: 4px;
+    display: inline-block;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+/* Dark mode */
+html.dark .zone-editor-wrap {
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+/* ============================================================
    DARK THEME
    ============================================================ */
 

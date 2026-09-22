@@ -5,6 +5,7 @@ import pymysql
 import pymysql.cursors
 from datetime import datetime, timedelta
 import random
+import json
 
 # ============================================================
 # KONFIGURASI DATABASE (LARAGON MYSQL)
@@ -2007,3 +2008,80 @@ def seed_demo_data(count: int = 60) -> int:
                     inserted += 1
 
     return inserted
+
+# ============================================================
+# FUNGSI ZONA KAMERA (MID & NEAR)
+# ============================================================
+
+def get_camera_zone(camera_id):
+    """Ambil zona MID & NEAR untuk kamera. Return None jika tidak ada."""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT mid_zone, near_zone FROM camera_zones WHERE camera_id = %s",
+                    (camera_id,)
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return {
+                    "camera_id": camera_id,
+                    "mid": json.loads(row["mid_zone"]),
+                    "near": json.loads(row["near_zone"]),
+                }
+    except Exception as exc:
+        print(f"[DB ZONE GET ERROR] camera={camera_id}: {exc}")
+        return None
+
+
+def save_camera_zone(camera_id, mid, near):
+    """Simpan/update zona MID & NEAR."""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO camera_zones (camera_id, mid_zone, near_zone)
+                    VALUES (%s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        mid_zone = VALUES(mid_zone),
+                        near_zone = VALUES(near_zone)
+                """, (camera_id, json.dumps(mid), json.dumps(near)))
+            conn.commit()
+        return True
+    except Exception as exc:
+        print(f"[DB ZONE SAVE ERROR] camera={camera_id}: {exc}")
+        return False
+
+
+def delete_camera_zone(camera_id):
+    """Hapus zona kamera (kembali ke default)."""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM camera_zones WHERE camera_id = %s", (camera_id,))
+            conn.commit()
+        return True
+    except Exception as exc:
+        print(f"[DB ZONE DELETE ERROR] camera={camera_id}: {exc}")
+        return False
+
+
+def get_all_camera_zones():
+    """Ambil semua zona (dipakai saat startup)."""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT camera_id, mid_zone, near_zone FROM camera_zones")
+                rows = cur.fetchall()
+                return [
+                    {
+                        "camera_id": row["camera_id"],
+                        "mid": json.loads(row["mid_zone"]),
+                        "near": json.loads(row["near_zone"]),
+                    }
+                    for row in rows
+                ]
+    except Exception as exc:
+        print(f"[DB ZONE LIST ERROR] {exc}")
+        return []

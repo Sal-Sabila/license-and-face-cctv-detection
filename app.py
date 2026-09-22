@@ -8,6 +8,8 @@ from routes.history import history_bp
 from routes.statistics import statistics_bp
 from routes.recap import recap_bp
 from routes.settings import settings_bp
+from routes.zones import zones_bp
+from routes.zones_page import zones_page_bp
 from services.camera_worker_manager import CameraWorkerManager
 
 
@@ -29,7 +31,8 @@ app.register_blueprint(history_bp)
 app.register_blueprint(statistics_bp)
 app.register_blueprint(recap_bp)   
 app.register_blueprint(settings_bp)
-
+app.register_blueprint(zones_bp)
+app.register_blueprint(zones_page_bp)
 
 # ==============================
 # HALAMAN UTAMA
