@@ -12,36 +12,13 @@ class PlateDetector:
         imgsz=640,
         device="cpu",
         max_det=10,
-        iou=0.7,
-        min_width=20,
-        min_height=8,
-        min_aspect_ratio=2.0,
-        max_aspect_ratio=6.0,
+        iou=0.45,
+        min_width=25,
+        min_height=10,
+        min_aspect_ratio=1.1,
+        max_aspect_ratio=6.5,
         small_roi_scale=2.0,
-        **kwargs
     ):
-        # ============================================================
-        # SANITASI: pastikan model_path selalu string
-        # ============================================================
-        if isinstance(model_path, (tuple, list)):
-            model_path = model_path[0] if len(model_path) > 0 else ""
-        model_path = str(model_path).strip()
-
-        if not os.path.isabs(model_path):
-            project_root = os.path.dirname(
-                os.path.dirname(os.path.abspath(__file__))
-            )
-            candidate = os.path.join(project_root, model_path)
-            if os.path.isfile(candidate):
-                model_path = candidate
-
-        print(f"[PLATE] model_path = {model_path!r}")
-        print(f"[PLATE] file exists = {os.path.isfile(model_path)}")
-
-        if not os.path.isfile(model_path):
-            raise FileNotFoundError(
-                f"Model plate tidak ditemukan: {model_path}"
-            )
 
         self.model = YOLO(model_path)
 
