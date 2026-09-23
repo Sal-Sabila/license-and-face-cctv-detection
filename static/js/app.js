@@ -184,7 +184,7 @@ function openImageModal(imgSrc, title = 'Detail Foto Tangkapan CCTV', meta = '',
     if (metaEl) metaEl.textContent = meta;
     if (detailsEl) detailsEl.innerHTML = details;
 
-// Compute image URL from the provided path (already prioritized)
+    // Compute image URL from the provided path (already prioritized)
     const imageUrl = buildCaptureUrl(imgSrc);
     console.log('[IMAGE SRC]', imgSrc);
     console.log('[OBJECT TYPE]', objType);
@@ -230,10 +230,22 @@ async function loadCameras() {
 
         const table = document.getElementById('cameraTable');
         if (table) {
-            table.innerHTML = cameras.map(camera => `
+            table.innerHTML = cameras.map(camera => {
+                // Badge arah
+                let dirBadge = '';
+                if (camera.direction === 'entry') {
+                    dirBadge = '<span class="badge bg-success-subtle text-success border border-success-subtle"><i class="bi bi-box-arrow-in-right"></i> Masuk</span>';
+                } else if (camera.direction === 'exit') {
+                    dirBadge = '<span class="badge bg-danger-subtle text-danger border border-danger-subtle"><i class="bi bi-box-arrow-right"></i> Keluar</span>';
+                } else {
+                    dirBadge = '<span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle">Tidak ditentukan</span>';
+                }
+
+                return `
                 <tr>
                     <td><strong>${esc(camera.name)}</strong></td>
                     <td class="camera-url">${esc(camera.url)}</td>
+                    <td>${dirBadge}</td>
                     <td><span class="status ${camera.active ? 'success' : 'warning'}">${camera.active ? 'Aktif' : 'Nonaktif'}</span></td>
                     <td>
                         <div class="table-actions">
@@ -245,7 +257,8 @@ async function loadCameras() {
                         </div>
                     </td>
                 </tr>
-            `).join('') || '<tr><td colspan="4" class="text-center text-muted py-5">Belum ada kamera.</td></tr>';
+            `;
+            }).join('') || '<tr><td colspan="5" class="text-center text-muted py-5">Belum ada kamera.</td></tr>';
         }
         return cameras;
     } catch (err) {
@@ -259,11 +272,15 @@ function openCameraModal(camera = null) {
     if (!form) return;
     form.reset();
     document.getElementById('cameraId').value = camera?.id || '';
-    if (camera) {
-        document.getElementById('cameraNameInput').value = camera.name || '';
-        document.getElementById('cameraUrl').value = camera.url || '';
-        document.getElementById('cameraActive').checked = camera.active;
-    }
+    document.getElementById('cameraNameInput').value = camera?.name || '';
+    document.getElementById('cameraUrl').value = camera?.url || '';
+    document.getElementById('cameraDirection').value = camera?.direction || 'unknown';
+    document.getElementById('cameraActive').checked = camera ? camera.active : true;
+
+    // Ganti judul modal sesuai mode
+    const modalTitle = document.querySelector('#cameraModal .modal-title');
+    if (modalTitle) modalTitle.textContent = camera ? 'Edit Kamera' : 'Tambah Kamera';
+
     bootstrap.Modal.getOrCreateInstance(document.getElementById('cameraModal')).show();
 }
 
@@ -317,15 +334,22 @@ async function initMonitoring() {
         const data = {
             name: document.getElementById('cameraNameInput').value,
             url: document.getElementById('cameraUrl').value,
+            direction: document.getElementById('cameraDirection').value || 'unknown',
             active: document.getElementById('cameraActive').checked
         };
-        await json(id ? `/api/cameras/${id}` : '/api/cameras', {
-            method: id ? 'PUT' : 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(data)
-        });
-        bootstrap.Modal.getInstance(document.getElementById('cameraModal')).hide();
-        cameras = await loadCameras();
+        try {
+            await json(id ? `/api/cameras/${id}` : '/api/cameras', {
+                method: id ? 'PUT' : 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            });
+            bootstrap.Modal.getInstance(document.getElementById('cameraModal')).hide();
+            cameras = await loadCameras();
+            showNotification(id ? 'Kamera berhasil diperbarui.' : 'Kamera berhasil ditambahkan.', 'success');
+        } catch (err) {
+            console.error('Error simpan kamera:', err);
+            showNotification('Gagal menyimpan kamera: ' + err.message, 'danger');
+        }
     });
 
     document.getElementById('cameraTable')?.addEventListener('click', async event => {
@@ -735,11 +759,11 @@ async function loadDetections() {
             }
 
             let photo = '';
-        if (isVehicle) {
-            photo = item.vehicle_image_path || item.vehicleImagePath || item.plate_image_path || item.plateImagePath || '';
-        } else {
-            photo = item.face_image_path || item.faceImagePath || '';
-        }
+            if (isVehicle) {
+                photo = item.vehicle_image_path || item.vehicleImagePath || item.plate_image_path || item.plateImagePath || '';
+            } else {
+                photo = item.face_image_path || item.faceImagePath || '';
+            }
             const confidenceText = isPlate
                 ? `Kendaraan ${item.vehicle_confidence_percent || 0}% · Plat ${item.plate_confidence_percent || 0}% · OCR ${item.ocr_confidence_percent || 0}%`
                 : (isVehicle ? `Kendaraan ${item.vehicle_confidence_percent || item.confidence_percent || 0}%` : `Orang ${item.person_confidence_percent || item.confidence_percent || 0}%`);
@@ -1202,6 +1226,32 @@ async function populateAnalyticsCameraSelect(id) {
     select.innerHTML = '<option value="">Semua CCTV</option>' + (res.data || []).map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
 }
 
+// Kartu ringkas rincian (MASUK/KELUAR dsb) - menggunakan ulang
+// component/class card statistik ringkas yang sudah ada di masing-masing
+// halaman ("Total kendaraan"/"Total orang" di Rekapitulasi), bukan model
+// box besar. Nilai selalu diambil langsung dari summary backend
+// (data event counting asli), TIDAK PERNAH di-hardcode.
+function renderMiniStatCard(label, value, extra) {
+    return `<div class="col-12 col-md-6 col-xl-4"><div class="stat-card recap-stat"><div><span>${label}</span><strong>${value || 0}</strong>${extra ? `<small>${extra}</small>` : ''}</div></div></div>`;
+}
+
+// Kartu rincian untuk halaman Statistik - menggunakan ulang component/class
+// card statistik yang sudah ada di baris atas (Total Deteksi / Deteksi Plat /
+// Wajah-Pengendara / Ketersediaan CCTV), bukan model box besar.
+function renderStatsKpiCard(iconVariant, iconName, label, value, descHtml) {
+    return `
+        <div class="col-xl-3 col-md-6 col-sm-6 col-12">
+            <div class="stat-card p-3 h-100 shadow-sm">
+                <div class="stat-icon ${iconVariant}"><i class="bi ${iconName}"></i></div>
+                <div class="w-100">
+                    <span class="text-muted small">${label}</span>
+                    <strong class="fs-4 d-block my-1">${value || 0}</strong>
+                    ${descHtml}
+                </div>
+            </div>
+        </div>`;
+}
+
 async function loadRecap() {
     const start = document.getElementById('recapStart')?.value || '';
     const end = document.getElementById('recapEnd')?.value || '';
@@ -1222,12 +1272,25 @@ async function loadRecap() {
 
         const data = res.data || {};
         const s = data.summary || {};
-        const cards = [
-            ['Kendaraan masuk', s.vehicle_entry], ['Kendaraan keluar', s.vehicle_exit], ['Total kendaraan', s.vehicles],
-            ['Orang masuk', s.people_entry], ['Orang keluar', s.people_exit], ['Total orang', s.people]
-        ];
+
         const totals = document.getElementById('recapTotals');
-        if (totals) totals.innerHTML = cards.map(([label, value]) => `<div class="col-xl-2 col-md-4 col-6"><div class="stat-card recap-stat"><div><span>${label}</span><strong>${value || 0}</strong></div></div></div>`).join('');
+        if (totals) {
+            totals.innerHTML = `
+                <div class="col-12">
+                    <h6 class="text-muted text-uppercase small fw-semibold mb-2">Kendaraan</h6>
+                    <div class="row g-3 mb-3">
+                        ${renderMiniStatCard('Kendaraan masuk', s.vehicle_entry, '\u2191 Arah ke dalam')}
+                        ${renderMiniStatCard('Kendaraan keluar', s.vehicle_exit, '\u2193 Arah ke luar')}
+                        ${renderMiniStatCard('Total kendaraan', s.vehicles)}
+                    </div>
+                    <h6 class="text-muted text-uppercase small fw-semibold mb-2">Orang</h6>
+                    <div class="row g-3">
+                        ${renderMiniStatCard('Orang masuk', s.people_entry, '\u2191 Arah ke dalam')}
+                        ${renderMiniStatCard('Orang keluar', s.people_exit, '\u2193 Arah ke luar')}
+                        ${renderMiniStatCard('Total orang', s.people)}
+                    </div>
+                </div>`;
+        }
         if (cameraTable) cameraTable.innerHTML = (data.cameras || []).map(c => `<tr><td><strong>${esc(c.camera)}</strong></td><td>${esc(c.direction)}</td><td>${c.vehicles}</td><td>${c.people}</td><td>${c.unique_plates}</td><td><span class="status ${c.status === 'Aktif' ? 'success' : 'warning'}">${c.status}</span></td></tr>`).join('') || '<tr><td colspan="6" class="text-center text-muted py-4">Belum ada event pada filter ini.</td></tr>';
         if (dailyTable) dailyTable.innerHTML = (data.daily || []).map(d => `<tr><td>${esc(d.date)}</td><td>${d.vehicles}</td><td>${d.unique_plates}</td><td>${d.entry}</td><td>${d.exit}</td><td>${d.people}</td></tr>`).join('') || '<tr><td colspan="6" class="text-center text-muted py-4">Belum ada data harian.</td></tr>';
     } catch (error) {
@@ -1308,6 +1371,17 @@ async function loadEnterpriseStatistics(period = 'today') {
             kpiAvgConf: '-', kpiNeedCheck: '-', kpiCamStatus: `${s.active_cameras || 0} / ${s.total_cameras || 0}`, kpiCamUptime: '-'
         };
         Object.entries(kpiValues).forEach(([id, value]) => { const el = document.getElementById(id); if (el) el.textContent = value ?? 0; });
+
+        // Rincian Orang & Kendaraan - dipisah menjadi card sendiri-sendiri,
+        // mengikuti pola visual card arah pada halaman Rekapitulasi.
+        const statsBreakdown = document.getElementById('statsBreakdown');
+        if (statsBreakdown) {
+            statsBreakdown.innerHTML = `
+                ${renderStatsKpiCard('blue', 'bi-car-front-fill', 'Kendaraan masuk', s.vehicle_entry, '<small class="text-primary"><i class="bi bi-arrow-up-right"></i> Arah ke dalam</small>')}
+                ${renderStatsKpiCard('purple', 'bi-people-fill', 'Orang masuk', s.people_entry, '<small class="text-primary"><i class="bi bi-arrow-up-right"></i> Arah ke dalam</small>')}
+            `;
+        }
+
         const trend = data.daily?.length ? data.daily : data.hourly;
         const labels = trend.map(item => item.date || item.label);
         const vehicleData = trend.map(item => item.vehicles || 0);

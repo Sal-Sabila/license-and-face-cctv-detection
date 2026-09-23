@@ -32,6 +32,7 @@ from ai.plate.detector import PlateDetector
 from ai.plate.ocr import PlateOCR
 from tracker import PlateTracker
 import db
+import line_crossing
 
 
 # ============================================================
@@ -1190,6 +1191,26 @@ class VideoAIService:
             self.person_capture_state[track_id] = video_time
             self.person_capture_count += 1
 
+            h_frame, w_frame = frame.shape[:2]
+            crossing_direction = line_crossing.default_tracker.update(
+                camera_id=self.camera_id,
+                track_id=track_id,
+                generation=1,
+                bbox=item["box"],
+                frame_width=w_frame,
+                frame_height=h_frame,
+                camera_direction=db.get_camera_direction(self.camera_id),
+            )
+            event_key = f"person:{self.camera_id}:{track_id}:g1"
+            previous_meta = self.person_capture_state.get(f"{event_key}:meta")
+            direction_final = (
+                crossing_direction
+                if crossing_direction in ("entry", "exit")
+                else (previous_meta or {}).get("direction", "unknown")
+            )
+            self.person_capture_state[f"{event_key}:meta"] = {
+                "direction": direction_final,
+            }
             try:
                 db.save_detection_event(
                     camera_id=self.camera_id,
@@ -1199,8 +1220,8 @@ class VideoAIService:
                     face_conf=conf,
                     track_id=track_id,
                     object_type="person",
-                    direction=db.get_camera_direction(self.camera_id),
-                    event_key=f"person:{self.camera_id}:{track_id}:{db.get_camera_direction(self.camera_id)}",
+                    direction=direction_final,
+                    event_key=event_key,
                 )
             except Exception as exc:
                 print(f"[DB PERSON ERROR] {exc}")
@@ -1221,21 +1242,51 @@ class VideoAIService:
         return intersection / area
 
     def _save_vehicle_events(self, frame, detections, video_time):
-        direction = db.get_camera_direction(self.camera_id)
+        camera_orientation = db.get_camera_direction(self.camera_id)
+        h_frame, w_frame = frame.shape[:2]
+
         for item in detections:
             if item.get("cls") not in (2, 3, 5, 7):
                 continue
             track_id = int(item.get("track_id", -1))
             if track_id < 0:
                 continue
-            event_key = f"vehicle:{self.camera_id}:{track_id}:{direction}"
-            if event_key in self.person_capture_state:
+
+            crossing_direction = line_crossing.default_tracker.update(
+                camera_id=self.camera_id,
+                track_id=track_id,
+                generation=1,
+                bbox=item["box"],
+                frame_width=w_frame,
+                frame_height=h_frame,
+                camera_direction=camera_orientation,
+            )
+
+            event_key = f"vehicle:{self.camera_id}:{track_id}:g1"
+            meta_key = f"{event_key}:meta"
+            previous_meta = self.person_capture_state.get(meta_key) or {}
+            previous_direction = previous_meta.get("direction", "unknown")
+            direction_final = (
+                crossing_direction
+                if crossing_direction in ("entry", "exit")
+                else previous_direction
+            )
+
+            direction_newly_determined = (
+                crossing_direction in ("entry", "exit")
+                and previous_direction == "unknown"
+            )
+
+            if event_key in self.person_capture_state and not direction_newly_determined:
                 continue
+
             x1, y1, x2, y2 = [int(v) for v in item["box"]]
             crop = frame[max(0, y1):min(frame.shape[0], y2), max(0, x1):min(frame.shape[1], x2)]
             if crop.size == 0:
                 continue
+
             self.person_capture_state[event_key] = video_time
+            self.person_capture_state[meta_key] = {"direction": direction_final}
             try:
                 db.save_detection_event(
                     camera_id=self.camera_id,
@@ -1244,7 +1295,7 @@ class VideoAIService:
                     vehicle_type=item.get("vehicle_type", "unknown"),
                     vehicle_confidence=safe_float(item.get("conf", 0.0)),
                     vehicle_crop=crop,
-                    direction=direction,
+                    direction=direction_final,
                     event_key=event_key,
                 )
             except Exception as exc:
@@ -1473,7 +1524,15 @@ class VideoAIService:
         )
 
         vehicle_track_id = finished.get("vehicle_track_id") or vehicle_track_id or track_id
-        direction = db.get_camera_direction(self.camera_id)
+
+        # Event plat SELALU terhubung ke event kendaraan yang sama
+        # (event_key sama dengan yang dipakai _save_vehicle_events),
+        # supaya arah yang tersimpan konsisten - bukan dihitung ulang
+        # dari kamera secara statis.
+        event_key = f"vehicle:{self.camera_id}:{vehicle_track_id}:g1"
+        previous_meta = self.person_capture_state.get(f"{event_key}:meta") or {}
+        direction = previous_meta.get("direction", "unknown")
+
         try:
             db.save_detection_event(
                 camera_id=self.camera_id,
@@ -1487,7 +1546,7 @@ class VideoAIService:
                 vehicle_confidence=vehicle_score,
                 vehicle_crop=vehicle_crop,
                 direction=direction,
-                event_key=f"vehicle:{self.camera_id}:{vehicle_track_id}:{direction}",
+                event_key=event_key,
             )
         except Exception as exc:
             print(f"[DB PLATE ERROR] {exc}")

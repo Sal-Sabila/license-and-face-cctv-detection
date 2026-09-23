@@ -1193,7 +1193,9 @@ def _analytics_filters(args=None):
         clauses.append("c.location LIKE %s")
         params.append(f"%{str(args['gate']).strip()}%")
     if args.get("direction") in ("entry", "exit"):
-        clauses.append("COALESCE(c.direction, 'unknown') = %s")
+        # PERBAIKAN: filter arah harus berdasarkan hasil crossing NYATA
+        # per-event (fd.direction), bukan atribut statis kamera (c.direction).
+        clauses.append("COALESCE(fd.direction, 'unknown') = %s")
         params.append(args["direction"])
     if args.get("object_type") == "vehicle":
         clauses.append("fd.object_type = 'vehicle'")
@@ -1216,6 +1218,7 @@ def get_analytics(args=None):
             fd.detection_confidence,
             fd.created_at,
             fd.track_id,
+            fd.direction,
             COALESCE(NULLIF(p.plate_number, ''), CONCAT('track:', fd.track_id)) AS dedup_key,
             ROW_NUMBER() OVER (
                 PARTITION BY
@@ -1234,11 +1237,11 @@ def get_analytics(args=None):
             cur.execute(f"""
                 SELECT
                     SUM(d.object_type = 'vehicle') AS vehicles,
-                    SUM(d.object_type = 'vehicle' AND c.direction = 'entry') AS vehicle_entry,
-                    SUM(d.object_type = 'vehicle' AND c.direction = 'exit') AS vehicle_exit,
+                    SUM(d.object_type = 'vehicle' AND d.direction = 'entry') AS vehicle_entry,
+                    SUM(d.object_type = 'vehicle' AND d.direction = 'exit') AS vehicle_exit,
                     SUM(d.object_type = 'person') AS people,
-                    SUM(d.object_type = 'person' AND c.direction = 'entry') AS people_entry,
-                    SUM(d.object_type = 'person' AND c.direction = 'exit') AS people_exit,
+                    SUM(d.object_type = 'person' AND d.direction = 'entry') AS people_entry,
+                    SUM(d.object_type = 'person' AND d.direction = 'exit') AS people_exit,
                     SUM(d.object_type = 'vehicle' AND d.has_plate = 1) AS plates,
                     COUNT(DISTINCT CASE WHEN d.object_type = 'vehicle' AND d.has_plate = 1 AND p.plate_number IS NOT NULL AND p.plate_number != '' THEN p.plate_number END) AS unique_plates
                 FROM ({dedup_subquery}) d
@@ -1283,8 +1286,8 @@ def get_analytics(args=None):
             daily_rows = query_rows(f"""
                 SELECT DATE(d.created_at) AS day, SUM(d.object_type = 'vehicle') AS vehicles,
                     COUNT(DISTINCT CASE WHEN d.object_type = 'vehicle' AND d.has_plate = 1 THEN p.plate_number END) AS unique_plates,
-                    SUM(d.object_type = 'vehicle' AND c.direction = 'entry') AS entry_count,
-                    SUM(d.object_type = 'vehicle' AND c.direction = 'exit') AS exit_count,
+                    SUM(d.object_type = 'vehicle' AND d.direction = 'entry') AS entry_count,
+                    SUM(d.object_type = 'vehicle' AND d.direction = 'exit') AS exit_count,
                     SUM(d.object_type = 'person') AS people
                 FROM ({dedup_subquery}) d
                 LEFT JOIN plate p ON p.plate_id = d.plate_id
@@ -1334,8 +1337,8 @@ def get_analytics(args=None):
                 SELECT d.detection_id AS id, p.plate_number AS plate, d.created_at AS detected_at,
                     COALESCE(c.location, 'CCTV') AS camera, d.detection_confidence AS confidence,
                     CASE WHEN d.object_type = 'vehicle' THEN 'Kendaraan' ELSE 'Orang' END AS type,
-                    CASE WHEN c.direction = 'entry' THEN 'Masuk'
-                        WHEN c.direction = 'exit' THEN 'Keluar' ELSE 'Tidak ditentukan' END AS direction
+                    CASE WHEN d.direction = 'entry' THEN 'Masuk'
+                        WHEN d.direction = 'exit' THEN 'Keluar' ELSE 'Tidak ditentukan' END AS direction
                 FROM ({dedup_subquery}) d
                 LEFT JOIN plate p ON p.plate_id = d.plate_id
                 LEFT JOIN cameras c ON c.camera_id = d.camera_id
