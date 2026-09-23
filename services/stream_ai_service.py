@@ -978,6 +978,8 @@ class StreamAIService:
         self.ocr_cache = {}
         self.saved_event_meta = {}
 
+        load_all_zones_from_db()
+
         self.ai_thread.start()
 
         print("[AI STREAM] Vehicle classes : person/car/motorcycle/bus/truck")
