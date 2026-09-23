@@ -16,6 +16,7 @@ from ai.plate.detector import PlateDetector
 from ai.plate.ocr import PlateOCR
 from tracker import PlateTracker
 import db
+import line_crossing
 
 
 # ============================================================
@@ -1409,7 +1410,20 @@ class StreamAIService:
                     cache.pop(key, None)
 
     def _save_consistent_events(self, frame, person_dets, plate_dets, camera_id, current_time):
-        direction = db.get_camera_direction(camera_id)
+        """Persist one explicit event per tracked vehicle or unassociated person.
+
+        PERBAIKAN LOGIKA ARAH:
+        Direction TIDAK LAGI diambil sekali secara statis dari konfigurasi
+        kamera untuk semua objek. Setiap objek (kendaraan/orang) dicek
+        SENDIRI apakah track_id-nya baru saja melewati (crossing) counting
+        line kamera ini, dan ke arah mana. Konfigurasi arah kamera
+        (db.get_camera_direction) hanya dipakai sebagai ORIENTASI kamera
+        (yaitu: sisi luar->dalam pada kamera ini artinya Masuk atau
+        Keluar), bukan disalin langsung sebagai hasil.
+        """
+        camera_orientation = db.get_camera_direction(camera_id)
+        frame_h, frame_w = frame.shape[:2]
+
         vehicles = [item for item in person_dets if item.get("cls") in VEHICLE_TYPES]
         people = [item for item in person_dets if item.get("cls") == 0]
         associated_people = set()
@@ -1430,6 +1444,7 @@ class StreamAIService:
                             continue
                     except (TypeError, ValueError):
                         pass
+
                 plate_box = plate.get("bbox") or plate.get("box") or [0, 0, 0, 0]
                 if len(plate_box) != 4:
                     continue
@@ -1455,26 +1470,68 @@ class StreamAIService:
             stable_id = vehicle_id if vehicle_id >= 0 else f"{center[0]}_{center[1]}"
 
             if vehicle_id >= 0:
-                generation = self._get_track_generation(camera_id, vehicle_id, current_time)
+                generation = self._get_track_generation(
+                    camera_id, vehicle_id, current_time
+                )
             else:
                 generation = int(current_time)
 
-            event_key = f"vehicle:{camera_id}:{stable_id}:{direction}:g{generation}"
+            # ------------------------------------------------------------
+            # ARAH BERDASARKAN CROSSING NYATA (bukan atribut statis kamera)
+            # ------------------------------------------------------------
+            crossing_direction = "unknown"
+            if vehicle_id >= 0:
+                crossing_direction = line_crossing.default_tracker.update(
+                    camera_id=camera_id,
+                    track_id=vehicle_id,
+                    generation=generation,
+                    bbox=vehicle_box,
+                    frame_width=frame_w,
+                    frame_height=frame_h,
+                    camera_direction=camera_orientation,
+                )
+
+            # event_key TIDAK lagi menyertakan direction statis, karena arah
+            # sekarang bisa berubah dari 'unknown' -> 'entry'/'exit' seiring
+            # waktu (saat crossing benar-benar terjadi). Kita tetap satu
+            # event per lifecycle track (camera+stable_id+generation).
+            event_key = f"vehicle:{camera_id}:{stable_id}:g{generation}"
 
             plate_text_now = _normalize_text((plate or {}).get("text") or "")
             has_driver_now = driver is not None
             previous_meta = self.saved_event_meta.get(event_key)
             is_new_event = event_key not in self.captured_tracks
+            previous_direction = (previous_meta or {}).get("direction", "unknown")
+
+            # Simpan/perbarui event jika: event baru, ATAU ada info baru
+            # (plate/driver), ATAU arah baru saja berhasil ditentukan
+            # (dulunya 'unknown', sekarang 'entry'/'exit' karena crossing
+            # baru terdeteksi pada frame ini).
+            direction_newly_determined = (
+                crossing_direction in ("entry", "exit")
+                and previous_direction == "unknown"
+            )
             needs_enrichment = (
                 not is_new_event
                 and previous_meta is not None
                 and (
                     (plate_text_now and not previous_meta.get("plate_text"))
                     or (has_driver_now and not previous_meta.get("has_driver"))
+                    or direction_newly_determined
                 )
             )
             if not is_new_event and not needs_enrichment:
                 continue
+
+            # Arah yang disimpan ke DB: hasil crossing jika sudah pernah
+            # ditentukan (baik pada frame ini atau sebelumnya), selain itu
+            # 'unknown'. Deteksi/hasil tetap tersimpan untuk fitur Hasil
+            # Deteksi & Riwayat walau arah belum bisa dipastikan.
+            final_direction = (
+                crossing_direction
+                if crossing_direction in ("entry", "exit")
+                else previous_direction
+            )
 
             try:
                 result = db.save_detection_event(
@@ -1488,10 +1545,13 @@ class StreamAIService:
                     object_type="vehicle",
                     vehicle_type=vehicle_type,
                     vehicle_confidence=float(vehicle.get("conf", 0.0) or 0),
-                    vehicle_crop=_prepare_vehicle_capture(frame, vehicle_box),
+                    vehicle_crop=_prepare_vehicle_capture(
+                        frame,
+                        vehicle_box,
+                    ),
                     has_driver=driver is not None,
                     driver_track_id=(driver or {}).get("track_id"),
-                    direction=direction,
+                    direction=final_direction,
                     event_key=event_key
                 )
                 self.captured_tracks[event_key] = current_time
@@ -1500,6 +1560,7 @@ class StreamAIService:
                 self.saved_event_meta[event_key] = {
                     "plate_text": plate_text_now or previous_plate,
                     "has_driver": has_driver_now or previous_driver,
+                    "direction": final_direction,
                     "updated_at": current_time,
                 }
                 print(
@@ -1508,7 +1569,7 @@ class StreamAIService:
                     f"plate_detected={bool(plate)} plate={(plate or {}).get('text') or '-'} "
                     f"plate_confidence={float((plate or {}).get('conf', 0) or 0):.3f} "
                     f"ocr_confidence={float((plate or {}).get('ocr_conf', 0) or 0):.3f} "
-                    f"driver_detected={driver is not None} direction={direction} "
+                    f"driver_detected={driver is not None} direction={final_direction} "
                     f"event_key={event_key} duplicate={result.get('duplicate', False)}"
                 )
             except Exception as exc:
@@ -1520,11 +1581,42 @@ class StreamAIService:
             track_id = int(person.get("track_id", -1))
             if track_id < 0:
                 continue
-            generation = self._get_track_generation(camera_id, track_id, current_time)
-            event_key = f"person:{camera_id}:{track_id}:{direction}:g{generation}"
 
-            if event_key in self.captured_tracks:
+            generation = self._get_track_generation(
+                camera_id, track_id, current_time
+            )
+
+            crossing_direction = line_crossing.default_tracker.update(
+                camera_id=camera_id,
+                track_id=track_id,
+                generation=generation,
+                bbox=person.get("box", [0, 0, 0, 0]),
+                frame_width=frame_w,
+                frame_height=frame_h,
+                camera_direction=camera_orientation,
+            )
+
+            event_key = f"person:{camera_id}:{track_id}:g{generation}"
+
+            previous_meta = self.saved_event_meta.get(event_key)
+            is_new_event = event_key not in self.captured_tracks
+            previous_direction = (previous_meta or {}).get("direction", "unknown")
+            direction_newly_determined = (
+                crossing_direction in ("entry", "exit")
+                and previous_direction == "unknown"
+            )
+
+            # Satu event per lifecycle person track, kecuali arah baru
+            # saja berhasil ditentukan (enrichment arah, bukan data baru).
+            if not is_new_event and not direction_newly_determined:
                 continue
+
+            final_direction = (
+                crossing_direction
+                if crossing_direction in ("entry", "exit")
+                else previous_direction
+            )
+
             bx1, by1, bx2, by2 = person.get("box", [0, 0, 0, 0])
 
             crop = _prepare_high_quality_capture(
@@ -1548,15 +1640,21 @@ class StreamAIService:
                     track_id=track_id,
                     object_type="person",
                     vehicle_type="unknown",
-                    direction=direction,
+                    direction=final_direction,
                     event_key=event_key
                 )
                 self.captured_tracks[event_key] = current_time
+                self.saved_event_meta[event_key] = {
+                    "plate_text": "",
+                    "has_driver": False,
+                    "direction": final_direction,
+                    "updated_at": current_time,
+                }
                 print(
                     f"[DETECTION] camera={camera_id} track_id={track_id} "
                     f"object_type=person person_confidence="
                     f"{float(person.get('conf', 0) or 0):.3f} "
-                    f"direction={direction} duplicate={result.get('duplicate', False)}"
+                    f"direction={final_direction} duplicate={result.get('duplicate', False)}"
                 )
             except Exception as exc:
                 print(f"[AI STREAM ERROR] Save person event failed: {exc}")
