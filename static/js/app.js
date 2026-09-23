@@ -1199,6 +1199,7 @@ window.exportPlatesPdf = exportPlatesPdf;
 // MODUL: STATISTIK STANDAR PERUSAHAAN (ENTERPRISE ANALYTICS)
 // ============================================================
 
+
 function analyticsParams(prefix, periodOverride = '') {
     const period = periodOverride || document.getElementById(`${prefix}Period`)?.value || 'today';
     const params = new URLSearchParams({ period });
@@ -1223,7 +1224,7 @@ async function populateAnalyticsCameraSelect(id) {
     const select = document.getElementById(id);
     if (!select) return;
     const res = await json('/api/cameras').catch(() => ({ data: [] }));
-    select.innerHTML = '<option value="">Semua CCTV</option>' + (res.data || []).map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+    select.innerHTML = '<option value="">Semua Kamera</option>' + (res.data || []).map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
 }
 
 // Kartu ringkas rincian (MASUK/KELUAR dsb) - menggunakan ulang
@@ -1372,13 +1373,19 @@ async function loadEnterpriseStatistics(period = 'today') {
         };
         Object.entries(kpiValues).forEach(([id, value]) => { const el = document.getElementById(id); if (el) el.textContent = value ?? 0; });
 
-        // Rincian Orang & Kendaraan - dipisah menjadi card sendiri-sendiri,
+        // Rincian Masuk & Keluar - dipisah menjadi card sendiri-sendiri,
         // mengikuti pola visual card arah pada halaman Rekapitulasi.
+        // Card Keluar menggunakan MODEL CARD YANG SAMA (renderStatsKpiCard)
+        // dengan card Masuk - hanya label/icon/data yang berbeda. Data
+        // vehicle_exit & people_exit sudah tersedia dari summary backend
+        // (bukan angka dummy).
         const statsBreakdown = document.getElementById('statsBreakdown');
         if (statsBreakdown) {
             statsBreakdown.innerHTML = `
                 ${renderStatsKpiCard('blue', 'bi-car-front-fill', 'Kendaraan masuk', s.vehicle_entry, '<small class="text-primary"><i class="bi bi-arrow-up-right"></i> Arah ke dalam</small>')}
                 ${renderStatsKpiCard('purple', 'bi-people-fill', 'Orang masuk', s.people_entry, '<small class="text-primary"><i class="bi bi-arrow-up-right"></i> Arah ke dalam</small>')}
+                ${renderStatsKpiCard('orange', 'bi-car-front-fill', 'Kendaraan keluar', s.vehicle_exit, '<small class="text-danger"><i class="bi bi-arrow-down-right"></i> Arah ke luar</small>')}
+                ${renderStatsKpiCard('green', 'bi-people-fill', 'Orang keluar', s.people_exit, '<small class="text-danger"><i class="bi bi-arrow-down-right"></i> Arah ke luar</small>')}
             `;
         }
 

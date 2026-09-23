@@ -39,7 +39,7 @@
             corePlugins: { preflight: false }
         };
     </script>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=2.8">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=2.9">
     <style>
         .detection-image-modal { width: 820px; max-width: 90vw; margin: 1rem auto; }
         .detection-image-modal .modal-content { max-height: 90vh; overflow: hidden; border-radius: 12px; }
@@ -256,7 +256,7 @@
                                 <h3>Live Monitoring CCTV</h3>
                                 <p>Satu frame untuk deteksi wajah dan plat nomor.</p>
                             </div>
-                            <div class="d-flex gap-2 align-items-center flex-wrap">
+                            <div class="d-flex gap-2 align-items-center flex-nowrap">
                                 <select id="detectionMode" class="form-select form-select-sm" title="Pilih sumber deteksi">
                                     <option value="stream">Stream CCTV</option>
                                     <option value="video">File Video</option>
@@ -378,7 +378,7 @@
                         <h3>Hasil Deteksi Terpadu</h3>
                         <p>Data gabungan plat kendaraan dan wajah/pejalan kaki dari seluruh kamera CCTV.</p>
                     </div>
-                    <div class="d-flex gap-2 align-items-center flex-wrap">
+                    <div class="d-flex gap-2 align-items-center flex-nowrap">
                         <div class="input-group input-group-sm" style="width: 240px;">
                             <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
                             <input id="detectionSearch" class="form-control" placeholder="Cari plat atau lokasi...">
@@ -476,8 +476,8 @@
                         <h3>Riwayat Plat Nomor</h3>
                         <p>Database pembacaan plat nomor kendaraan otomatis dari proses OCR.</p>
                     </div>
-                    <div class="d-flex gap-2 align-items-center flex-wrap">
-                        <div class="input-group input-group-sm" style="max-width: 260px;">
+                    <div class="d-flex gap-2 align-items-center flex-nowrap">
+                        <div class="input-group input-group-sm" style="max-width: 180px;">
                             <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
                             <input id="plateSearch" class="form-control" placeholder="Cari plat (contoh: B 1234)...">
                         </div>
@@ -562,69 +562,66 @@
 
             {% elif page == 'recap' %}
             <div class="analytics-page" id="recapPage">
-                <div class="panel shadow-sm p-3 mb-4 analytics-filters">
-                    <div class="d-flex flex-wrap gap-2 align-items-end">
-                        <div>
-                            <label class="form-label small">Periode</label>
-                            <select id="recapPeriod" class="form-select form-select-sm">
+                <section class="panel shadow-sm mb-4">
+                    <div class="panel-header flex-wrap gap-3" style="justify-content: flex-end;">
+                        <div class="flex-grow-1" style="padding-left: 5px;">
+                            <h3 class="mb-1" style="font-size: 18px; font-weight: 700;">
+                                Rekapitulasi Data
+                            </h3>
+                            <p class="mb-0" style="font-size: 11px;">
+                                Ringkasan data hasil deteksi kendaraan dan pembacaan plat nomor dari sistem CCTV.
+                            </p>
+                        </div>
+                        <div class="d-flex gap-2 align-items-center flex-nowrap">
+                            <div class="input-group input-group-sm" style="max-width: 180px;">
+                                <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
+                                <input id="recapSearch" class="form-control" placeholder="Cari...">
+                            </div>
+                            <button id="recapExport" type="button" class="btn-action-outline">
+                                <i class="bi bi-file-earmark-spreadsheet"></i>
+                                <span>Ekspor Excel</span>
+                            </button>
+                            <button id="recapExportPdf" type="button" class="btn-action-outline">
+                                <i class="bi bi-file-earmark-pdf"></i>
+                                <span>Ekspor PDF</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="filter-toolbar p-3 border-bottom bg-light d-flex gap-2 flex-wrap align-items-center">
+                        <select id="recapCamera" class="form-select form-select-sm" style="max-width: 180px;">
+                            <option value="">Semua Kamera</option>
+                        </select>
+
+                        <select id="recapObjectType" class="form-select form-select-sm" style="max-width: 160px;" title="Filter status deteksi">
+                            <option value="">Semua Status</option>
+                            <option value="1">Terbaca / Jelas</option>
+                            <option value="2">Perlu Cek</option>
+                            <option value="0">Gagal</option>
+                        </select>
+
+                        <div class="date-filter-group d-flex align-items-center gap-2 flex-nowrap">
+                            <select id="recapPeriod" class="form-select form-select-sm" title="Filter periode rekapitulasi">
                                 <option value="today">Hari ini</option>
                                 <option value="7d">7 hari terakhir</option>
                                 <option value="30d">30 hari terakhir</option>
                                 <option value="all">Semua waktu</option>
                                 <option value="custom">Kustom tanggal</option>
                             </select>
+
+                            <input id="recapStart" type="date" class="form-control form-control-sm" title="Tanggal mulai" aria-label="Tanggal mulai rekapitulasi">
+                            <span class="small text-muted text-nowrap">sampai</span>
+                            <input id="recapEnd" type="date" class="form-control form-control-sm" title="Tanggal akhir" aria-label="Tanggal akhir rekapitulasi">
                         </div>
-                        <div class="col-xl-4 col-lg-4 col-md-8 col-sm-12 col-12">
-                            <label class="form-label small text-muted mb-1 fw-semibold">Rentang Tanggal</label>
-                            <div class="date-range-group">
-                                <input id="recapStart" type="date" class="form-control form-control-sm" title="Tanggal mulai">
-                                <span class="small text-muted">-</span>
-                                <input id="recapEnd" type="date" class="form-control form-control-sm" title="Tanggal akhir">
-                            </div>
-                        </div>
-                        <div class="col-xl-2 col-lg-2 col-md-4 col-sm-6 col-12 filter-col-compact">
-                            <label class="form-label small text-muted mb-1 fw-semibold">Jenis Objek</label>
-                            <select id="recapObjectType" class="form-select form-select-sm" title="Filter jenis objek">
-                                <option value="">Semua Jenis</option>
-                                <option value="person">Orang</option>
-                                <option value="vehicle">Kendaraan</option>
-                                <option value="plate">Plat Nomor</option>
-                            </select>
-                        </div>
-                        <div class="col-xl-2 col-lg-2 col-md-4 col-sm-6 col-12 filter-col-compact">
-                            <label class="form-label small text-muted mb-1 fw-semibold">Kamera CCTV</label>
-                            <select id="recapCamera" class="form-select form-select-sm">
-                                <option value="">Semua CCTV</option>
-                            </select>
-                        </div>
-                        <div class="col-xl-2 col-lg-2 col-md-4 col-sm-6 col-12 filter-col-compact">
-                            <label class="form-label small text-muted mb-1 fw-semibold">Arah Gerbang</label>
-                            <select id="recapDirection" class="form-select form-select-sm">
-                                <option value="">Semua arah</option>
-                                <option value="entry">Masuk</option>
-                                <option value="exit">Keluar</option>
-                            </select>
-                        </div>
+
+                        <button id="recapApply" type="button" class="btn btn-primary btn-sm text-nowrap" title="Terapkan filter">
+                            <i class="bi bi-funnel"></i> Terapkan
+                        </button>
+                        <button id="recapResetBtn" type="button" class="btn btn-outline-secondary btn-sm text-nowrap" title="Reset semua filter">
+                            <i class="bi bi-arrow-counterclockwise"></i> Reset
+                        </button>
                     </div>
-                    <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between pt-2 border-top filter-action-row">
-                        <div class="d-flex gap-2 align-items-center">
-                            <button id="recapApply" type="button" class="btn btn-primary btn-sm text-nowrap">
-                                <i class="bi bi-funnel"></i> Terapkan
-                            </button>
-                            <button id="recapResetBtn" type="button" class="btn btn-outline-secondary btn-sm text-nowrap" title="Reset semua filter">
-                                <i class="bi bi-arrow-counterclockwise"></i> Reset
-                            </button>
-                        </div>
-                        <div class="d-flex gap-2 align-items-center">
-                            <button id="recapExport" type="button" class="btn btn-outline-success btn-sm text-nowrap">
-                                <i class="bi bi-file-earmark-spreadsheet"></i> Ekspor Excel
-                            </button>
-                            <button id="recapExportPdf" type="button" class="btn btn-outline-danger btn-sm text-nowrap">
-                                <i class="bi bi-file-earmark-pdf"></i> Ekspor PDF
-                            </button>
-                        </div>
-                    </div>
-                </div>
+                </section>
                 <div class="row g-3 mb-4" id="recapTotals"></div>
                 <div class="panel shadow-sm mb-4"><div class="panel-header"><div><h3>Rekap per CCTV / Gerbang</h3><p>Agregasi berasal dari event deteksi database dan tidak menghitung frame mentah.</p></div></div><div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th>CCTV / Gerbang</th><th>Arah</th><th>Kendaraan</th><th>Orang</th><th>Plat unik</th><th>Status</th></tr></thead><tbody id="recapCameraTable"><tr><td colspan="6" class="text-center text-muted py-4">Memuat data...</td></tr></tbody></table></div></div>
                 <div class="panel shadow-sm"><div class="panel-header"><div><h3>Total per Hari</h3><p>Jumlah kendaraan, plat unik, arah, dan orang pada periode terpilih.</p></div></div><div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th>Tanggal</th><th>Kendaraan</th><th>Plat unik</th><th>Masuk</th><th>Keluar</th><th>Orang</th></tr></thead><tbody id="recapDailyTable"><tr><td colspan="6" class="text-center text-muted py-4">Memuat data...</td></tr></tbody></table></div></div>
@@ -632,58 +629,66 @@
 
             {% elif page == 'statistics' %}
             <div class="statistics-enterprise-container">
-                <div class="panel shadow-sm p-3 mb-4 analytics-filters">
-                    <div class="d-flex flex-wrap gap-2 align-items-end">
-                        <div>
-                            <label class="form-label small">Periode</label>
-                            <select id="statsPeriod" class="form-select form-select-sm">
+                <section class="panel shadow-sm mb-4">
+                    <div class="panel-header flex-wrap gap-3" style="justify-content: flex-end;">
+                        <div class="flex-grow-1" style="padding-left: 5px;">
+                            <h3 class="mb-1" style="font-size: 18px; font-weight: 700;">
+                                Statistika Deteksi
+                            </h3>
+                            <p class="mb-0" style="font-size: 11px;">
+                                Informasi statistik hasil deteksi kendaraan dan pembacaan plat nomor berdasarkan data yang tercatat.
+                            </p>
+                        </div>
+                        <div class="d-flex gap-2 align-items-center flex-nowrap">
+                            <div class="input-group input-group-sm" style="max-width: 180px;">
+                                <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
+                                <input id="statsSearch" class="form-control" placeholder="Cari...">
+                            </div>
+                            <button type="button" class="btn-action-outline" onclick="exportStatsReport()" title="Ekspor Excel">
+                                <i class="bi bi-file-earmark-spreadsheet"></i>
+                                <span>Ekspor Excel</span>
+                            </button>
+                            <button type="button" class="btn-action-outline" onclick="exportStatsPdf()" title="Download Laporan PDF">
+                                <i class="bi bi-file-earmark-pdf"></i>
+                                <span>Ekspor PDF</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="filter-toolbar p-3 border-bottom bg-light d-flex gap-2 flex-wrap align-items-center">
+                        <select id="statsCamera" class="form-select form-select-sm" style="max-width: 180px;">
+                            <option value="">Semua Kamera</option>
+                        </select>
+
+                        <select id="statsObjectType" class="form-select form-select-sm" style="max-width: 160px;" title="Filter status deteksi">
+                            <option value="">Semua Status</option>
+                            <option value="1">Terbaca / Jelas</option>
+                            <option value="2">Perlu Cek</option>
+                            <option value="0">Gagal</option>
+                        </select>
+
+                        <div class="date-filter-group d-flex align-items-center gap-2 flex-nowrap">
+                            <select id="statsPeriod" class="form-select form-select-sm" title="Filter periode statistik">
                                 <option value="today">Hari ini</option>
                                 <option value="7d">7 hari terakhir</option>
                                 <option value="30d">30 hari terakhir</option>
                                 <option value="all">Semua waktu</option>
                                 <option value="custom">Kustom tanggal</option>
                             </select>
+
+                            <input id="statsStart" type="date" class="form-control form-control-sm" title="Tanggal mulai" aria-label="Tanggal mulai statistik">
+                            <span class="small text-muted text-nowrap">sampai</span>
+                            <input id="statsEnd" type="date" class="form-control form-control-sm" title="Tanggal akhir" aria-label="Tanggal akhir statistik">
                         </div>
-                        <div class="col-xl-6 col-lg-6 col-md-5 col-sm-12 col-12">
-                            <label class="form-label small text-muted mb-1 fw-semibold">Rentang Tanggal</label>
-                            <div class="date-range-group">
-                                <input id="statsStart" type="date" class="form-control form-control-sm" title="Tanggal mulai">
-                                <span class="small text-muted">-</span>
-                                <input id="statsEnd" type="date" class="form-control form-control-sm" title="Tanggal akhir">
-                            </div>
-                        </div>
-                        <div class="col-xl-2 col-lg-2 col-md-2 col-sm-6 col-12 filter-col-compact">
-                            <label class="form-label small text-muted mb-1 fw-semibold">Jenis Objek</label>
-                            <select id="statsObjectType" class="form-select form-select-sm" title="Filter jenis objek">
-                                <option value="">Semua Jenis</option>
-                                <option value="person">Orang</option>
-                                <option value="vehicle">Kendaraan</option>
-                                <option value="plate">Plat Nomor</option>
-                            </select>
-                        </div>
-                        <div class="col-xl-2 col-lg-2 col-md-2 col-sm-6 col-12 filter-col-compact">
-                            <label class="form-label small text-muted mb-1 fw-semibold">Kamera CCTV</label>
-                            <select id="statsCamera" class="form-select form-select-sm">
-                                <option value="">Semua CCTV</option>
-                            </select>
-                        </div>
+
+                        <button id="statsApply" type="button" class="btn btn-primary btn-sm text-nowrap" title="Terapkan filter">
+                            <i class="bi bi-funnel"></i> Terapkan
+                        </button>
+                        <button id="statsResetBtn" type="button" class="btn btn-outline-secondary btn-sm text-nowrap" title="Reset semua filter">
+                            <i class="bi bi-arrow-counterclockwise"></i> Reset
+                        </button>
                     </div>
-                    <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between pt-2 border-top filter-action-row">
-                        <div class="d-flex gap-2 align-items-center">
-                            <button id="statsApply" type="button" class="btn btn-primary btn-sm text-nowrap">
-                                <i class="bi bi-funnel"></i> Terapkan
-                            </button>
-                            <button id="statsResetBtn" type="button" class="btn btn-outline-secondary btn-sm text-nowrap" title="Reset semua filter">
-                                <i class="bi bi-arrow-counterclockwise"></i> Reset
-                            </button>
-                        </div>
-                        <div class="d-flex gap-2 align-items-center">
-                            <button type="button" class="btn btn-outline-success btn-sm text-nowrap" onclick="exportStatsReport()" title="Ekspor Excel"><i class="bi bi-file-earmark-spreadsheet"></i> Ekspor Excel</button>
-                            <button type="button" class="btn btn-primary btn-sm text-nowrap" onclick="exportStatsPdf()" title="Download Laporan PDF"><i class="bi bi-file-earmark-pdf"></i> Ekspor PDF</button>
-                            <button type="button" class="btn btn-outline-secondary btn-sm text-nowrap" onclick="loadEnterpriseStatistics()" title="Muat Ulang Data"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
-                        </div>
-                    </div>
-                </div>
+                </section>
 
                 <div class="panel shadow-sm p-3 mb-4 d-flex justify-content-between align-items-center flex-wrap gap-3">
                     <div class="d-flex align-items-center gap-3">
@@ -741,7 +746,14 @@
                 </div>
 
                 <div class="mb-4">
-                    <h6 class="text-muted text-uppercase small fw-semibold mb-2">Rincian Masuk</h6>
+                    <div class="row g-3 mb-2">
+                        <div class="col-6">
+                            <h6 class="text-muted text-uppercase small fw-semibold mb-0">Rincian Masuk</h6>
+                        </div>
+                        <div class="col-6">
+                            <h6 class="text-muted text-uppercase small fw-semibold mb-0">Rincian Keluar</h6>
+                        </div>
+                    </div>
                     <div class="row g-3" id="statsBreakdown"></div>
                 </div>
 
