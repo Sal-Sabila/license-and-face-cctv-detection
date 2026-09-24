@@ -209,32 +209,61 @@
             </div>
 
             {% if page == 'dashboard' %}
-            <section class="row g-3 stats-row">
-                <div class="col-xl-3 col-md-6 col-sm-6 col-12">
-                    <div class="stat-card">
+            <!-- ============================================== -->
+            <!-- PERBAIKAN: KOTAK STATISTIK DASHBOARD -->
+            <!-- Disamakan dengan struktur di halaman Statistik -->
+            <!-- ============================================== -->
+            <section class="row g-3 mb-4">
+                <!-- Total Kendaraan -->
+                <div class="col-xl-3 col-md-6 col-12">
+                    <div class="stat-card p-3 h-100 shadow-sm d-flex align-items-center gap-3">
                         <div class="stat-icon blue"><i class="bi bi-car-front-fill"></i></div>
-                        <div><span>Total Kendaraan</span><strong id="totalVehicle">0</strong><small id="vehicleFlowLabel">Masuk 0 · Keluar 0</small></div>
+                        <div class="w-100">
+                            <span class="text-muted small d-block">Total Kendaraan</span>
+                            <strong id="totalVehicle" class="fs-4 d-block my-1">0</strong>
+                            <small class="text-muted d-block" id="vehicleFlowLabel">Masuk 0 · Keluar 0</small>
+                        </div>
                     </div>
                 </div>
-                <div class="col-xl-3 col-md-6 col-sm-6 col-12">
-                    <div class="stat-card">
+                
+                <!-- Total Plat Terdeteksi -->
+                <div class="col-xl-3 col-md-6 col-12">
+                    <div class="stat-card p-3 h-100 shadow-sm d-flex align-items-center gap-3">
                         <div class="stat-icon green"><i class="bi bi-check-circle-fill"></i></div>
-                        <div><span>Total Plat Terdeteksi</span><strong id="plateRead">0</strong><small>Plat unik: <b id="uniquePlateCount">0</b></small></div>
+                        <div class="w-100">
+                            <span class="text-muted small d-block">Total Plat Terdeteksi</span>
+                            <strong id="plateRead" class="fs-4 d-block my-1">0</strong>
+                            <small class="text-muted d-block">Plat unik: <b id="uniquePlateCount" class="text-success">0</b></small>
+                        </div>
                     </div>
                 </div>
-                <div class="col-xl-3 col-md-6 col-sm-6 col-12">
-                    <div class="stat-card">
+                
+                <!-- Total Orang -->
+                <div class="col-xl-3 col-md-6 col-12">
+                    <div class="stat-card p-3 h-100 shadow-sm d-flex align-items-center gap-3">
                         <div class="stat-icon orange"><i class="bi bi-exclamation-circle-fill"></i></div>
-                        <div><span>Total Orang</span><strong id="peopleTotal">0</strong><small id="peopleFlowLabel">Masuk 0 · Keluar 0</small></div>
+                        <div class="w-100">
+                            <span class="text-muted small d-block">Total Orang</span>
+                            <strong id="peopleTotal" class="fs-4 d-block my-1">0</strong>
+                            <small class="text-muted d-block" id="peopleFlowLabel">Masuk 0 · Keluar 0</small>
+                        </div>
                     </div>
                 </div>
-                <div class="col-xl-3 col-md-6 col-sm-6 col-12">
-                    <div class="stat-card">
+                
+                <!-- CCTV Aktif -->
+                <div class="col-xl-3 col-md-6 col-12">
+                    <div class="stat-card p-3 h-100 shadow-sm d-flex align-items-center gap-3">
                         <div class="stat-icon purple"><i class="bi bi-camera-video-fill"></i></div>
-                        <div><span>CCTV Aktif</span><strong id="cameraStatus">0 / 0</strong><small>Online dari total CCTV</small></div>
+                        <div class="w-100">
+                            <span class="text-muted small d-block">CCTV Aktif</span>
+                            <strong id="cameraStatus" class="fs-4 d-block my-1">0 / 0</strong>
+                            <small class="text-muted d-block">Online dari total CCTV</small>
+                        </div>
                     </div>
                 </div>
             </section>
+            <!-- ============================================== -->
+
             <section class="row g-4 mt-1">
                 <div class="col-xl-7">
                     <div class="panel shadow-sm p-4">

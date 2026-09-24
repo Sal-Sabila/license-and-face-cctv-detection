@@ -353,7 +353,7 @@ button, input, select { font: inherit; }
 .user-pill span { display: block; color: #c9e4f5; font-size: 0.65rem; }
 
 /* ============================================================
-   STAT CARDS
+   STAT CARDS (DIPERBAIKI AGAR SAMA DENGAN HALAMAN STATISTIK)
    ============================================================ */
 
 .stats-row { margin-bottom: 0; }
@@ -362,14 +362,15 @@ button, input, select { font: inherit; }
     display: flex;
     align-items: center;
     gap: 14px;
-    min-height: 108px;
-    padding: 16px 16px;
+    /* min-height: 108px;  <-- Dihapus agar tinggi menyesuaikan konten */
+    padding: 16px;         /* Padding seragam */
     position: relative;
     border: 1px solid rgba(166, 184, 208, 0.62);
     border-radius: 6px;
     background: #edf8f8;
     box-shadow: 0 3px 10px rgba(25, 62, 84, 0.06);
     transition: transform 0.22s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+    height: 100%; /* Memastikan card mengisi tinggi kolom Bootstrap */
 }
 
 .stat-card:hover { transform: translateY(-1px); box-shadow: 0 7px 18px rgba(31, 41, 55, 0.09); }
@@ -398,9 +399,34 @@ button, input, select { font: inherit; }
 .stats-row > div:nth-child(3) .stat-card { background: #fff0d2; }
 .stats-row > div:nth-child(4) .stat-card { background: #f9e4ea; }
 
-.stat-card span { display: block; color: var(--muted); font-size: 0.68rem; font-weight: 600; }
-.stat-card strong { display: block; margin: 6px 0 2px; font-size: clamp(1.3rem, 1.6vw, 1.85rem); letter-spacing: -0.04em; line-height: 1.1; }
-.stat-card small { color: #7a8a9e; font-size: 0.64rem; }
+/* Pembungkus Teks di Dalam Card */
+.stat-card .w-100 {
+    width: 100%;
+    min-width: 0; /* Mencegah flex item membesar melebihi container */
+}
+
+/* Aturan Teks di Dalam Card */
+.stat-card span {
+    display: block;
+    color: var(--muted);
+    font-size: 0.68rem;
+    font-weight: 600;
+    margin-bottom: 2px; /* Jarak ke angka */
+}
+
+.stat-card strong {
+    display: block;
+    margin: 4px 0; /* Jarak atas dan bawah angka */
+    font-size: clamp(1.3rem, 1.6vw, 1.85rem);
+    letter-spacing: -0.04em;
+    line-height: 1.1;
+}
+
+.stat-card small {
+    display: block;
+    color: #7a8a9e;
+    font-size: 0.64rem;
+}
 
 /* ============================================================
    PANEL BASE
@@ -1063,7 +1089,7 @@ button, input, select { font: inherit; }
 @media (max-width: 575.98px) {
     .main-panel { padding: 16px 12px 24px; }
     .topbar h1 { font-size: 1.35rem; }
-    .stat-card { padding: 14px 12px; min-height: 94px; }
+    .stat-card { padding: 14px 12px; /* min-height: 94px; */ } /* min-height dihapus agar fleksibel */
     .stat-icon { width: 42px; height: 42px; font-size: 1.05rem; }
     .panel-header { flex-direction: column; align-items: flex-start; gap: 10px; }
     .form-select { width: 100%; }
@@ -1165,7 +1191,7 @@ html.dark .sidebar-toggle-btn:hover, html.dark .icon-btn:hover, html.dark .user-
 html.dark .user-pill strong { color: #ffffff; }
 html.dark .user-pill span { color: #94a3b8; }
 
-/* Dark Panels */
+/* Dark Panels & Stat Cards */
 html.dark .panel, html.dark .stat-card {
     background: #111e3b;
     border-color: #20345b;
@@ -1186,6 +1212,18 @@ html.dark .stats-row > div:nth-child(4) .stat-icon { background: #432545; color:
 html.dark .panel-header { background: #152746; border-top-color: #2864df; border-bottom: 1px solid #20345b; }
 html.dark .panel-header h3, html.dark .panel-header h4, html.dark .stat-card strong { color: #f8fafc; }
 html.dark .panel-header p, html.dark .stat-card span, html.dark .stat-card small { color: #94a3b8; }
+
+/* Dark Stat Cards Text */
+html.dark .stat-card span,
+html.dark .stat-card small {
+    color: #94a3b8 !important;
+}
+html.dark .stat-card strong {
+    color: #f8fafc !important;
+}
+html.dark .stat-card .text-success {
+    color: #4ade80 !important;
+}
 
 html.dark .flow-summary { background: #0d1932; border-color: #20345b; border-left-color: #22b8a7; }
 html.dark .flow-summary.people-flow { border-left-color: var(--warning); }
