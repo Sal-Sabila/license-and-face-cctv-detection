@@ -5,14 +5,17 @@ import time
 # ============================================================
 # Setiap entri: ((x1, y1), (x2, y2)) - dua titik ujung garis.
 #
-# Diturunkan dari sisi ATAS polygon "mid" di CAMERA_ZONE_CONFIG
-# (stream_ai_service.py) supaya konsisten dengan zona yang sudah
-# dikalibrasi per kamera, tanpa perlu kalibrasi ulang.
+# Diturunkan dari sisi ATAS polygon "mid" di tabel camera_zones
+# (kolom mid_zone, titik 1 -> titik 2). Garis crossing = sisi atas
+# zona MID, sehingga kendaraan dianggap crossing saat pertama kali
+# masuk zona MID.
 CAMERA_LINE_CONFIG = {
-    1: ((0.10, 0.38), (0.90, 0.38)),   # GSMasukViewDalam
-    2: ((0.10, 0.39), (0.90, 0.39)),   # GSMasukViewLuar
-    3: ((0.08, 0.37), (0.92, 0.37)),   # GSKeluarViewLuar
-    4: ((0.10, 0.37), (0.92, 0.37)),   # GSKeluarViewDalam
+    1: ((0.127, 0.159), (0.755, 0.128)),   # GSMasukViewDalam
+    2: ((0.100, 0.350), (0.900, 0.350)),   # GSMasukViewLuar (default)
+    3: ((0.285, 0.239), (0.768, 0.190)),   # GSKeluarViewLuar
+    4: ((0.100, 0.370), (0.920, 0.370)),   # GSKeluarViewDalam (default)
+    6: ((0.006, 0.320), (0.998, 0.274)),   # FM Noto McDonalds
+    7: ((0.004, 0.437), (0.995, 0.193)),   # GT Dalam
 }
 
 DEFAULT_LINE = ((0.02, 0.40), (0.98, 0.40))
