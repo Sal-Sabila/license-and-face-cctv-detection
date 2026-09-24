@@ -12,8 +12,7 @@
         (function() {
             try {
                 var savedTheme = localStorage.getItem('platevision_theme') || localStorage.getItem('theme');
-                var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-                if (savedTheme === 'dark' || (!savedTheme && prefersDark)) {
+                if (savedTheme !== 'light') {
                     document.documentElement.classList.add('dark');
                     document.documentElement.setAttribute('data-bs-theme', 'dark');
                 } else {
@@ -202,10 +201,10 @@
                         aria-label="Ganti Mode Gelap / Terang" title="Ganti Mode Gelap / Terang">
                         <i id="themeToggleIcon" class="bi bi-moon-stars-fill"></i>
                     </button>
-                    <div class="user-pill">
+                    <a class="user-pill" href="{{ url_for('settings_page.settings') }}" title="Buka Profil">
                         <div id="topbarAvatar" class="avatar">A</div>
                         <div><strong id="topbarName">Administrator</strong><span id="topbarRole">Operator</span></div>
-                    </div>
+                    </a>
                 </div>
             </div>
 

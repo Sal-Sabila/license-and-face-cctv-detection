@@ -1792,8 +1792,6 @@ function initSettings() {
     const form = document.getElementById('settingsForm');
     if (!form) return;
 
-    loadSettingsFromDb();
-
     form.addEventListener('submit', async event => {
         event.preventDefault();
         const msgEl = document.getElementById('settingsMessage');
@@ -1978,8 +1976,7 @@ function initTheme() {
     } catch (e) {}
 
     if (!savedTheme) {
-        // Default light mode as existing look
-        savedTheme = 'light';
+        savedTheme = 'dark';
     }
 
     updateThemeUI(savedTheme);
@@ -2000,6 +1997,7 @@ window.initTheme = initTheme;
 document.addEventListener('DOMContentLoaded', () => {
     initTheme();
     initSidebarToggle();
+    loadSettingsFromDb();
     setInterval(updateClock, 1000);
     updateClock();
 
