@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import cv2
 import pymysql
 import pymysql.cursors
@@ -7,7 +8,7 @@ from datetime import datetime, timedelta
 import random
 import json
 
-# pHash optional — kalau tidak terinstall, dedup visual dilewati
+# pHash optional
 try:
     import imagehash
     from PIL import Image
@@ -18,7 +19,7 @@ except ImportError:
     print("[DB WARNING] Install dengan: pip install imagehash Pillow")
 
 # ============================================================
-# KONFIGURASI DATABASE (LARAGON MYSQL)
+# KONFIGURASI DATABASE
 # ============================================================
 
 DB_CONFIG = {
@@ -32,7 +33,6 @@ DB_CONFIG = {
     "autocommit": True
 }
 
-# Direktori penyimpanan capture lokal
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CAPTURE_DIR = os.path.join(BASE_DIR, "static", "captures")
 PLATE_DIR = os.path.join(CAPTURE_DIR, "plates")
@@ -45,29 +45,33 @@ os.makedirs(VEHICLE_DIR, exist_ok=True)
 
 
 def get_db():
-    """Mendapatkan koneksi aktif ke database MySQL."""
     return pymysql.connect(**DB_CONFIG)
 
 
 # ============================================================
-# KONFIGURASI DEDUP VISUAL (pHASH)
+# KONFIGURASI DEDUP
 # ============================================================
 
-# Window waktu cek duplikat visual (detik).
-HASH_WINDOW_SECONDS = 300
+# Window untuk cek duplikat di DB (30 menit).
+HASH_WINDOW_SECONDS = 1800
 
-# Hamming distance maksimum supaya 2 hash dianggap sama.
-# 0 = identik, 8 = rekomendasi, >12 = terlalu longgar.
-HASH_MAX_DISTANCE = 8
+# Hamming distance maksimum pHash (dari 4 -> 6, sedikit lebih toleran
+# untuk crop kecil / cahaya berubah).
+HASH_MAX_DISTANCE = 6
+
+# Window dedup untuk query web (30 menit, sebelumnya 5 menit).
+DEDUP_WINDOW_SECONDS = 1800
 
 
 def _compute_phash(crop_bgr):
-    """Hitung perceptual hash (pHash) dari crop BGR. Return hex string atau None."""
     if not HAS_PHASH:
         return None
     if crop_bgr is None or not hasattr(crop_bgr, "size") or crop_bgr.size == 0:
         return None
     try:
+        h, w = crop_bgr.shape[:2]
+        if w < 60 or h < 40:
+            return None
         img = cv2.resize(crop_bgr, (128, 128), interpolation=cv2.INTER_AREA)
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         pil = Image.fromarray(img_rgb)
@@ -78,7 +82,6 @@ def _compute_phash(crop_bgr):
 
 
 def _hash_distance(h1, h2):
-    """Hamming distance antara dua hex hash. None kalau invalid."""
     if not h1 or not h2 or not HAS_PHASH:
         return None
     try:
@@ -88,11 +91,7 @@ def _hash_distance(h1, h2):
 
 
 def _find_visual_duplicate(cur, camera_id, phash, object_type, window_seconds=None):
-    """
-    Cari detection_id yang punya hash mirip dalam jendela waktu, dengan
-    object_type yang sama (kendaraan vs orang tidak dicampur).
-    Return (detection_id, distance) atau None.
-    """
+    """Cari detection_id yang punya hash mirip dalam window."""
     if not phash or not HAS_PHASH:
         return None
 
@@ -117,8 +116,29 @@ def _find_visual_duplicate(cur, camera_id, phash, object_type, window_seconds=No
     return None
 
 
+def _find_plate_duplicate_db(cur, camera_id, plate_number, window_seconds=None):
+    """Cari detection_id dengan plat nomor sama di kamera sama dalam window."""
+    if not plate_number:
+        return None
+    window = int(window_seconds or HASH_WINDOW_SECONDS)
+    try:
+        cur.execute("""
+            SELECT fd.detection_id, p.plate_id, p.plate_number, fd.created_at
+            FROM full_detection fd
+            JOIN plate p ON p.plate_id = fd.plate_id
+            WHERE fd.camera_id = %s
+              AND p.plate_number = %s
+              AND fd.created_at >= DATE_SUB(NOW(), INTERVAL %s SECOND)
+            ORDER BY fd.created_at DESC
+            LIMIT 1
+        """, (camera_id, plate_number, window))
+        return cur.fetchone()
+    except Exception as exc:
+        print(f"[DEDUP PLAT DB ERROR] {exc}")
+        return None
+
+
 def ensure_event_schema():
-    """Add event fields to the active legacy schema without deleting old data."""
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
@@ -179,7 +199,6 @@ def ensure_event_schema():
 
 
 def get_camera_direction(camera_id: int) -> str:
-    """Return configured camera direction, with legacy name fallback."""
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
@@ -197,10 +216,6 @@ def get_camera_direction(camera_id: int) -> str:
         pass
     return "unknown"
 
-
-# ============================================================
-# LOGIKA KLASIFIKASI DETECTION STATUS (0, 1, 2)
-# ============================================================
 
 PLATE_REGEX = re.compile(r"^[A-Z]{1,2}\s?[0-9]{1,4}\s?[A-Z]{1,3}$")
 
@@ -234,10 +249,6 @@ def normalize_plate_number(text: str) -> str:
     return re.sub(r"\s+", " ", str(text).strip().upper())
 
 
-# ============================================================
-# HELPER PENYIMPANAN FOTO CAPTURE LOKAL
-# ============================================================
-
 def save_crop_locally(image, folder_path, prefix="cap", camera_id=1, track_id=None) -> str:
     if image is None or image.size == 0:
         return None
@@ -257,10 +268,6 @@ def save_crop_locally(image, folder_path, prefix="cap", camera_id=1, track_id=No
     rel_path = os.path.relpath(abs_path, BASE_DIR).replace("\\", "/")
     return rel_path
 
-
-# ============================================================
-# FUNGSI MANAJEMEN KAMERA
-# ============================================================
 
 def get_all_cameras():
     with get_db() as conn:
@@ -293,16 +300,11 @@ def add_camera(location: str, stream_url: str, stream_type: int = 1, status: int
 
 
 def update_camera(camera_id: int, location: str = None, stream_url: str = None, status: int = None, direction: str = None):
-    fields = []
-    params = []
-    if location is not None:
-        fields.append("location = %s"); params.append(location)
-    if stream_url is not None:
-        fields.append("stream_url = %s"); params.append(stream_url)
-    if status is not None:
-        fields.append("status = %s"); params.append(status)
-    if direction in ("entry", "exit", "unknown"):
-        fields.append("direction = %s"); params.append(direction)
+    fields = []; params = []
+    if location is not None: fields.append("location = %s"); params.append(location)
+    if stream_url is not None: fields.append("stream_url = %s"); params.append(stream_url)
+    if status is not None: fields.append("status = %s"); params.append(status)
+    if direction in ("entry", "exit", "unknown"): fields.append("direction = %s"); params.append(direction)
     if not fields:
         return False
     params.append(camera_id)
@@ -382,7 +384,7 @@ def delete_plate(plate_id: int) -> bool:
 
 
 # ============================================================
-# FUNGSI INSERT DETEKSI (PRODUCER / AI WORKER)
+# FUNGSI INSERT DETEKSI — DENGAN 3 LAPIS DEDUP
 # ============================================================
 
 def save_detection_event(
@@ -405,11 +407,13 @@ def save_detection_event(
     vehicle_crop=None
 ) -> dict:
     """
-    Simpan satu event deteksi.
+    Simpan satu event deteksi dengan 3 lapis anti-duplikat:
 
-    Ditambahkan: DEDUP VISUAL (pHash). Sebelum INSERT event baru, hitung
-    hash crop kendaraan/orang. Kalau ada crop mirip dalam 5 menit terakhir
-    di kamera yang sama, event baru DIBATALKAN (dianggap duplikat).
+      Lapis 1: event_key (track_id + generation) — di stream_ai
+      Lapis 2: plat nomor sama dalam HASH_WINDOW_SECONDS (30 menit)
+      Lapis 3: pHash crop mirip dalam HASH_WINDOW_SECONDS (30 menit)
+
+    Kalau salah satu lapis mendeteksi duplikat, event baru TIDAK di-INSERT.
     """
     object_type = object_type if object_type in ("vehicle", "person") else "vehicle"
     vehicle_type = (
@@ -476,7 +480,6 @@ def save_detection_event(
                 existing_vehicle_path = existing.get("vehicle_image_path")
                 existing_face_path = existing.get("face_image_path")
 
-                # ---------- EVENT VEHICLE ----------
                 if object_type == "vehicle":
                     if vehicle_crop is not None and not existing_vehicle_path:
                         vehicle_rel_path = save_crop_locally(
@@ -582,7 +585,6 @@ def save_detection_event(
                         "has_driver": bool(has_driver or existing.get("has_driver"))
                     }
 
-                # ---------- EVENT PERSON ----------
                 if object_type == "person":
                     if face_crop is not None and not existing_face_path:
                         face_rel_path = save_crop_locally(
@@ -616,36 +618,58 @@ def save_detection_event(
                     }
 
             # ======================================================
-            # 3. EVENT BARU — SEBELUM INSERT, CEK DEDUP VISUAL (pHASH)
+            # 3. EVENT BARU — DEDUP LAPIS 2: PLAT NOMOR SAMA DI DB
+            # ======================================================
+            if object_type == "vehicle" and normalized_plate:
+                plate_dup = _find_plate_duplicate_db(cur, camera_id, normalized_plate)
+                if plate_dup is not None:
+                    dup_id = plate_dup["detection_id"]
+                    print(f"[DEDUP PLAT DB] Skip: plat {normalized_plate} sudah ada "
+                          f"di detection_id={dup_id} (dalam 30 menit)")
+                    return {
+                        "plate_id": plate_dup.get("plate_id"),
+                        "detection_id": dup_id,
+                        "duplicate": True, "enriched": False,
+                        "reason": "plate_duplicate_db",
+                        "plate_number": normalized_plate,
+                        "object_type": "vehicle", "vehicle_type": vehicle_type,
+                        "has_plate": True, "has_driver": False,
+                        "plate_image_path": None, "face_image_path": None,
+                        "vehicle_image_path": None,
+                    }
+
+            # ======================================================
+            # 4. EVENT BARU — DEDUP LAPIS 3: pHASH VISUAL MIRIP
+            # ======================================================
+            vehicle_hash = _compute_phash(vehicle_crop) if object_type == "vehicle" and vehicle_crop is not None else None
+            face_hash = _compute_phash(face_crop) if object_type == "person" and face_crop is not None else None
+            candidate_hash = vehicle_hash or face_hash
+
+            if candidate_hash:
+                dup = _find_visual_duplicate(cur, camera_id, candidate_hash, object_type)
+                if dup is not None:
+                    dup_id, distance = dup
+                    print(f"[DEDUP VISUAL DB] Skip: mirip detection_id={dup_id} "
+                          f"(distance={distance}, type={object_type})")
+                    return {
+                        "plate_id": None, "detection_id": dup_id,
+                        "duplicate": True, "enriched": False,
+                        "reason": "visual_duplicate_db", "distance": distance,
+                        "plate_image_path": None, "face_image_path": None,
+                        "vehicle_image_path": None,
+                        "plate_number": normalized_plate or None,
+                        "object_type": object_type, "vehicle_type": vehicle_type,
+                        "has_plate": bool(normalized_plate), "has_driver": False
+                    }
+
+            # ======================================================
+            # 5. LANJUT INSERT — tidak ada duplikat
             # ======================================================
             plate_id = None
             plate_rel_path = None
             face_rel_path = None
             vehicle_rel_path = None
 
-            # Hitung hash crop
-            vehicle_hash = _compute_phash(vehicle_crop) if object_type == "vehicle" and vehicle_crop is not None else None
-            face_hash = _compute_phash(face_crop) if object_type == "person" and face_crop is not None else None
-            candidate_hash = vehicle_hash or face_hash
-
-            # Cek duplikat visual
-            if candidate_hash:
-                dup = _find_visual_duplicate(cur, camera_id, candidate_hash, object_type)
-                if dup is not None:
-                    dup_id, distance = dup
-                    print(f"[DEDUP VISUAL] Skip event baru: mirip detection_id={dup_id} "
-                          f"(distance={distance}, type={object_type})")
-                    return {
-                        "plate_id": None, "detection_id": dup_id,
-                        "duplicate": True, "enriched": False,
-                        "reason": "visual_duplicate", "distance": distance,
-                        "plate_image_path": None, "face_image_path": None,
-                        "vehicle_image_path": None, "plate_number": normalized_plate or None,
-                        "object_type": object_type, "vehicle_type": vehicle_type,
-                        "has_plate": bool(normalized_plate), "has_driver": False
-                    }
-
-            # Lanjut simpan crop
             if object_type == "vehicle" and vehicle_crop is not None:
                 vehicle_rel_path = save_crop_locally(
                     vehicle_crop, VEHICLE_DIR,
@@ -749,19 +773,27 @@ def save_detection_event(
 
 
 # ============================================================
-# FUNGSI QUERY WEB & DASHBOARD
+# FUNGSI QUERY WEB & DASHBOARD — DEDUP DIPERBAIKI
 # ============================================================
 
-DEDUP_WINDOW_SECONDS = 300   # 5 menit
-
-
 def _dedup_event_ids(cur, where_sql, params):
-    """Kembalikan list detection_id yang sudah di-dedup (urut terbaru)."""
+    """
+    Kembalikan list detection_id yang sudah di-dedup (urut terbaru).
+
+    Kunci dedup:
+      - Kalau ada plat nomor -> (camera_id, plate_number, bucket_waktu)
+      - Kalau tanpa plat     -> (camera_id, vehicle_hash/face_hash, bucket_waktu)
+      - Fallback             -> (camera_id, track_id, bucket_waktu)
+
+    Ini memperbaiki masalah sebelumnya di mana dedup jatuh ke track_id
+    yang berubah-ubah.
+    """
     sql = f"""
         SELECT
             fd.detection_id, fd.camera_id, fd.track_id, fd.object_type,
-            COALESCE(NULLIF(p.plate_number, ''), CONCAT('track:', fd.track_id)) AS dedup_key_plate,
-            fd.created_at, fd.detection_confidence
+            fd.vehicle_hash, fd.face_hash,
+            fd.created_at, fd.detection_confidence,
+            p.plate_number
         FROM full_detection fd
         LEFT JOIN plate p ON p.plate_id = fd.plate_id
         LEFT JOIN cameras c ON c.camera_id = fd.camera_id
@@ -772,16 +804,27 @@ def _dedup_event_ids(cur, where_sql, params):
     rows = cur.fetchall()
     buckets = {}
     for r in rows:
-        plate_key = r.get("dedup_key_plate") or f"none:{r['detection_id']}"
         cam = r.get("camera_id")
+        # Prioritas kunci dedup: plat -> hash -> track
+        if r.get("plate_number"):
+            dedup_key = f"plate:{r['plate_number']}"
+        elif r.get("object_type") == "vehicle" and r.get("vehicle_hash"):
+            dedup_key = f"vhash:{r['vehicle_hash']}"
+        elif r.get("object_type") == "person" and r.get("face_hash"):
+            dedup_key = f"fhash:{r['face_hash']}"
+        else:
+            dedup_key = f"track:{r['track_id']}"
+
         ts = r.get("created_at")
         epoch = int(ts.timestamp()) if isinstance(ts, datetime) else 0
         bucket = epoch // DEDUP_WINDOW_SECONDS if epoch else 0
-        key = (cam, plate_key, bucket)
+        key = (cam, dedup_key, bucket)
+
         conf = float(r.get("detection_confidence") or 0.0)
         best = buckets.get(key)
         if best is None or conf > best["conf"]:
             buckets[key] = {"detection_id": r["detection_id"], "conf": conf, "created_at": ts}
+
     selected = sorted(buckets.values(), key=lambda x: (x["created_at"] or datetime.min), reverse=True)
     return [row["detection_id"] for row in selected]
 
@@ -816,21 +859,15 @@ def _dedup_plate_ids(cur, where_sql, params):
 
 
 def get_recent_detections(limit: int = 50):
-    """
-    Deteksi terbaru dengan DEDUP — tidak tampil duplikat.
-    """
     limit = max(1, min(int(limit), 200))
-
     with get_db() as conn:
         with conn.cursor() as cur:
             where_sql = "1=1"
             params = []
             all_ids = _dedup_event_ids(cur, where_sql, params)
             selected = all_ids[:limit]
-
             if not selected:
                 return []
-
             placeholders = ",".join(["%s"] * len(selected))
             query = f"""
                 SELECT
@@ -893,18 +930,13 @@ def _analytics_filters(args=None):
     elif period not in ("today", "7d", "30d", "all"):
         period = "custom"
 
-    clauses = ["1=1"]
-    params = []
-    if start_date:
-        clauses.append("DATE(fd.created_at) >= %s"); params.append(str(start_date))
-    if end_date:
-        clauses.append("DATE(fd.created_at) <= %s"); params.append(str(end_date))
+    clauses = ["1=1"]; params = []
+    if start_date: clauses.append("DATE(fd.created_at) >= %s"); params.append(str(start_date))
+    if end_date: clauses.append("DATE(fd.created_at) <= %s"); params.append(str(end_date))
     if str(args.get("camera_id") or "").isdigit():
         clauses.append("fd.camera_id = %s"); params.append(int(args["camera_id"]))
-    if args.get("region"):
-        clauses.append("c.location LIKE %s"); params.append(f"%{str(args['region']).strip()}%")
-    if args.get("gate"):
-        clauses.append("c.location LIKE %s"); params.append(f"%{str(args['gate']).strip()}%")
+    if args.get("region"): clauses.append("c.location LIKE %s"); params.append(f"%{str(args['region']).strip()}%")
+    if args.get("gate"): clauses.append("c.location LIKE %s"); params.append(f"%{str(args['gate']).strip()}%")
     if args.get("direction") in ("entry", "exit"):
         clauses.append("COALESCE(fd.direction, 'unknown') = %s"); params.append(args["direction"])
     if args.get("object_type") == "vehicle":
@@ -915,17 +947,37 @@ def _analytics_filters(args=None):
 
 
 def _get_dedup_subquery(where_sql):
-    """Subquery dedup dipakai oleh get_analytics & get_enterprise_statistics."""
+    """
+    Subquery dedup berbasis plat -> hash -> track (fallback).
+    Konsisten dengan _dedup_event_ids.
+    """
     return f"""
         SELECT
             fd.detection_id, fd.camera_id, fd.object_type, fd.has_plate,
             fd.plate_id, fd.detection_confidence, fd.created_at, fd.track_id,
             fd.direction, fd.detection_status,
-            COALESCE(NULLIF(p.plate_number, ''), CONCAT('track:', fd.track_id)) AS dedup_key,
+            fd.vehicle_hash, fd.face_hash,
+            CASE
+                WHEN p.plate_number IS NOT NULL AND p.plate_number != ''
+                    THEN CONCAT('plate:', p.plate_number)
+                WHEN fd.object_type = 'vehicle' AND fd.vehicle_hash IS NOT NULL
+                    THEN CONCAT('vhash:', fd.vehicle_hash)
+                WHEN fd.object_type = 'person' AND fd.face_hash IS NOT NULL
+                    THEN CONCAT('fhash:', fd.face_hash)
+                ELSE CONCAT('track:', COALESCE(fd.track_id, 0))
+            END AS dedup_key,
             ROW_NUMBER() OVER (
                 PARTITION BY
                     fd.camera_id,
-                    COALESCE(NULLIF(p.plate_number, ''), CONCAT('track:', fd.track_id)),
+                    CASE
+                        WHEN p.plate_number IS NOT NULL AND p.plate_number != ''
+                            THEN CONCAT('plate:', p.plate_number)
+                        WHEN fd.object_type = 'vehicle' AND fd.vehicle_hash IS NOT NULL
+                            THEN CONCAT('vhash:', fd.vehicle_hash)
+                        WHEN fd.object_type = 'person' AND fd.face_hash IS NOT NULL
+                            THEN CONCAT('fhash:', fd.face_hash)
+                        ELSE CONCAT('track:', COALESCE(fd.track_id, 0))
+                    END,
                     FLOOR(UNIX_TIMESTAMP(fd.created_at) / {DEDUP_WINDOW_SECONDS})
                 ORDER BY fd.detection_confidence DESC, fd.detection_id DESC
             ) AS rn
@@ -1089,10 +1141,6 @@ def get_analytics(args=None):
                     "recent": recent, "insights": insights}
 
 
-# ============================================================
-# FUNGSI SYSTEM SETTINGS & DIAGNOSTIK
-# ============================================================
-
 def ensure_tables_exist():
     try:
         with get_db() as conn:
@@ -1179,10 +1227,6 @@ def get_system_diagnostics() -> dict:
         diag["error"] = str(e)
     return diag
 
-
-# ============================================================
-# FUNGSI QUERY PAGINASI DETEKSI & RIWAYAT PLAT
-# ============================================================
 
 def get_all_detections_paginated(
     page: int = 1, limit: int = 20, type_filter: str = "all",
@@ -1359,15 +1403,7 @@ def get_plate_history_paginated(
             return {"items": items, "total": total, "page": page, "limit": limit, "total_pages": total_pages}
 
 
-# ============================================================
-# FUNGSI STATISTIK STANDAR PERUSAHAAN — SUDAH DEDUP
-# ============================================================
-
 def get_enterprise_statistics(period: str = "today") -> dict:
-    """
-    Statistik perusahaan DENGAN DEDUP — memakai subquery ROW_NUMBER()
-    sehingga tidak ada frame duplikat yang ikut terhitung.
-    """
     period = period.lower() if period else "today"
     now = datetime.now()
 
@@ -1386,17 +1422,33 @@ def get_enterprise_statistics(period: str = "today") -> dict:
     else:
         cond_fd = "1=1"; cond_p = "1=1"; period_label = "Semua Waktu"
 
-    # Subquery dedup — pakai cara yang sama dengan get_analytics
     dedup_subquery = f"""
         SELECT
             fd.detection_id, fd.camera_id, fd.object_type, fd.has_plate,
             fd.plate_id, fd.detection_confidence, fd.created_at, fd.track_id,
             fd.direction, fd.detection_status,
-            COALESCE(NULLIF(p.plate_number, ''), CONCAT('track:', fd.track_id)) AS dedup_key,
+            fd.vehicle_hash, fd.face_hash,
+            CASE
+                WHEN p.plate_number IS NOT NULL AND p.plate_number != ''
+                    THEN CONCAT('plate:', p.plate_number)
+                WHEN fd.object_type = 'vehicle' AND fd.vehicle_hash IS NOT NULL
+                    THEN CONCAT('vhash:', fd.vehicle_hash)
+                WHEN fd.object_type = 'person' AND fd.face_hash IS NOT NULL
+                    THEN CONCAT('fhash:', fd.face_hash)
+                ELSE CONCAT('track:', COALESCE(fd.track_id, 0))
+            END AS dedup_key,
             ROW_NUMBER() OVER (
                 PARTITION BY
                     fd.camera_id,
-                    COALESCE(NULLIF(p.plate_number, ''), CONCAT('track:', fd.track_id)),
+                    CASE
+                        WHEN p.plate_number IS NOT NULL AND p.plate_number != ''
+                            THEN CONCAT('plate:', p.plate_number)
+                        WHEN fd.object_type = 'vehicle' AND fd.vehicle_hash IS NOT NULL
+                            THEN CONCAT('vhash:', fd.vehicle_hash)
+                        WHEN fd.object_type = 'person' AND fd.face_hash IS NOT NULL
+                            THEN CONCAT('fhash:', fd.face_hash)
+                        ELSE CONCAT('track:', COALESCE(fd.track_id, 0))
+                    END,
                     FLOOR(UNIX_TIMESTAMP(fd.created_at) / {DEDUP_WINDOW_SECONDS})
                 ORDER BY fd.detection_confidence DESC, fd.detection_id DESC
             ) AS rn
@@ -1407,7 +1459,6 @@ def get_enterprise_statistics(period: str = "today") -> dict:
 
     with get_db() as conn:
         with conn.cursor() as cur:
-            # KPI dengan dedup
             cur.execute(f"""
                 SELECT
                     COUNT(*) AS total_detections,
@@ -1583,10 +1634,6 @@ def get_enterprise_statistics(period: str = "today") -> dict:
             }
 
 
-# ============================================================
-# UTILITY: SEED DATA CONTOH (SIMULASI PERUSAHAAN)
-# ============================================================
-
 def seed_demo_data(count: int = 60) -> int:
     sample_plates = [
         "B 1982 UJ", "B 2341 SKO", "D 1089 AB", "B 8821 QW", "B 1204 PF",
@@ -1668,10 +1715,6 @@ def seed_demo_data(count: int = 60) -> int:
     return inserted
 
 
-# ============================================================
-# FUNGSI ZONA KAMERA (MID & NEAR)
-# ============================================================
-
 def get_camera_zone(camera_id):
     try:
         with get_db() as conn:
@@ -1724,4 +1767,4 @@ def get_all_camera_zones():
                          "near": json.loads(row["near_zone"])} for row in rows]
     except Exception as exc:
         print(f"[DB ZONE LIST ERROR] {exc}")
-        return []   
+        return []
