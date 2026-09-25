@@ -16,7 +16,6 @@ from ai.plate.detector import PlateDetector
 from ai.plate.ocr import PlateOCR
 from tracker import PlateTracker
 import db
-# NOTE: line_crossing tidak dipakai lagi. Arah ditentukan per-kamera.
 
 
 # ============================================================
@@ -61,75 +60,65 @@ os.makedirs(PLATE_CAPTURE_DIR, exist_ok=True)
 # ============================================================
 
 VEHICLE_CLASSES = [0, 2, 3, 5, 7]
-VEHICLE_CONFIDENCE = 0.35
-VEHICLE_IMGSZ = 416
+VEHICLE_CONFIDENCE = 0.45
+VEHICLE_IMGSZ = 480
 
 # ============================================================
 # DISTANCE / DETECTION ZONES
 # ============================================================
 ENABLE_DISTANCE_ZONE = True
 
+ZONE_OVERLAP_FALLBACK_RATIO = 0.45
+
 DEFAULT_MID_ZONE = [
-    (0.20, 0.35),
-    (0.80, 0.35),
-    (0.98, 1.00),
-    (0.02, 1.00),
+    (0.05, 0.10),
+    (0.95, 0.10),
+    (0.99, 1.00),
+    (0.01, 1.00),
 ]
 
 DEFAULT_NEAR_ZONE = [
-    (0.18, 0.38),
-    (0.82, 0.38),
-    (0.98, 1.00),
-    (0.02, 1.00),
+    (0.05, 0.20),
+    (0.95, 0.20),
+    (0.99, 1.00),
+    (0.01, 1.00),
 ]
 
+_ZONE_MID = [(0.05, 0.10), (0.95, 0.10), (0.99, 1.00), (0.01, 1.00)]
+_ZONE_NEAR = [(0.05, 0.20), (0.95, 0.20), (0.99, 1.00), (0.01, 1.00)]
+
 CAMERA_ZONE_CONFIG = {
-    1: {
-        "name": "GSMasukViewDalam",
-        "mid": [(0.10, 0.35), (0.90, 0.35), (0.99, 1.00), (0.01, 1.00)],
-        "near": [(0.10, 0.38), (0.90, 0.38), (0.99, 1.00), (0.01, 1.00)],
-    },
-    2: {
-        "name": "GSMasukViewLuar",
-        "mid": [(0.10, 0.32), (0.90, 0.32), (0.99, 1.00), (0.01, 1.00)],
-        "near": [(0.10, 0.35), (0.90, 0.35), (0.99, 1.00), (0.01, 1.00)],
-    },
-    3: {
-        "name": "GSKeluarViewLuar",
-        "mid": [(0.08, 0.32), (0.92, 0.32), (0.99, 1.00), (0.01, 1.00)],
-        "near": [(0.10, 0.35), (0.90, 0.35), (0.99, 1.00), (0.01, 1.00)],
-    },
-    4: {
-        "name": "GSKeluarViewDalam",
-        "mid": [(0.10, 0.32), (0.92, 0.32), (0.99, 1.00), (0.03, 1.00)],
-        "near": [(0.10, 0.35), (0.92, 0.35), (0.99, 1.00), (0.03, 1.00)],
-    },
-    "GSMasukViewDalam": {
-        "mid": [(0.10, 0.35), (0.90, 0.35), (0.99, 1.00), (0.01, 1.00)],
-        "near": [(0.10, 0.38), (0.90, 0.38), (0.99, 1.00), (0.01, 1.00)],
-    },
-    "GSMasukViewLuar": {
-        "mid": [(0.10, 0.32), (0.90, 0.32), (0.99, 1.00), (0.01, 1.00)],
-        "near": [(0.10, 0.35), (0.90, 0.35), (0.99, 1.00), (0.01, 1.00)],
-    },
-    "GSKeluarViewLuar": {
-        "mid": [(0.08, 0.32), (0.92, 0.32), (0.99, 1.00), (0.01, 1.00)],
-        "near": [(0.10, 0.35), (0.90, 0.35), (0.99, 1.00), (0.01, 1.00)],
-    },
-    "GSKeluarViewDalam": {
-        "mid": [(0.10, 0.32), (0.92, 0.32), (0.99, 1.00), (0.03, 1.00)],
-        "near": [(0.10, 0.35), (0.92, 0.35), (0.99, 1.00), (0.03, 1.00)],
-    },
+    1: {"name": "GSMasukViewLuar", "mid": _ZONE_MID, "near": _ZONE_NEAR},
+    2: {"name": "GSMasukViewDalam", "mid": _ZONE_MID, "near": _ZONE_NEAR},
+    3: {"name": "GSKeluarViewLuar", "mid": _ZONE_MID, "near": _ZONE_NEAR},
+    4: {"name": "GSKeluarViewDalam", "mid": _ZONE_MID, "near": _ZONE_NEAR},
+    "GSMasukViewLuar": {"mid": _ZONE_MID, "near": _ZONE_NEAR},
+    "GSMasukViewDalam": {"mid": _ZONE_MID, "near": _ZONE_NEAR},
+    "GSKeluarViewLuar": {"mid": _ZONE_MID, "near": _ZONE_NEAR},
+    "GSKeluarViewDalam": {"mid": _ZONE_MID, "near": _ZONE_NEAR},
 }
 
 _runtime_zone_override = {}
 
 
+def _normalize_camera_id(camera_id):
+    if isinstance(camera_id, int):
+        return camera_id
+    if isinstance(camera_id, str):
+        stripped = camera_id.strip()
+        if stripped.isdigit():
+            return int(stripped)
+        for key, cfg in CAMERA_ZONE_CONFIG.items():
+            if isinstance(cfg, dict) and cfg.get("name") == stripped:
+                for k2, c2 in CAMERA_ZONE_CONFIG.items():
+                    if isinstance(k2, int) and isinstance(c2, dict) and c2.get("name") == stripped:
+                        return k2
+                break
+    return camera_id
+
+
 def reload_camera_zone(camera_id, mid, near):
-    try:
-        camera_id = int(camera_id)
-    except (TypeError, ValueError):
-        pass
+    camera_id = _normalize_camera_id(camera_id)
     _runtime_zone_override[camera_id] = {
         "mid": [(float(x), float(y)) for x, y in mid],
         "near": [(float(x), float(y)) for x, y in near],
@@ -138,12 +127,8 @@ def reload_camera_zone(camera_id, mid, near):
 
 
 def get_default_zone(camera_id):
+    camera_id = _normalize_camera_id(camera_id)
     config = CAMERA_ZONE_CONFIG.get(camera_id, {})
-    if not config and isinstance(camera_id, str):
-        try:
-            config = CAMERA_ZONE_CONFIG.get(int(camera_id.strip()), {})
-        except (TypeError, ValueError):
-            pass
     return (
         config.get("mid", DEFAULT_MID_ZONE),
         config.get("near", DEFAULT_NEAR_ZONE),
@@ -164,17 +149,25 @@ def load_all_zones_from_db():
         print(f"[ZONES] Gagal memuat zona dari DB: {exc}")
 
 
-MIN_PERSON_WIDTH = 30
-MIN_PERSON_HEIGHT = 70
-MIN_VEHICLE_WIDTH = 120
-MIN_VEHICLE_HEIGHT = 60
+# ============================================================
+# THRESHOLD DETEKSI
+# ============================================================
+MIN_PERSON_WIDTH = 15
+MIN_PERSON_HEIGHT = 35
+MIN_VEHICLE_WIDTH = 30
+MIN_VEHICLE_HEIGHT = 20
 
-PLATE_VEHICLE_MIN_WIDTH = 100
-PLATE_VEHICLE_MIN_HEIGHT = 50
+PLATE_VEHICLE_MIN_WIDTH = 30
+PLATE_VEHICLE_MIN_HEIGHT = 20
 
-BASE_AI_INTERVAL = 0.40
-MIN_AI_INTERVAL = 0.30
-MAX_AI_INTERVAL = 0.60
+FAKE_VEHICLE_ASPECT_MIN = 0.9
+
+# ============================================================
+# AI INTERVAL
+# ============================================================
+BASE_AI_INTERVAL = 0.60
+MIN_AI_INTERVAL = 0.40
+MAX_AI_INTERVAL = 1.20
 TARGET_CPU = 75.0
 HIGH_CPU = 85.0
 LOW_CPU = 55.0
@@ -187,51 +180,63 @@ VEHICLE_TYPES = {
     7: "truck",
 }
 
-PLATE_CONFIDENCE = 0.55
+# ============================================================
+# PLATE DETECTION
+# ============================================================
+PLATE_CONFIDENCE = 0.25
 PLATE_IMGSZ = 512
-PLATE_MAX_DET = 3
+PLATE_MAX_DET = 5
 PLATE_IOU = 0.45
-PLATE_MIN_WIDTH = 35
-PLATE_MIN_HEIGHT = 10
+PLATE_MIN_WIDTH = 12
+PLATE_MIN_HEIGHT = 4
 
-OCR_MIN_PLATE_WIDTH = 55
-OCR_MIN_PLATE_HEIGHT = 15
-OCR_MIN_PLATE_CONFIDENCE = 0.60
+OCR_MIN_PLATE_WIDTH = 18
+OCR_MIN_PLATE_HEIGHT = 5
+OCR_MIN_PLATE_CONFIDENCE = 0.25
 
-MAX_PLATE_ROI = 1
+MAX_PLATE_ROI = 3
 
 PLATE_DETECT_INTERVAL = 0.60
 OCR_INTERVAL = 0.80
 
-PLATE_TRACKER_IOU = 0.40
-PLATE_TRACKER_FRAME_GAP = 30
-PLATE_TRACKER_OCR_EVERY = 3
-PLATE_TRACKER_MIN_CONFIDENCE = 0.42
+PLATE_TRACKER_IOU = 0.35
+PLATE_TRACKER_FRAME_GAP = 40
+PLATE_TRACKER_OCR_EVERY = 2
+PLATE_TRACKER_MIN_CONFIDENCE = 0.35
 PLATE_TRACKER_MAX_HISTORY = 5
 PLATE_PADDING = 0.08
 
 # ============================================================
-# ANTI-DUPLIKAT TUNING - MIDDLE GROUND
+# ANTI-DUPLIKAT
 # ============================================================
-PLATE_REVIEW_CONFIDENCE = 0.60
-PLATE_COOLDOWN = 120.0        # dari 60.0 -> 120.0 (2 menit)
-PERSON_COOLDOWN = 120.0       # dari 60.0 -> 120.0 (2 menit)
+PLATE_REVIEW_CONFIDENCE = 0.50
+PLATE_COOLDOWN = 45.0
+PERSON_COOLDOWN = 45.0
 
-# Kalau track_id yang sama muncul lagi dalam < TRACK_REUSE_GAP detik,
-# dianggap generasi yang sama -> tidak bikin event baru.
-TRACK_REUSE_GAP = 10.0        # dari 5.0 -> 10.0
+TRACK_REUSE_GAP = 15.0
 
-# ByteTrack: umur track sedang, tidak terlalu pendek, tidak terlalu panjang.
-TRACKER_LOST_BUFFER = 120     # dari 150 -> 120 (~5 detik @ 25fps)
-TRACKER_MATCH_THRESHOLD = 0.80      # dari 0.85 -> 0.80
-TRACKER_ACTIVATION_THRESHOLD = 0.30 # dari 0.25 -> 0.30
+TRACKER_LOST_BUFFER = 150
+TRACKER_MATCH_THRESHOLD = 0.75
+TRACKER_ACTIVATION_THRESHOLD = 0.30
 
-# ------------------------------------------------------------
-# OPSI C: Cooldown per-track
-# ------------------------------------------------------------
-# Kalau track_id yang sama muncul lagi dalam < TRACK_EVENT_COOLDOWN detik
-# dianggap event YANG SAMA. Setelah cooldown, event baru dibuat.
-TRACK_EVENT_COOLDOWN = 1800.0  # dari 900.0 -> 1800.0 (30 menit)
+TRACK_EVENT_COOLDOWN = 600.0
+
+# ✅ FIX: Dedup visual
+VISUAL_DEDUP_COOLDOWN = 60.0
+VISUAL_HAMMING_THRESHOLD = 3
+
+PERSON_DEDUP_COOLDOWN = 120.0
+PERSON_HAMMING_THRESHOLD = 8
+PERSON_TRACK_DEDUP_COOLDOWN = 300.0
+
+# ✅ FIX BARU: Dedup berbasis centroid untuk kendaraan
+VEHICLE_CENTROID_DEDUP_DISTANCE = 150.0     # px — jarak maksimum centroid (mobil bergerak)
+VEHICLE_CENTROID_DEDUP_AREA_RATIO = 0.40    # toleransi ukuran bbox (0.4 = 40%)
+VEHICLE_CENTROID_DEDUP_COOLDOWN = 30.0      # detik
+VEHICLE_CENTROID_MAX_HISTORY = 20           # max entry per kamera
+
+# ✅ FIX #3: Dedup berbasis plat
+PLATE_TEXT_DEDUP_COOLDOWN = 120.0
 
 PERSON_CAPTURE_CONFIDENCE = 0.40
 MIN_PERSON_CROP_WIDTH = 25
@@ -247,7 +252,7 @@ LIGHT_DARK_THRESHOLD = 72.0
 LIGHT_OVER_THRESHOLD = 205.0
 LIGHT_GLARE_RATIO = 0.18
 
-DEBUG_PERFORMANCE = False
+DEBUG_PERFORMANCE = True
 
 
 # ============================================================
@@ -513,31 +518,46 @@ def _normalized_polygon_to_pixels(points, width, height):
 
 
 def _camera_zone_points(camera_id, zone_name):
+    camera_id = _normalize_camera_id(camera_id)
     override = _runtime_zone_override.get(camera_id)
     if override:
         if zone_name == "near":
             return override.get("near", DEFAULT_NEAR_ZONE)
         return override.get("mid", DEFAULT_MID_ZONE)
     config = CAMERA_ZONE_CONFIG.get(camera_id, {})
-    if not config and isinstance(camera_id, str):
-        stripped = camera_id.strip()
-        try:
-            config = CAMERA_ZONE_CONFIG.get(int(stripped), {})
-        except (TypeError, ValueError):
-            pass
     if zone_name == "near":
         return config.get("near", DEFAULT_NEAR_ZONE)
     return config.get("mid", DEFAULT_MID_ZONE)
 
 
 def _camera_zone_name(camera_id):
+    camera_id = _normalize_camera_id(camera_id)
     config = CAMERA_ZONE_CONFIG.get(camera_id, {})
-    if not config and isinstance(camera_id, str):
-        try:
-            config = CAMERA_ZONE_CONFIG.get(int(camera_id.strip()), {})
-        except (TypeError, ValueError):
-            pass
     return config.get("name", str(camera_id))
+
+
+def _bbox_polygon_overlap_ratio(box, polygon, width, height):
+    if polygon is None or len(polygon) < 3:
+        return 0.0
+    x1, y1, x2, y2 = [int(v) for v in box]
+    x1 = max(0, min(x1, width - 1))
+    y1 = max(0, min(y1, height - 1))
+    x2 = max(0, min(x2, width))
+    y2 = max(0, min(y2, height))
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+    bw = x2 - x1
+    bh = y2 - y1
+    mask = np.zeros((bh, bw), dtype=np.uint8)
+    shifted = polygon.copy()
+    shifted[:, 0] = shifted[:, 0] - x1
+    shifted[:, 1] = shifted[:, 1] - y1
+    cv2.fillPoly(mask, [shifted.reshape((-1, 1, 2))], 255)
+    inside = int(cv2.countNonZero(mask))
+    total = int(bw * bh)
+    if total <= 0:
+        return 0.0
+    return inside / float(total)
 
 
 def _point_in_zone(box, zone_points, width, height):
@@ -545,13 +565,19 @@ def _point_in_zone(box, zone_points, width, height):
         return True
     if not zone_points or len(zone_points) < 3:
         return True
-    point = _bottom_center(box)
     polygon = _normalized_polygon_to_pixels(zone_points, width, height)
-    return cv2.pointPolygonTest(
+    point = _bottom_center(box)
+    point_inside = cv2.pointPolygonTest(
         polygon.reshape((-1, 1, 2)),
         (float(point[0]), float(point[1])),
         False,
     ) >= 0
+    if point_inside:
+        return True
+    overlap = _bbox_polygon_overlap_ratio(box, polygon, width, height)
+    if overlap >= ZONE_OVERLAP_FALLBACK_RATIO:
+        return True
+    return False
 
 
 def _get_distance_zone(box, camera_id, width, height):
@@ -657,7 +683,7 @@ class StreamAIService:
             model_path=PLATE_MODEL_PATH, confidence=PLATE_CONFIDENCE,
             imgsz=PLATE_IMGSZ, device="cpu", max_det=PLATE_MAX_DET, iou=PLATE_IOU,
             min_width=PLATE_MIN_WIDTH, min_height=PLATE_MIN_HEIGHT,
-            min_aspect_ratio=1.5, max_aspect_ratio=7.0,
+            min_aspect_ratio=1.2, max_aspect_ratio=8.0,
         )
 
         try:
@@ -692,6 +718,12 @@ class StreamAIService:
         self.track_lifecycle = {}
         self.adaptive_ai = AdaptiveAIController()
 
+        # ✅ Cache untuk dedup
+        self._visual_hashes = {}
+        self._plate_text_cache = {}
+        # ✅ FIX BARU: Cache centroid untuk dedup kendaraan
+        self._vehicle_centroids = {}
+
         self.frame_queue = collections.deque(maxlen=2)
         self.frame_queue_lock = threading.Lock()
         self.ai_wakeup = threading.Event()
@@ -723,7 +755,6 @@ class StreamAIService:
         self.ocr_cache = {}
         self.saved_event_meta = {}
 
-        # OPSI C: peta track_id -> {event_key, last_ts}
         self._track_last_event = {}
 
         load_all_zones_from_db()
@@ -735,9 +766,9 @@ class StreamAIService:
         print("[AI STREAM] Plate ROI       : NEAR zone vehicle")
         print("[AI STREAM] PlateTracker    : multi-frame voting")
         print("[AI STREAM] Arah            : per-kamera (bukan line crossing)")
-        print(f"[AI STREAM] Anti-dup (mid)  : lost_buf={TRACKER_LOST_BUFFER}, "
-              f"match={TRACKER_MATCH_THRESHOLD}, reuse_gap={TRACK_REUSE_GAP}s, "
-              f"plate_cool={PLATE_COOLDOWN}s, track_event_cool={TRACK_EVENT_COOLDOWN}s")
+        print(f"[AI STREAM] Anti-dup        : centroid_dist={VEHICLE_CENTROID_DEDUP_DISTANCE}px, "
+              f"centroid_ratio={VEHICLE_CENTROID_DEDUP_AREA_RATIO}, "
+              f"centroid_cool={VEHICLE_CENTROID_DEDUP_COOLDOWN}s")
         print("[AI STREAM] OCR variants    : original/clahe/sharpen/threshold")
         print("=" * 75)
 
@@ -752,6 +783,7 @@ class StreamAIService:
         return status
 
     def _camera_state(self, camera_id):
+        camera_id = _normalize_camera_id(camera_id)
         state = self.camera_states.get(camera_id)
         if state is None:
             state = {
@@ -779,6 +811,7 @@ class StreamAIService:
         return state
 
     def _detect_vehicles(self, frame, camera_id=1):
+        camera_id = _normalize_camera_id(camera_id)
         detections = []
         try:
             h, w = frame.shape[:2]
@@ -794,13 +827,28 @@ class StreamAIService:
                     x1, y1, x2, y2 = bbox
                     bw = max(0, x2 - x1); bh = max(0, y2 - y1)
                     zone = _get_distance_zone(bbox, camera_id, w, h)
+
+                    if DEBUG_PERFORMANCE:
+                        print(f"[ZONE DEBUG] cam={camera_id} cls={cls_id} bbox={bbox} bw={bw} bh={bh} zone={zone}")
+
                     if ENABLE_DISTANCE_ZONE and zone == "FAR":
+                        if DEBUG_PERFORMANCE:
+                            print(f"[SKIP] FAR: {bbox}")
                         continue
                     if cls_id == 0:
                         if bw < MIN_PERSON_WIDTH or bh < MIN_PERSON_HEIGHT:
+                            if DEBUG_PERFORMANCE:
+                                print(f"[SKIP] PERSON TOO SMALL: bw={bw} bh={bh}")
                             continue
                     elif cls_id in VEHICLE_TYPES:
                         if bw < MIN_VEHICLE_WIDTH or bh < MIN_VEHICLE_HEIGHT:
+                            if DEBUG_PERFORMANCE:
+                                print(f"[SKIP] VEHICLE TOO SMALL: bw={bw} bh={bh}")
+                            continue
+                        aspect = bw / max(1, bh)
+                        if aspect < FAKE_VEHICLE_ASPECT_MIN:
+                            if DEBUG_PERFORMANCE:
+                                print(f"[SKIP] FAKE VEHICLE (aspect too small): aspect={aspect:.2f} cls={cls_id}")
                             continue
                     else:
                         continue
@@ -832,7 +880,9 @@ class StreamAIService:
 
     def _detect_plates_in_vehicles(self, frame, vehicle_dets):
         h, w = frame.shape[:2]
-        candidates = [d for d in vehicle_dets if d.get("cls") in (2, 3, 5) and (not ENABLE_DISTANCE_ZONE or d.get("distance_zone") == "NEAR")]
+        candidates = [d for d in vehicle_dets
+                      if d.get("cls") in (2, 3, 5, 7)
+                      and (not ENABLE_DISTANCE_ZONE or d.get("distance_zone") == "NEAR")]
         candidates.sort(key=lambda d: (
             1 if d.get("distance_zone") == "NEAR" else 0,
             max(1, d["box"][2] - d["box"][0]) * max(1, d["box"][3] - d["box"][1]),
@@ -904,6 +954,7 @@ class StreamAIService:
         return final
 
     def _consume_finished_plate(self, frame, vehicle_dets, camera_id):
+        camera_id = _normalize_camera_id(camera_id)
         plate_tracker = self._camera_state(camera_id)["plate_tracker"]
         finished = plate_tracker.consume_latest_finished_capture()
         if finished is None:
@@ -978,6 +1029,7 @@ class StreamAIService:
         return intersection / area
 
     def _get_track_generation(self, camera_id, track_id, current_time):
+        camera_id = _normalize_camera_id(camera_id)
         try:
             camera_id = int(camera_id); track_id = int(track_id); current_time = float(current_time)
         except (TypeError, ValueError):
@@ -1015,15 +1067,185 @@ class StreamAIService:
                     continue
                 if now - stamp > event_ttl:
                     cache.pop(key, None)
-        # OPSI C: cleanup _track_last_event (TTL 2 jam)
         for key, value in list(self._track_last_event.items()):
             try:
                 if now - float(value.get("last_ts", now)) > 7200.0:
                     self._track_last_event.pop(key, None)
             except (TypeError, ValueError, AttributeError):
                 self._track_last_event.pop(key, None)
+        for key, value in list(self._visual_hashes.items()):
+            try:
+                if now - float(value.get("ts", now)) > 600.0:
+                    self._visual_hashes.pop(key, None)
+            except (TypeError, ValueError, AttributeError):
+                self._visual_hashes.pop(key, None)
+        for key, value in list(self._plate_text_cache.items()):
+            try:
+                if now - float(value.get("ts", now)) > 600.0:
+                    self._plate_text_cache.pop(key, None)
+            except (TypeError, ValueError, AttributeError):
+                self._plate_text_cache.pop(key, None)
+        # cleanup centroid cache
+        for cam_key, items in list(self._vehicle_centroids.items()):
+            self._vehicle_centroids[cam_key] = [
+                it for it in items
+                if now - it.get("ts", 0) < VEHICLE_CENTROID_DEDUP_COOLDOWN
+            ]
+
+    # ============================================================
+    # Dedup visual dengan perceptual hash
+    # ============================================================
+    def _visual_hash(self, crop):
+        if crop is None or not hasattr(crop, "size") or crop.size == 0:
+            return None
+        try:
+            small = cv2.resize(crop, (16, 16), interpolation=cv2.INTER_AREA)
+            if len(small.shape) == 3:
+                gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            else:
+                gray = small.astype(np.float32)
+            avg = gray.mean()
+            bits = (gray > avg).flatten()
+            hex_str = ""
+            for i in range(0, len(bits), 4):
+                nibble = bits[i:i+4]
+                val = 0
+                for b in nibble:
+                    val = (val << 1) | int(b)
+                hex_str += format(val, 'x')
+            return hex_str[:16]
+        except Exception:
+            return None
+
+    def _hamming_distance(self, h1, h2):
+        if not h1 or not h2 or len(h1) != len(h2):
+            return 999
+        try:
+            b1 = bin(int(h1, 16))[2:].zfill(len(h1) * 4)
+            b2 = bin(int(h2, 16))[2:].zfill(len(h2) * 4)
+            return sum(c1 != c2 for c1, c2 in zip(b1, b2))
+        except Exception:
+            return 999
+
+    def _is_duplicate_visual(self, camera_id, object_type, v_hash, current_time):
+        if v_hash is None:
+            return False
+        if object_type == "person":
+            threshold = PERSON_HAMMING_THRESHOLD
+            cooldown = PERSON_DEDUP_COOLDOWN
+        else:
+            threshold = VISUAL_HAMMING_THRESHOLD
+            cooldown = VISUAL_DEDUP_COOLDOWN
+
+        prefix = f"vhash:{camera_id}:{object_type}:"
+        for key, val in list(self._visual_hashes.items()):
+            if not key.startswith(prefix):
+                continue
+            stored_hash = val.get("hash")
+            age = current_time - val.get("ts", 0)
+            if age > cooldown:
+                continue
+            dist = self._hamming_distance(v_hash, stored_hash)
+            if dist <= threshold:
+                return True
+
+        key = f"{prefix}{v_hash}:{int(current_time)}"
+        self._visual_hashes[key] = {"ts": current_time, "hash": v_hash}
+        return False
+
+    def _is_duplicate_plate(self, camera_id, plate_text, current_time):
+        if not plate_text:
+            return False
+        key = f"plate-text:{camera_id}:{plate_text}"
+        last = self._plate_text_cache.get(key)
+        if last is not None:
+            age = current_time - last.get("ts", 0)
+            if age < PLATE_TEXT_DEDUP_COOLDOWN:
+                return True
+        self._plate_text_cache[key] = {"ts": current_time, "text": plate_text}
+        return False
+
+    def _is_duplicate_person_track(self, camera_id, track_id, current_time):
+        key = f"person-track:{camera_id}:{track_id}"
+        last = self._plate_text_cache.get(key)
+        if last is not None:
+            age = current_time - last.get("ts", 0)
+            if age < PERSON_TRACK_DEDUP_COOLDOWN:
+                return True
+        self._plate_text_cache[key] = {"ts": current_time, "text": str(track_id)}
+        return False
+
+    # ============================================================
+    # ✅ FIX BARU: Dedup berbasis centroid untuk kendaraan
+    # ============================================================
+    def _bbox_centroid(self, bbox):
+        x1, y1, x2, y2 = bbox
+        return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+
+    def _is_duplicate_centroid(self, camera_id, bbox, current_time):
+        """
+        Cek apakah kendaraan mirip sudah disimpan berdasarkan:
+        - Centroid jarak < threshold px
+        - Ukuran bbox (area) mirip dalam toleransi ratio
+        - Waktu < cooldown
+        """
+        cx, cy = self._bbox_centroid(bbox)
+        bw = max(1, bbox[2] - bbox[0])
+        bh = max(1, bbox[3] - bbox[1])
+        area = bw * bh
+
+        # Bersihkan cache lama
+        cache = self._vehicle_centroids.get(camera_id, [])
+        cache = [it for it in cache if current_time - it["ts"] < VEHICLE_CENTROID_DEDUP_COOLDOWN]
+
+        # Cek duplikat
+        for item in cache:
+            pcx, pcy = item["centroid"]
+            dist = ((cx - pcx) ** 2 + (cy - pcy) ** 2) ** 0.5
+            if dist < VEHICLE_CENTROID_DEDUP_DISTANCE:
+                prev_area = item["area"]
+                max_area = max(area, prev_area)
+                ratio = abs(area - prev_area) / max(1, max_area)
+                if ratio < VEHICLE_CENTROID_DEDUP_AREA_RATIO:
+                    return True
+
+        # Simpan entry baru
+        cache.append({
+            "centroid": (cx, cy),
+            "area": area,
+            "ts": current_time,
+        })
+        # Batasi panjang
+        if len(cache) > VEHICLE_CENTROID_MAX_HISTORY:
+            cache = cache[-VEHICLE_CENTROID_MAX_HISTORY:]
+        self._vehicle_centroids[camera_id] = cache
+        return False
+
+    def _resolve_event_key(self, lookup_key, current_time, plate_text_now=None):
+        now_ts = float(current_time)
+        last_event = self._track_last_event.get(lookup_key)
+        if last_event is not None:
+            age = now_ts - last_event["last_ts"]
+            if age < TRACK_EVENT_COOLDOWN:
+                prev_plate = (last_event.get("plate_text") or "").strip()
+                new_plate = (plate_text_now or "").strip()
+                if prev_plate and new_plate and prev_plate != new_plate:
+                    event_key = f"{lookup_key}:t{int(now_ts)}"
+                else:
+                    event_key = last_event["event_key"]
+            else:
+                event_key = f"{lookup_key}:t{int(now_ts)}"
+        else:
+            event_key = f"{lookup_key}:t{int(now_ts)}"
+        self._track_last_event[lookup_key] = {
+            "event_key": event_key,
+            "last_ts": now_ts,
+            "plate_text": plate_text_now or "",
+        }
+        return event_key
 
     def _save_consistent_events(self, frame, person_dets, plate_dets, camera_id, current_time):
+        camera_id = _normalize_camera_id(camera_id)
         camera_orientation = db.get_camera_direction(camera_id)
         vehicles = [item for item in person_dets if item.get("cls") in VEHICLE_TYPES]
         people = [item for item in person_dets if item.get("cls") == 0]
@@ -1055,6 +1277,15 @@ class StreamAIService:
                 matching_plates = geometric_plates
             plate = max(matching_plates, key=lambda item: float(item.get("conf", item.get("confidence", 0)) or 0), default=None)
 
+            # ✅ FIX #1: Tolak kendaraan tanpa plat + aspect kecil
+            bx1, by1, bx2, by2 = vehicle_box
+            bw = max(1, bx2 - bx1); bh = max(1, by2 - by1)
+            aspect = bw / bh
+            if plate is None and aspect < FAKE_VEHICLE_ASPECT_MIN:
+                if DEBUG_PERFORMANCE:
+                    print(f"[SKIP FALSE VEHICLE] aspect={aspect:.2f} type={vehicle_type} conf={vehicle.get('conf', 0):.2f}")
+                continue
+
             driver = None
             for index, person in enumerate(people):
                 if index in associated_people:
@@ -1071,16 +1302,10 @@ class StreamAIService:
             else:
                 generation = int(current_time)
 
-            track_lookup_key = f"vehicle:{camera_id}:{stable_id}"
-            last_event = self._track_last_event.get(track_lookup_key)
-            now_ts = float(current_time)
-            if last_event is not None and (now_ts - last_event["last_ts"]) < TRACK_EVENT_COOLDOWN:
-                event_key = last_event["event_key"]
-            else:
-                event_key = f"vehicle:{camera_id}:{stable_id}:t{int(now_ts)}"
-            self._track_last_event[track_lookup_key] = {"event_key": event_key, "last_ts": now_ts}
-
             plate_text_now = _normalize_text((plate or {}).get("text") or "")
+            track_lookup_key = f"vehicle:{camera_id}:{stable_id}"
+            event_key = self._resolve_event_key(track_lookup_key, current_time, plate_text_now)
+
             has_driver_now = driver is not None
             previous_meta = self.saved_event_meta.get(event_key)
             is_new_event = event_key not in self.captured_tracks
@@ -1090,6 +1315,30 @@ class StreamAIService:
                      or (has_driver_now and not previous_meta.get("has_driver")))
             )
             if not is_new_event and not needs_enrichment:
+                continue
+
+            # 1. Dedup plat (paling akurat)
+            if plate_text_now and _valid_indonesian_plate(plate_text_now):
+                if self._is_duplicate_plate(camera_id, plate_text_now, current_time):
+                    if DEBUG_PERFORMANCE:
+                        print(f"[DEDUP PLAT] Skip: cam={camera_id} plate={plate_text_now}")
+                    self.captured_tracks[event_key] = current_time
+                    continue
+
+            # ✅ 2. FIX BARU: Dedup centroid (paling cocok untuk kendaraan bergerak)
+            if self._is_duplicate_centroid(camera_id, vehicle_box, current_time):
+                if DEBUG_PERFORMANCE:
+                    print(f"[DEDUP CENTROID] Skip: cam={camera_id} type={vehicle_type} bbox={vehicle_box}")
+                self.captured_tracks[event_key] = current_time
+                continue
+
+            # 3. Dedup visual
+            vehicle_crop = _prepare_vehicle_capture(frame, vehicle_box)
+            v_hash = self._visual_hash(vehicle_crop)
+            if self._is_duplicate_visual(camera_id, vehicle_type, v_hash, current_time):
+                if DEBUG_PERFORMANCE:
+                    print(f"[DEDUP VISUAL] Skip: cam={camera_id} type={vehicle_type} hash={v_hash}")
+                self.captured_tracks[event_key] = current_time
                 continue
 
             final_direction = camera_orientation
@@ -1105,7 +1354,7 @@ class StreamAIService:
                     object_type="vehicle",
                     vehicle_type=vehicle_type,
                     vehicle_confidence=float(vehicle.get("conf", 0.0) or 0),
-                    vehicle_crop=_prepare_vehicle_capture(frame, vehicle_box),
+                    vehicle_crop=vehicle_crop,
                     has_driver=driver is not None,
                     driver_track_id=(driver or {}).get("track_id"),
                     direction=final_direction,
@@ -1132,14 +1381,13 @@ class StreamAIService:
                 continue
             generation = self._get_track_generation(camera_id, track_id, current_time)
 
+            if self._is_duplicate_person_track(camera_id, track_id, current_time):
+                if DEBUG_PERFORMANCE:
+                    print(f"[DEDUP PERSON TRACK] Skip: cam={camera_id} track_id={track_id}")
+                continue
+
             track_lookup_key = f"person:{camera_id}:{track_id}"
-            last_event = self._track_last_event.get(track_lookup_key)
-            now_ts = float(current_time)
-            if last_event is not None and (now_ts - last_event["last_ts"]) < TRACK_EVENT_COOLDOWN:
-                event_key = last_event["event_key"]
-            else:
-                event_key = f"person:{camera_id}:{track_id}:t{int(now_ts)}"
-            self._track_last_event[track_lookup_key] = {"event_key": event_key, "last_ts": now_ts}
+            event_key = self._resolve_event_key(track_lookup_key, current_time, "")
 
             if event_key in self.captured_tracks:
                 previous_meta = self.saved_event_meta.get(event_key)
@@ -1150,6 +1398,14 @@ class StreamAIService:
             crop = _prepare_high_quality_capture(frame, (bx1, by1, bx2, by2), padding=0.20, target_short_side=360, max_scale=2.5, max_long_side=960, sharpen=True)
             if crop is None or crop.size == 0:
                 continue
+
+            p_hash = self._visual_hash(crop)
+            if self._is_duplicate_visual(camera_id, "person", p_hash, current_time):
+                if DEBUG_PERFORMANCE:
+                    print(f"[DEDUP VISUAL PERSON] Skip: cam={camera_id} hash={p_hash}")
+                self.captured_tracks[event_key] = current_time
+                continue
+
             final_direction = camera_orientation
             try:
                 result = db.save_detection_event(
@@ -1239,6 +1495,7 @@ class StreamAIService:
         cv2.putText(frame, text, (10, 22), cv2.FONT_HERSHEY_SIMPLEX, .52, color, 2, cv2.LINE_AA)
 
     def _run_ai_pipeline(self, frame, camera_id):
+        camera_id = _normalize_camera_id(camera_id)
         camera_state = self._camera_state(camera_id)
         now = time.time()
         ai_pipeline_start = time.perf_counter()
@@ -1320,6 +1577,7 @@ class StreamAIService:
             if item is None:
                 continue
             frame, camera_id = item
+            camera_id = _normalize_camera_id(camera_id)
             camera_state = self._camera_state(camera_id)
             now = time.time()
             interval = self.adaptive_ai.get_interval()
@@ -1334,6 +1592,7 @@ class StreamAIService:
     def process_frame(self, frame, draw_bbox=True, camera_id=1):
         if frame is None or not hasattr(frame, "size") or frame.size == 0:
             return frame
+        camera_id = _normalize_camera_id(camera_id)
         try:
             with self.frame_queue_lock:
                 self.frame_queue.append((frame.copy(), camera_id))
@@ -1366,6 +1625,7 @@ class StreamAIService:
     def _draw_detection_zones(self, frame, camera_id):
         if not ENABLE_DISTANCE_ZONE:
             return
+        camera_id = _normalize_camera_id(camera_id)
         h, w = frame.shape[:2]
         mid = _normalized_polygon_to_pixels(_camera_zone_points(camera_id, "mid"), w, h)
         near = _normalized_polygon_to_pixels(_camera_zone_points(camera_id, "near"), w, h)

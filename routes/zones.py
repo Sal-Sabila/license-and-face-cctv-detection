@@ -5,9 +5,31 @@ import db
 zones_bp = Blueprint("zones_page", __name__)
 
 
-# Zona default per kamera (kalau belum diatur di DB)
-DEFAULT_MID = [(0.10, 0.35), (0.90, 0.35), (0.99, 1.00), (0.01, 1.00)]
-DEFAULT_NEAR = [(0.10, 0.38), (0.90, 0.38), (0.99, 1.00), (0.01, 1.00)]
+# ============================================================
+# ZONA DEFAULT PER KAMERA
+# ============================================================
+# ✅ FIX: Zona baru dinaikkan supaya motor/pejalan di tengah frame
+# tetap masuk zona NEAR. Sebelumnya y=0.35/0.38 membuat motor di
+# y=0.11-0.24 (dari log) dianggap FAR dan di-skip.
+# ------------------------------------------------------------
+# Sebelumnya:
+#   DEFAULT_MID  = [(0.10, 0.35), (0.90, 0.35), (0.99, 1.00), (0.01, 1.00)]
+#   DEFAULT_NEAR = [(0.10, 0.38), (0.90, 0.38), (0.99, 1.00), (0.01, 1.00)]
+# ------------------------------------------------------------
+
+DEFAULT_MID = [
+    (0.05, 0.10),
+    (0.95, 0.10),
+    (0.99, 1.00),
+    (0.01, 1.00),
+]
+
+DEFAULT_NEAR = [
+    (0.05, 0.20),
+    (0.95, 0.20),
+    (0.99, 1.00),
+    (0.01, 1.00),
+]
 
 
 def _validate_zone(name, poly):
@@ -149,6 +171,7 @@ def reset_zone(camera_id):
 
         try:
             from services.stream_ai_service import reload_camera_zone
+            # ✅ FIX: pakai DEFAULT baru (y=0.10 / y=0.20)
             reload_camera_zone(camera_id, DEFAULT_MID, DEFAULT_NEAR)
             print(f"[ZONES] CAM {camera_id} zona direset ke default")
         except Exception as exc:
