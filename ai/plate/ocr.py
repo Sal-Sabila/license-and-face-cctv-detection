@@ -6,6 +6,24 @@ from collections import Counter
 
 from paddleocr import PaddleOCR
 
+# ============================================================
+# ✅ IMPORT VALIDATOR BARU
+# ============================================================
+try:
+    from ai.plate.validator import (
+        correct_and_validate_plate,
+        is_valid_plate,
+        format_plate_for_display,
+        normalize_plate_text,
+        VALID_REGION_CODES,
+    )
+    HAS_PLATE_VALIDATOR = True
+except ImportError:
+    HAS_PLATE_VALIDATOR = False
+    VALID_REGION_CODES = set()
+    print("[OCR WARNING] ai.plate.validator tidak tersedia, pakai fallback regex")
+
+# Helper project (opsional, tidak wajib)
 try:
     from ai.plate.plate_utils import (
         filter_dan_gabung_spasial,
@@ -23,12 +41,11 @@ class PlateOCR:
     Pipeline:
         crop plat
           -> padding + resize
-          -> beberapa preprocessing
+          -> beberapa preprocessing (clahe/original/sharpen/threshold)
           -> PaddleOCR
           -> gabung teks secara spasial
           -> normalisasi
-          -> koreksi karakter ambigu
-          -> validasi format plat Indonesia
+          -> koreksi karakter ambigu + validasi kode wilayah
           -> pilih hasil terbaik
 
     Output:
@@ -41,30 +58,22 @@ class PlateOCR:
             "variant": "clahe",
             "elapsed": 0.40,
             "variants_tried": 3,
+            "correction_applied": False,
+            "region_code": "B",
         }
     """
 
-    # OCR confusion yang umum pada plat.
+    # OCR confusion (fallback kalau validator tidak tersedia)
     LETTER_TO_DIGIT = {
-        "O": "0",
-        "Q": "0",
-        "D": "0",
-        "I": "1",
-        "L": "1",
-        "T": "1",
-        "Z": "2",
-        "S": "5",
-        "G": "6",
-        "B": "8",
+        "O": "0", "Q": "0", "D": "0",
+        "I": "1", "L": "1", "J": "1",
+        "Z": "2", "S": "5",
+        "G": "6", "B": "8",
     }
 
     DIGIT_TO_LETTER = {
-        "0": "O",
-        "1": "I",
-        "2": "Z",
-        "5": "S",
-        "6": "G",
-        "8": "B",
+        "0": "O", "1": "I", "2": "Z",
+        "5": "S", "6": "G", "8": "B",
     }
 
     def __init__(
@@ -101,7 +110,8 @@ class PlateOCR:
         print(f"[OCR] Scale          : {self.scale}")
         print(f"[OCR] Min confidence : {self.min_confidence}")
         print(f"[OCR] Fast mode      : {self.fast_mode}")
-        print("[OCR] Variants       : original + clahe + sharpen + threshold")
+        print(f"[OCR] Validator      : {'AKTIF (kode wilayah)' if HAS_PLATE_VALIDATOR else 'FALLBACK REGEX'}")
+        print("[OCR] Variants       : clahe + original" + (" + sharpen" if not fast_mode else ""))
         print("=" * 65)
 
     # ------------------------------------------------------------------
@@ -116,29 +126,44 @@ class PlateOCR:
             return float(default)
 
     def normalize_text(self, text):
+        """Normalisasi dasar: uppercase, hapus non-alphanumeric."""
         if text is None:
             return ""
+        if HAS_PLATE_VALIDATOR:
+            return normalize_plate_text(text)
         text = str(text).upper().strip()
         text = re.sub(r"[^A-Z0-9]", "", text)
         return text
 
-    # Alias lama agar kode lain tetap kompatibel.
     _normalize_plate_text = normalize_text
 
     def _format_plate(self, text):
+        """Format untuk display: 'AB1234CD' -> 'AB 1234 CD'."""
+        if HAS_PLATE_VALIDATOR:
+            return format_plate_for_display(text)
+        # Fallback
         text = self.normalize_text(text)
         if not text:
             return ""
-
-        # Cari bentuk: 1-2 huruf + 1-4 angka + 0-3 huruf.
         match = re.match(r"^([A-Z]{1,2})([0-9]{1,4})([A-Z]{0,3})$", text)
         if not match:
             return text
-
         prefix, number, suffix = match.groups()
         return " ".join(x for x in (prefix, number, suffix) if x)
 
     def is_valid_indonesian_plate(self, text):
+        """
+        ✅ Validasi plat Indonesia menggunakan kode wilayah resmi.
+
+        Fallback ke regex longgar kalau validator tidak tersedia.
+        """
+        if not text:
+            return False
+
+        if HAS_PLATE_VALIDATOR:
+            return is_valid_plate(text)
+
+        # Fallback regex longgar
         text = self.normalize_text(text)
         if not text:
             return False
@@ -146,8 +171,19 @@ class PlateOCR:
             return False
         return bool(re.match(r"^[A-Z]{1,2}[0-9]{1,4}[A-Z]{0,3}$", text))
 
-    # Alias kompatibilitas.
     _is_valid_indonesian_plate = is_valid_indonesian_plate
+
+    def _extract_region_code(self, text):
+        """Ambil kode wilayah dari plat (kalau valid)."""
+        if not text:
+            return None
+        text = self.normalize_text(text)
+        for length in (2, 1):
+            if len(text) >= length + 1:
+                prefix = text[:length]
+                if prefix in VALID_REGION_CODES:
+                    return prefix
+        return None
 
     # ------------------------------------------------------------------
     # IMAGE PREPARATION
@@ -171,22 +207,15 @@ class PlateOCR:
             if h <= 0 or w <= 0:
                 return None
 
-            # Padding kecil supaya karakter tepi tidak terpotong.
             pad_y = max(2, int(h * 0.08))
             pad_x = max(3, int(w * 0.06))
 
             padded = cv2.copyMakeBorder(
-                image,
-                pad_y,
-                pad_y,
-                pad_x,
-                pad_x,
-                cv2.BORDER_REPLICATE,
+                image, pad_y, pad_y, pad_x, pad_x, cv2.BORDER_REPLICATE,
             )
 
             ph, pw = padded.shape[:2]
-            # Keep distant plates large enough for PaddleOCR to distinguish
-            # narrow characters, while retaining the original aspect ratio.
+
             effective_scale = max(
                 self.scale,
                 64.0 / max(1, ph),
@@ -195,7 +224,6 @@ class PlateOCR:
             target_w = max(1, int(pw * effective_scale))
             target_h = max(1, int(ph * effective_scale))
 
-            # Plat biasanya lebar. Pertahankan rasio dengan resolusi optimal untuk CPU
             max_w = 420
             max_h = 140
             scale_down = min(
@@ -208,9 +236,7 @@ class PlateOCR:
             new_h = max(1, int(target_h * scale_down))
 
             return cv2.resize(
-                padded,
-                (new_w, new_h),
-                interpolation=cv2.INTER_LINEAR,
+                padded, (new_w, new_h), interpolation=cv2.INTER_LINEAR,
             )
 
         except Exception as exc:
@@ -260,12 +286,10 @@ class PlateOCR:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             gray = cv2.GaussianBlur(gray, (3, 3), 0)
             binary = cv2.adaptiveThreshold(
-                gray,
-                255,
+                gray, 255,
                 cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                 cv2.THRESH_BINARY,
-                31,
-                7,
+                31, 7,
             )
             return cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
         except Exception as exc:
@@ -274,15 +298,13 @@ class PlateOCR:
             return None
 
     def generate_variants(self, prepared):
-        """Urutan variant: CLAHE pertama (terbukti terbaik untuk kontras CCTV), kemudian original."""
+        """Urutan variant: CLAHE dulu (kontras CCTV), lalu original."""
         variants = [
             ("clahe", self.preprocess_clahe(prepared)),
             ("original", self.preprocess_original(prepared)),
         ]
-
         if not self.fast_mode:
             variants.append(("sharpen", self.preprocess_sharpen(prepared)))
-
         return [(name, img) for name, img in variants if img is not None]
 
     # ------------------------------------------------------------------
@@ -347,9 +369,7 @@ class PlateOCR:
             if "text" in data:
                 texts.append(str(data.get("text") or ""))
                 scores.append(
-                    self._safe_float(
-                        data.get("confidence", data.get("score", 0.0))
-                    )
+                    self._safe_float(data.get("confidence", data.get("score", 0.0)))
                 )
                 boxes.append([0, 0, 0, 0])
                 return texts, boxes, scores
@@ -391,25 +411,20 @@ class PlateOCR:
             texts, boxes, scores = self.extract_result(results)
 
             if self.verbose:
-                print(
-                    f"[OCR RAW] variant={variant} "
-                    f"texts={texts} scores={scores}"
-                )
+                print(f"[OCR RAW] variant={variant} texts={texts} scores={scores}")
 
             combined = None
             if filter_dan_gabung_spasial is not None:
                 try:
                     combined = filter_dan_gabung_spasial(
-                        texts,
-                        boxes,
-                        scores,
+                        texts, boxes, scores,
                         min_confidence=self.min_confidence,
                     )
                 except Exception as exc:
                     if self.verbose:
                         print(f"[OCR SPATIAL WARNING] {exc}")
 
-            # Fallback sederhana jika helper project gagal/tidak ada.
+            # Fallback sederhana
             if combined is None and texts:
                 valid_items = []
                 for txt, score in zip(texts, scores):
@@ -436,11 +451,9 @@ class PlateOCR:
             return {
                 "text": self.normalize_text(raw_text),
                 "formatted": combined.get("formatted", raw_text),
-                "raw_text": str(raw_text or ""),
+                "raw_text": str(raw_text or ""),  # ✅ raw untuk audit
                 "confidence": confidence,
-                "is_indonesia_pattern": bool(
-                    combined.get("is_indonesia_pattern", False)
-                ),
+                "is_indonesia_pattern": False,  # akan di-set setelah koreksi
                 "variant": variant,
                 "elapsed": elapsed,
             }
@@ -455,11 +468,13 @@ class PlateOCR:
     # ------------------------------------------------------------------
 
     def _correct_segment(self, segment, target):
+        """Fallback koreksi karakter per segmen (kalau validator tidak ada)."""
         if target == "digit":
             return "".join(self.LETTER_TO_DIGIT.get(ch, ch) for ch in segment)
         return "".join(self.DIGIT_TO_LETTER.get(ch, ch) for ch in segment)
 
     def _apply_external_correction(self, text):
+        """Pakai helper project kalau ada."""
         if not text or koreksi_plat_indonesia is None:
             return text
         try:
@@ -480,20 +495,52 @@ class PlateOCR:
 
     def correct_plate_text(self, text, confidence=0.0):
         """
-        Koreksi konservatif berdasarkan pola Indonesia.
+        ✅ Koreksi & validasi menggunakan kode wilayah Indonesia.
 
-        Tidak mengubah karakter yang tidak ambigu. Koreksi hanya dilakukan
-        pada posisi prefix/angka/suffix yang paling masuk akal.
+        Return dict:
+            {
+                "text": str,           # teks terkoreksi
+                "formatted": str,      # untuk display
+                "correction_applied": bool,
+                "correction_score": float,
+                "region_code": str|None,
+            }
         """
         raw = self.normalize_text(text)
         if not raw:
             return {
-                "text": "",
-                "formatted": "",
-                "correction_applied": False,
-                "correction_score": 0.0,
+                "text": "", "formatted": "",
+                "correction_applied": False, "correction_score": 0.0,
+                "region_code": None,
             }
 
+        # ============================================
+        # PRIORITAS 1: Pakai validator baru
+        # ============================================
+        if HAS_PLATE_VALIDATOR:
+            result = correct_and_validate_plate(raw, confidence)
+
+            if result["valid"]:
+                return {
+                    "text": result["corrected"],
+                    "formatted": format_plate_for_display(result["corrected"]),
+                    "correction_applied": result["corrected"] != raw,
+                    "correction_score": 1.0 - result["confidence_penalty"],
+                    "region_code": self._extract_region_code(result["corrected"]),
+                }
+            else:
+                # Tidak valid → kembalikan raw (untuk review)
+                return {
+                    "text": raw,
+                    "formatted": self._format_plate(raw),
+                    "correction_applied": False,
+                    "correction_score": 0.0,
+                    "region_code": None,
+                }
+
+        # ============================================
+        # FALLBACK: Pakai helper project
+        # ============================================
         external = self._apply_external_correction(raw)
         if external and self.is_valid_indonesian_plate(external):
             return {
@@ -501,12 +548,15 @@ class PlateOCR:
                 "formatted": self._format_plate(external),
                 "correction_applied": external != raw,
                 "correction_score": 1.0,
+                "region_code": None,
             }
 
+        # ============================================
+        # FALLBACK: Koreksi manual per segmen
+        # ============================================
         candidates = []
         n = len(raw)
 
-        # Coba seluruh pemisahan prefix 1-2, angka 1-4, suffix 0-3.
         for prefix_len in (1, 2):
             for digit_len in range(1, 5):
                 suffix_len = n - prefix_len - digit_len
@@ -517,8 +567,6 @@ class PlateOCR:
                 number = raw[prefix_len:prefix_len + digit_len]
                 suffix = raw[prefix_len + digit_len:]
 
-                # Koreksi hanya karakter ambigu di segmen yang seharusnya
-                # berupa angka/huruf.
                 prefix_c = self._correct_segment(prefix, "letter")
                 number_c = self._correct_segment(number, "digit")
                 suffix_c = self._correct_segment(suffix, "letter")
@@ -528,10 +576,7 @@ class PlateOCR:
                     continue
 
                 changes = sum(a != b for a, b in zip(raw, candidate))
-                # Penalti perubahan agar koreksi tidak terlalu agresif.
                 score = 1.0 - min(changes * 0.12, 0.60)
-
-                # Panjang umum 5-8 karakter mendapat sedikit bonus.
                 if 5 <= len(candidate) <= 8:
                     score += 0.05
 
@@ -543,6 +588,7 @@ class PlateOCR:
                 "formatted": self._format_plate(raw),
                 "correction_applied": False,
                 "correction_score": 0.0,
+                "region_code": None,
             }
 
         candidates.sort(key=lambda x: (x[0], -x[2]), reverse=True)
@@ -553,6 +599,7 @@ class PlateOCR:
             "formatted": self._format_plate(best),
             "correction_applied": best != raw,
             "correction_score": max(0.0, min(1.0, 1.0 - changes * 0.12)),
+            "region_code": self._extract_region_code(best),
         }
 
     # ------------------------------------------------------------------
@@ -567,15 +614,23 @@ class PlateOCR:
         conf = self._safe_float(result.get("confidence", 0.0))
         valid = self.is_valid_indonesian_plate(text)
         indonesia_flag = bool(result.get("is_indonesia_pattern", False))
+        region = self._extract_region_code(text)
 
         score = conf
         if valid:
             score += 0.35
+            # Bonus kalau kode wilayah dikenal
+            if region:
+                score += 0.10
         elif indonesia_flag:
             score += 0.15
 
         if 5 <= len(text) <= 8:
             score += 0.03
+
+        # Bonus kalau tidak ada koreksi (raw == text)
+        if not result.get("correction_applied", False):
+            score += 0.05
 
         return score
 
@@ -585,9 +640,8 @@ class PlateOCR:
 
     def warmup(self):
         try:
-            dummy = 255 * __import__("numpy").ones(
-                (64, 180, 3), dtype="uint8"
-            )
+            import numpy as np
+            dummy = 255 * np.ones((64, 180, 3), dtype="uint8")
             self._run_ocr(dummy, "warmup")
             print("[OCR] Warm-up selesai")
         except Exception as exc:
@@ -611,6 +665,7 @@ class PlateOCR:
             "elapsed": 0.0,
             "variants_tried": 0,
             "correction_applied": False,
+            "region_code": None,
         }
 
         if image is None or image.size == 0:
@@ -624,12 +679,12 @@ class PlateOCR:
         candidates = []
         variants = self.generate_variants(prepared)
 
-        # Jalankan semua variant sampai menemukan hasil yang sangat kuat.
         for variant_name, variant_image in variants:
             result = self._run_ocr(variant_image, variant_name)
             if result is None:
                 continue
 
+            # ✅ KOREKSI + VALIDASI
             correction = self.correct_plate_text(
                 result.get("text", ""),
                 result.get("confidence", 0.0),
@@ -639,11 +694,10 @@ class PlateOCR:
             result["raw_text"] = result.get("raw_text") or result.get("text", "")
             result["text"] = corrected_text
             result["formatted"] = correction["formatted"] or corrected_text
-            result["is_indonesia_pattern"] = self.is_valid_indonesian_plate(
-                corrected_text
-            )
+            result["is_indonesia_pattern"] = self.is_valid_indonesian_plate(corrected_text)
             result["correction_applied"] = correction["correction_applied"]
             result["correction_score"] = correction["correction_score"]
+            result["region_code"] = correction["region_code"]
 
             candidates.append(result)
 
@@ -651,30 +705,27 @@ class PlateOCR:
                 print(
                     f"[OCR CANDIDATE] {variant_name} -> "
                     f"{result['formatted']} | "
+                    f"raw={result['raw_text']} | "
                     f"conf={result['confidence']:.3f} | "
-                    f"valid={result['is_indonesia_pattern']}"
+                    f"valid={result['is_indonesia_pattern']} | "
+                    f"region={result['region_code']}"
                 )
 
-            # Early stop cerdas: jika format plat Indonesia valid dan confidence mencukupi (>=0.55),
-            # atau confidence sangat tinggi (>=0.70), hentikan segera untuk menghemat CPU.
+            # Early stop: valid + confidence cukup
             if (
                 result["is_indonesia_pattern"]
                 and result["confidence"] >= 0.55
             ) or (result["confidence"] >= 0.70):
                 break
 
-            # Fast mode: setelah original+clahe+sharpen, threshold menjadi
-            # fallback terakhir. Tetap dicoba jika hasil belum kuat.
-
         if not candidates:
             empty["elapsed"] = time.perf_counter() - total_start
             return empty
 
-        # Pilih hasil terbaik berdasarkan confidence + validitas pola.
+        # Pilih hasil terbaik
         best = max(candidates, key=self._score_result)
 
-        # Jika ada beberapa variant dengan teks sama, naikkan confidence
-        # sedikit karena hasil konsisten lintas preprocessing.
+        # Bonus konsistensi lintas variant
         normalized_best = self.normalize_text(best.get("text", ""))
         same_text = [
             r for r in candidates
@@ -699,16 +750,17 @@ class PlateOCR:
         best["variants_tried"] = len(candidates)
         best["formatted"] = self._format_plate(best.get("text", ""))
         best["text"] = self.normalize_text(best.get("text", ""))
-        best["is_indonesia_pattern"] = self.is_valid_indonesian_plate(
-            best["text"]
-        )
+        best["is_indonesia_pattern"] = self.is_valid_indonesian_plate(best["text"])
+        best["region_code"] = self._extract_region_code(best["text"])
 
         if self.verbose:
             print(
                 f"[OCR BEST] {best['formatted']} | "
+                f"raw={best.get('raw_text', '-')} | "
                 f"conf={best['confidence']:.3f} | "
                 f"variant={best['variant']} | "
                 f"votes={best.get('cross_variant_votes', 1)} | "
+                f"region={best.get('region_code')} | "
                 f"time={best['elapsed']:.2f}s"
             )
 

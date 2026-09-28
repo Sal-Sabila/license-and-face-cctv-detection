@@ -274,9 +274,166 @@ def delete_camera(camera_id):
 # ENDPOINT HASIL DETEKSI GABUNGAN (TERHUBUNG KE MYSQL REAL_CCTV)
 # ============================================================
 
+def _get_terbaca_detections_paginated(
+    page: int = 1, limit: int = 20, type_filter: str = "all",
+    status_filter: str = "all", camera_id: int = None,
+    search: str = None, start_date: str = None, end_date: str = None
+) -> dict:
+    """Mengambil daftar deteksi HANYA dengan status 'Terbaca' (status_code = 1).
+    
+    Kriteria filter SQL:
+    - fd.detection_status = 1 (bukan 0 dan bukan 2)
+    - Jika deteksi plat:
+      * plate_status harus 1 (atau NULL dengan fd.detection_status = 1)
+      * plat nomor tidak boleh kosong dan bukan '-'
+      * OCR confidence harus > 0
+    - Filter dilakukan langsung di level backend/SQL.
+    """
+    if status_filter in ("0", "2"):
+        return {"items": [], "total": 0, "page": page, "limit": limit, "total_pages": 1}
+
+    page = max(1, int(page))
+    limit = max(1, min(5000, int(limit)))
+    offset = (page - 1) * limit
+
+    where_clauses = [
+        "fd.detection_status = 1",
+        """(
+            (
+                (fd.has_plate = 1 OR fd.plate_id IS NOT NULL)
+                AND (p.detection_status IS NULL OR p.detection_status = 1)
+                AND p.plate_number IS NOT NULL 
+                AND TRIM(p.plate_number) != '' 
+                AND p.plate_number != '-'
+                AND COALESCE(p.ocr_confidence, fd.ocr_confidence, 0) > 0
+            )
+            OR (
+                (fd.has_plate = 0 OR fd.has_plate IS NULL) 
+                AND fd.plate_id IS NULL
+            )
+        )"""
+    ]
+    params = []
+
+    if type_filter in ("vehicle", "person"):
+        where_clauses.append("fd.object_type = %s")
+        params.append(type_filter)
+    elif type_filter == "plate":
+        where_clauses.append("fd.object_type = 'vehicle' AND (fd.has_plate = 1 OR fd.plate_id IS NOT NULL)")
+    elif type_filter == "face":
+        where_clauses.append("fd.object_type = 'person'")
+
+    if camera_id is not None and str(camera_id).isdigit():
+        where_clauses.append("fd.camera_id = %s")
+        params.append(int(camera_id))
+    if search:
+        s = f"%{search.strip()}%"
+        where_clauses.append("(p.plate_number LIKE %s OR c.location LIKE %s)")
+        params.extend([s, s])
+    if start_date:
+        where_clauses.append("DATE(fd.created_at) >= %s")
+        params.append(start_date)
+    if end_date:
+        where_clauses.append("DATE(fd.created_at) <= %s")
+        params.append(end_date)
+
+    where_sql = " AND ".join(where_clauses)
+
+    with db.get_db() as conn:
+        with conn.cursor() as cur:
+            all_ids = db._dedup_event_ids(cur, where_sql, params)
+            total = len(all_ids)
+            if total == 0:
+                return {"items": [], "total": 0, "page": page, "limit": limit, "total_pages": 1}
+
+            page_ids = all_ids[offset: offset + limit]
+            placeholders = ",".join(["%s"] * len(page_ids))
+
+            data_sql = f"""
+                SELECT fd.detection_id, fd.plate_id, fd.camera_id, fd.track_id,
+                    fd.object_type, fd.vehicle_type, fd.has_plate, fd.has_driver,
+                    fd.detection_status AS status_code, fd.detection_confidence,
+                    fd.vehicle_confidence, fd.plate_detection_confidence,
+                    fd.ocr_confidence AS event_ocr_confidence,
+                    fd.person_confidence, fd.face_confidence, fd.direction,
+                    fd.driver_track_id, fd.driver_face_path, fd.event_key,
+                    fd.face_image_path, fd.vehicle_image_path,
+                    fd.created_at AS detected_at,
+                    p.plate_number, p.detection_status AS plate_status,
+                    p.detection_confidence AS plate_confidence,
+                    p.ocr_confidence, p.plate_image_path,
+                    COALESCE(c.location, 'CCTV') AS camera_name
+                FROM full_detection fd
+                LEFT JOIN plate p ON fd.plate_id = p.plate_id
+                LEFT JOIN cameras c ON fd.camera_id = c.camera_id
+                WHERE fd.detection_id IN ({placeholders})
+                ORDER BY fd.created_at DESC
+            """
+            cur.execute(data_sql, page_ids)
+            rows = cur.fetchall()
+
+            items = []
+            for r in rows:
+                p_num = r.get("plate_number")
+                object_type = r.get("object_type") or ("vehicle" if r.get("plate_id") else "person")
+                has_plate = bool(r.get("has_plate") or p_num or r.get("plate_image_path"))
+                dtype = "vehicle_with_plate" if object_type == "vehicle" and has_plate else object_type
+                plate_st = r.get("plate_status")
+                raw_code = (plate_st if plate_st is not None else r.get("status_code", 1)) if object_type == "vehicle" and has_plate else r.get("status_code", 1)
+                code = int(raw_code or 1)
+                stext = "Terbaca" if code == 1 else ("Perlu cek" if code == 2 else "Gagal")
+                if object_type == "person":
+                    conf = float(r.get("person_confidence") or r.get("face_confidence") or r.get("detection_confidence") or 0.0)
+                elif has_plate:
+                    conf = float(r.get("plate_detection_confidence") or r.get("plate_confidence") or r.get("event_ocr_confidence") or 0.0)
+                else:
+                    conf = float(r.get("vehicle_confidence") or r.get("detection_confidence") or 0.0)
+                dt_str = r["detected_at"].strftime("%Y-%m-%d %H:%M:%S") if isinstance(r.get("detected_at"), datetime) else str(r.get("detected_at") or "")
+
+                items.append({
+                    "id": r["detection_id"],
+                    "detection_id": r["detection_id"],
+                    "type": dtype,
+                    "object_type": object_type,
+                    "vehicle_type": r.get("vehicle_type") or "unknown",
+                    "track_id": r.get("track_id"),
+                    "has_plate": has_plate,
+                    "has_driver": bool(r.get("has_driver")),
+                    "direction": r.get("direction") or "unknown",
+                    "event_key": r.get("event_key"),
+                    "driver_track_id": r.get("driver_track_id"),
+                    "plate": p_num or "-",
+                    "camera": r.get("camera_name") or "CCTV",
+                    "camera_id": r.get("camera_id"),
+                    "confidence": conf,
+                    "confidence_percent": round(conf * 100, 1),
+                    "vehicle_confidence": float(r.get("vehicle_confidence") or 0),
+                    "plate_detection_confidence": float(r.get("plate_confidence") or r.get("plate_detection_confidence") or 0),
+                    "ocr_confidence": float(r.get("event_ocr_confidence") or r.get("ocr_confidence") or 0),
+                    "person_confidence": float(r.get("person_confidence") or 0),
+                    "face_confidence": float(r.get("face_confidence") or 0),
+                    "vehicle_confidence_percent": round(float(r.get("vehicle_confidence") or 0) * 100, 1),
+                    "plate_confidence_percent": round(float(r.get("plate_confidence") or r.get("plate_detection_confidence") or 0) * 100, 1),
+                    "ocr_confidence_percent": round(float(r.get("event_ocr_confidence") or r.get("ocr_confidence") or 0) * 100, 1),
+                    "person_confidence_percent": round(float(r.get("person_confidence") or r.get("face_confidence") or 0) * 100, 1),
+                    "timestamp": dt_str,
+                    "status": stext,
+                    "status_code": code,
+                    "plate_image_path": r.get("plate_image_path"),
+                    "face_image_path": r.get("face_image_path"),
+                    "driver_face_path": r.get("driver_face_path"),
+                    "vehicle_image_path": r.get("vehicle_image_path")
+                })
+
+            total_pages = max(1, (total + limit - 1) // limit)
+            return {"items": items, "total": total, "page": page, "limit": limit, "total_pages": total_pages}
+
+
 @plate_bp.route("/detections", methods=["GET"])
 def list_detections():
-    """Mengambil daftar deteksi gabungan (Plat & Wajah) dengan paginasi dan filter."""
+    """Mengambil daftar deteksi gabungan (Plat & Wajah) dengan paginasi dan filter.
+    Hanya menampilkan data berstatus 'Terbaca'.
+    """
     page = request.args.get("page", 1, type=int)
     limit = request.args.get("limit", 20, type=int)
     type_filter = request.args.get("type", "all")
@@ -287,7 +444,7 @@ def list_detections():
     end_date = request.args.get("end_date", type=str)
 
     try:
-        res = db.get_all_detections_paginated(
+        res = _get_terbaca_detections_paginated(
             page=page,
             limit=limit,
             type_filter=type_filter,
@@ -368,6 +525,9 @@ def plate_history():
 
                 plate_list.append({
                     "id": r["detection_id"],
+                    "detection_id": r["detection_id"],
+                    "plate_id": r.get("plate_id"),
+                    "event_key": r.get("event_key"),
                     "plate": r["plate_number"],
                     "camera": r.get("camera_name") or "CCTV",
                     "confidence": conf,
@@ -551,7 +711,7 @@ EXCEL_MIMETYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sh
 def export_detections_excel():
     """Mengekspor data Hasil Deteksi sesuai filter aktif ke file Excel (.xlsx)."""
     try:
-        res = db.get_all_detections_paginated(
+        res = _get_terbaca_detections_paginated(
             page=1,
             limit=5000,
             type_filter=request.args.get("type", "all"),
@@ -578,7 +738,7 @@ def export_detections_excel():
 def export_detections_pdf():
     """Mengekspor data Hasil Deteksi sesuai filter aktif ke file PDF (dengan foto)."""
     try:
-        res = db.get_all_detections_paginated(
+        res = _get_terbaca_detections_paginated(
             page=1,
             limit=5000,
             type_filter=request.args.get("type", "all"),

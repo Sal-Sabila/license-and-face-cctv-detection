@@ -632,6 +632,8 @@ async function initDashboard() {
                 }
 
                 recent.innerHTML = items.map(item => {
+                    const detectionId = item.detection_id || item.id || '';
+                    const eventKey = item.event_key || '';
                     const isVehicle = item.object_type === 'vehicle' || item.type === 'vehicle' || item.type === 'vehicle_with_plate' || item.type === 'plate';
                     const isPlate = item.type === 'vehicle_with_plate' || Boolean(item.plate && item.plate !== '-');
                     const label = isVehicle ? (isPlate ? esc(item.plate) : 'Kendaraan') : 'Orang';
@@ -645,6 +647,8 @@ async function initDashboard() {
 
                     return `
                         <div class="recent d-flex align-items-center justify-content-between p-2 rounded mb-2" 
+                             data-detection-id="${detectionId}"
+                             data-event-key="${esc(eventKey)}"
                              style="cursor: pointer; transition: background 0.2s;" 
                              onclick="openImageModal('${photoPath}', '${label}', '${esc(item.camera)} · ${esc(item.timestamp)}', 'Akurasi AI: <b>${item.confidence_percent}%</b> · Status: <b>${esc(item.status)}</b>', '${item.object_type}')">
                             <div class="d-flex align-items-center gap-3">
@@ -737,6 +741,8 @@ async function loadDetections() {
         }
 
         tableBody.innerHTML = items.map(item => {
+            const detectionId = item.detection_id || item.id || '';
+            const eventKey = item.event_key || '';
             const isVehicle = item.object_type === 'vehicle' || item.type === 'vehicle' || item.type === 'vehicle_with_plate' || item.type === 'plate';
             const isPlate = item.type === 'vehicle_with_plate' || (isVehicle && item.has_plate);
             const targetLabel = isVehicle ? `<strong class=\"d-block\">${esc(isPlate ? item.plate : 'Kendaraan')}</strong>` : `<span class=\"text-muted fst-italic\">Orang</span>`;
@@ -772,7 +778,7 @@ async function loadDetections() {
                 : `<div class="rounded border bg-light text-muted d-flex align-items-center justify-content-center small" style="width: 50px; height: 36px;"><i class="bi bi-image"></i></div>`;
 
             return `
-                <tr>
+                <tr data-detection-id="${detectionId}" data-event-key="${esc(eventKey)}">
                     <td>${thumbHtml}</td>
                     <td>${targetLabel}</td>
                     <td>${typeBadge}</td>
@@ -791,7 +797,7 @@ async function loadDetections() {
                         <button class="btn btn-outline-primary btn-sm px-2 py-1" title="Lihat Foto" onclick="openImageModal('${esc(photo)}', '${esc(item.plate || 'Detail Deteksi')}', '${esc(item.camera)} · ${esc(item.timestamp)}', '${esc(confidenceText)} · Status: ${esc(item.status)}')">
                             <i class="bi bi-eye"></i>
                         </button>
-                        <button class="btn btn-outline-danger btn-sm px-2 py-1" title="Hapus Deteksi" onclick="deleteDetection(${item.id})">
+                        <button class="btn btn-outline-danger btn-sm px-2 py-1" title="Hapus Deteksi" onclick="deleteDetection(${detectionId})">
                             <i class="bi bi-trash"></i>
                         </button>
                     </td>
@@ -1016,6 +1022,9 @@ async function loadPlateHistory() {
         }
 
         tableBody.innerHTML = items.map(item => {
+            const plateId = item.plate_id || item.id || '';
+            const detectionId = item.detection_id || '';
+            const eventKey = item.event_key || '';
             let statusBadge = '';
             if (item.status_code === 1) {
                 statusBadge = `<span class="badge bg-success-subtle text-success border border-success-subtle">Terbaca</span>`;
@@ -1031,7 +1040,7 @@ async function loadPlateHistory() {
                 : `<div class="rounded border bg-light text-muted d-flex align-items-center justify-content-center small" style="width: 54px; height: 34px;"><b>P</b></div>`;
 
             return `
-                <tr>
+                <tr data-plate-id="${plateId}" data-detection-id="${detectionId}" data-event-key="${esc(eventKey)}">
                     <td>${thumbHtml}</td>
                     <td><strong class="fs-6 text-primary">${esc(item.plate)}</strong></td>
                     <td>${esc(item.camera)}</td>
@@ -1049,7 +1058,7 @@ async function loadPlateHistory() {
                         <button class="btn btn-outline-primary btn-sm px-2 py-1" title="Lihat Foto Crop" onclick="openImageModal('${esc(photo)}', 'Plat Nomor: ${esc(item.plate)}', '${esc(item.camera)} · ${esc(item.timestamp)}', 'Confidence OCR: <b>${item.confidence_percent}%</b> · Status: <b>${esc(item.status)}</b>')">
                             <i class="bi bi-eye"></i>
                         </button>
-                        <button class="btn btn-outline-danger btn-sm px-2 py-1" title="Hapus Riwayat Plat" onclick="deletePlateHistory(${item.id})">
+                        <button class="btn btn-outline-danger btn-sm px-2 py-1" title="Hapus Riwayat Plat" onclick="deletePlateHistory(${plateId})">
                             <i class="bi bi-trash"></i>
                         </button>
                     </td>

@@ -11,11 +11,29 @@ import numpy as np
 from ultralytics import YOLO
 import supervision as sv
 import collections
+import uuid
 
 from ai.plate.detector import PlateDetector
 from ai.plate.ocr import PlateOCR
 from tracker import PlateTracker
 import db
+
+# ============================================================
+# ✅ IMPORT VALIDATOR PLAT INDONESIA
+# ============================================================
+try:
+    from ai.plate.validator import (
+        correct_and_validate_plate,
+        is_valid_plate,
+        normalize_plate_text as _npv_normalize,
+        format_plate_for_display,
+        VALID_REGION_CODES,
+    )
+    HAS_PLATE_VALIDATOR = True
+except ImportError:
+    HAS_PLATE_VALIDATOR = False
+    VALID_REGION_CODES = set()
+    print("[AI STREAM WARNING] ai.plate.validator tidak tersedia, pakai fallback regex")
 
 
 # ============================================================
@@ -71,21 +89,21 @@ ENABLE_DISTANCE_ZONE = True
 ZONE_OVERLAP_FALLBACK_RATIO = 0.45
 
 DEFAULT_MID_ZONE = [
-    (0.05, 0.10),
-    (0.95, 0.10),
-    (0.99, 1.00),
-    (0.01, 1.00),
+    (0.05, 0.05),
+    (0.95, 0.05),
+    (0.95, 0.62),
+    (0.05, 0.62),
 ]
 
 DEFAULT_NEAR_ZONE = [
-    (0.05, 0.20),
-    (0.95, 0.20),
+    (0.05, 0.55),
+    (0.95, 0.55),
     (0.99, 1.00),
     (0.01, 1.00),
 ]
 
-_ZONE_MID = [(0.05, 0.10), (0.95, 0.10), (0.99, 1.00), (0.01, 1.00)]
-_ZONE_NEAR = [(0.05, 0.20), (0.95, 0.20), (0.99, 1.00), (0.01, 1.00)]
+_ZONE_MID = list(DEFAULT_MID_ZONE)
+_ZONE_NEAR = list(DEFAULT_NEAR_ZONE)
 
 CAMERA_ZONE_CONFIG = {
     1: {"name": "GSMasukViewLuar", "mid": _ZONE_MID, "near": _ZONE_NEAR},
@@ -213,15 +231,16 @@ PLATE_REVIEW_CONFIDENCE = 0.50
 PLATE_COOLDOWN = 45.0
 PERSON_COOLDOWN = 45.0
 
-TRACK_REUSE_GAP = 15.0
+TRACK_REUSE_GAP = 8.0
+
+EVENT_SESSION_ID_LENGTH = 12
 
 TRACKER_LOST_BUFFER = 150
-TRACKER_MATCH_THRESHOLD = 0.75
+TRACKER_MATCH_THRESHOLD = 0.80
 TRACKER_ACTIVATION_THRESHOLD = 0.30
 
-TRACK_EVENT_COOLDOWN = 600.0
+TRACK_EVENT_COOLDOWN = 2.0
 
-# ✅ FIX: Dedup visual
 VISUAL_DEDUP_COOLDOWN = 60.0
 VISUAL_HAMMING_THRESHOLD = 3
 
@@ -229,13 +248,20 @@ PERSON_DEDUP_COOLDOWN = 120.0
 PERSON_HAMMING_THRESHOLD = 8
 PERSON_TRACK_DEDUP_COOLDOWN = 300.0
 
-# ✅ FIX BARU: Dedup berbasis centroid untuk kendaraan
-VEHICLE_CENTROID_DEDUP_DISTANCE = 150.0     # px — jarak maksimum centroid (mobil bergerak)
-VEHICLE_CENTROID_DEDUP_AREA_RATIO = 0.40    # toleransi ukuran bbox (0.4 = 40%)
-VEHICLE_CENTROID_DEDUP_COOLDOWN = 30.0      # detik
-VEHICLE_CENTROID_MAX_HISTORY = 20           # max entry per kamera
+# ============================================================
+# Object Grouping Configurations
+# ============================================================
+OBJECT_GROUP_MAX_GAP = 4.0
+OBJECT_GROUP_MAX_CENTROID_DISTANCE = 120.0
+OBJECT_GROUP_PERSON_MAX_DIST = 90.0
+OBJECT_GROUP_AREA_TOLERANCE = 0.50
+OBJECT_GROUP_MIN_IOU = 0.15
 
-# ✅ FIX #3: Dedup berbasis plat
+VEHICLE_CENTROID_DEDUP_DISTANCE = 150.0
+VEHICLE_CENTROID_DEDUP_AREA_RATIO = 0.40
+VEHICLE_CENTROID_DEDUP_COOLDOWN = 30.0
+VEHICLE_CENTROID_MAX_HISTORY = 20
+
 PLATE_TEXT_DEDUP_COOLDOWN = 120.0
 
 PERSON_CAPTURE_CONFIDENCE = 0.40
@@ -253,6 +279,10 @@ LIGHT_OVER_THRESHOLD = 205.0
 LIGHT_GLARE_RATIO = 0.18
 
 DEBUG_PERFORMANCE = True
+DEBUG_LOG_SAMPLE_EVERY = 30
+
+# ✅ Confidence improvement threshold untuk "best frame only"
+CONFIDENCE_IMPROVEMENT_THRESHOLD = 0.05
 
 
 # ============================================================
@@ -267,16 +297,73 @@ def _safe_float(value, default=0.0):
 
 
 def _normalize_text(text):
+    """Normalisasi dasar: uppercase, hapus non-alphanumeric. TIDAK koreksi."""
     if text is None:
         return ""
     return re.sub(r"[^A-Z0-9]", "", str(text).upper().strip())
 
 
+def _correct_plate_text(raw_text):
+    """
+    ✅ Koreksi OCR mentah menjadi plat valid (kode wilayah Indonesia).
+    Return (corrected_text, is_valid, penalty).
+    """
+    if not raw_text:
+        return "", False, 0.0
+
+    if HAS_PLATE_VALIDATOR:
+        result = correct_and_validate_plate(raw_text)
+        return (
+            result["corrected"],
+            result["valid"],
+            result["confidence_penalty"],
+        )
+
+    # Fallback regex longgar
+    normalized = _normalize_text(raw_text)
+    valid = bool(re.match(r"^[A-Z]{1,2}[0-9]{1,4}[A-Z]{0,3}$", normalized))
+    return normalized, valid, 0.0
+
+
 def _valid_indonesian_plate(text):
+    """✅ Validasi plat dengan kode wilayah resmi."""
+    if not text:
+        return False
+
+    if HAS_PLATE_VALIDATOR:
+        return is_valid_plate(text)
+
+    # Fallback regex
     text = _normalize_text(text)
     if not text or not (3 <= len(text) <= 9):
         return False
     return bool(re.match(r"^[A-Z]{1,2}[0-9]{1,4}[A-Z]{0,3}$", text))
+
+
+def _format_plate_display(text):
+    """Format untuk display: 'AB1234CD' -> 'AB 1234 CD'."""
+    if HAS_PLATE_VALIDATOR:
+        return format_plate_for_display(text)
+
+    text = _normalize_text(text)
+    match = re.match(r"^([A-Z]{1,2})([0-9]{1,4})([A-Z]{0,3})$", text)
+    if not match:
+        return text
+    prefix, number, suffix = match.groups()
+    return " ".join(x for x in (prefix, number, suffix) if x)
+
+
+def _extract_region_code(text):
+    """Ambil kode wilayah dari plat (kalau ada)."""
+    if not text or not HAS_PLATE_VALIDATOR:
+        return None
+    text = _normalize_text(text)
+    for length in (2, 1):
+        if len(text) >= length + 1:
+            prefix = text[:length]
+            if prefix in VALID_REGION_CODES:
+                return prefix
+    return None
 
 
 def _safe_filename(text):
@@ -414,42 +501,94 @@ def _bbox_from_track(track):
 
 
 def _track_to_result(track):
+    """✅ Konversi Track → dict, dengan koreksi & validasi plat."""
     bbox = _bbox_from_track(track)
     if bbox is None:
         return None
+
     vote = None
     try:
         vote = track.hasil_voting()
     except Exception:
         vote = None
-    text = ""; formatted = ""; ocr_conf = 0.0; votes = 0; total_reads = 0
+
+    text = ""
+    formatted = ""
+    ocr_conf = 0.0
+    votes = 0
+    total_reads = 0
+    raw_text = ""
+    correction_applied = False
+    penalty = 0.0
+
     if vote:
-        text = _normalize_text(vote.get("text", ""))
-        formatted = vote.get("formatted", text)
-        ocr_conf = _safe_float(vote.get("confidence_rata2", 0.0))
+        raw_text = vote.get("text", "")
         votes = int(vote.get("jumlah_muncul", 0) or 0)
         total_reads = int(vote.get("total_bacaan", 0) or 0)
+
+        if HAS_PLATE_VALIDATOR:
+            result = correct_and_validate_plate(raw_text)
+            if result["valid"]:
+                text = result["corrected"]
+                formatted = _format_plate_display(text)
+                penalty = result["confidence_penalty"]
+                ocr_conf = _safe_float(vote.get("confidence_rata2", 0.0)) * (1.0 - penalty * 0.5)
+                ocr_conf = max(0.0, ocr_conf)
+                correction_applied = (text != raw_text)
+            else:
+                text = _normalize_text(raw_text)
+                formatted = vote.get("formatted", text)
+                ocr_conf = _safe_float(vote.get("confidence_rata2", 0.0))
+        else:
+            text = _normalize_text(raw_text)
+            formatted = vote.get("formatted", text)
+            ocr_conf = _safe_float(vote.get("confidence_rata2", 0.0))
+
     if not text:
-        text = _normalize_text(getattr(track, "best_text", ""))
-        ocr_conf = _safe_float(getattr(track, "best_ocr_confidence", 0.0))
-        formatted = text
+        raw_best = getattr(track, "best_text", "")
+        raw_text = raw_text or raw_best
+        if HAS_PLATE_VALIDATOR and raw_best:
+            result = correct_and_validate_plate(raw_best)
+            if result["valid"]:
+                text = result["corrected"]
+                formatted = _format_plate_display(text)
+                penalty = result["confidence_penalty"]
+                ocr_conf = _safe_float(getattr(track, "best_ocr_confidence", 0.0)) * (1.0 - penalty * 0.5)
+                correction_applied = (text != raw_best)
+            else:
+                text = _normalize_text(raw_best)
+                formatted = text
+                ocr_conf = _safe_float(getattr(track, "best_ocr_confidence", 0.0))
+        else:
+            text = _normalize_text(raw_best)
+            ocr_conf = _safe_float(getattr(track, "best_ocr_confidence", 0.0))
+            formatted = text
+
     return {
         "id": int(getattr(track, "id", -1)),
         "track_id": int(getattr(track, "id", -1)),
         "box": bbox, "bbox": bbox,
         "conf": _safe_float(getattr(track, "detection_confidence", 0.0)),
         "detection_confidence": _safe_float(getattr(track, "detection_confidence", 0.0)),
-        "text": text, "formatted": formatted, "raw_text": text,
-        "ocr_conf": ocr_conf, "confidence": ocr_conf,
+        "text": text,
+        "formatted": formatted,
+        "raw_text": raw_text,
+        "ocr_conf": ocr_conf,
+        "confidence": ocr_conf,
         "valid": _valid_indonesian_plate(text),
-        "votes": votes, "total_reads": total_reads,
+        "votes": votes,
+        "total_reads": total_reads,
         "crop": getattr(track, "best_crop", None),
         "vehicle_track_id": (
             int(getattr(track, "vehicle_track_id"))
             if getattr(track, "vehicle_track_id", None) is not None
             else None
         ),
+        "vehicle_generation": getattr(track, "vehicle_generation", 1),
         "distance_zone": "NEAR",
+        "correction_applied": correction_applied,
+        "correction_penalty": penalty,
+        "region_code": _extract_region_code(text),
     }
 
 
@@ -537,7 +676,10 @@ def _camera_zone_name(camera_id):
 
 
 def _bbox_polygon_overlap_ratio(box, polygon, width, height):
-    if polygon is None or len(polygon) < 3:
+    if polygon is None:
+        return 0.0
+    polygon = np.asarray(polygon, dtype=np.int32)
+    if polygon.ndim != 2 or polygon.shape[0] < 3 or polygon.shape[1] != 2:
         return 0.0
     x1, y1, x2, y2 = [int(v) for v in box]
     x1 = max(0, min(x1, width - 1))
@@ -605,6 +747,22 @@ def _plate_ready_for_ocr(plate):
         and height >= OCR_MIN_PLATE_HEIGHT
         and confidence >= OCR_MIN_PLATE_CONFIDENCE
     )
+
+
+def _calculate_iou(boxA, boxB):
+    if not boxA or not boxB or len(boxA) != 4 or len(boxB) != 4:
+        return 0.0
+    xA = max(boxA[0], boxB[0])
+    yA = max(boxA[1], boxB[1])
+    xB = min(boxA[2], boxB[2])
+    yB = min(boxA[3], boxB[3])
+    inter = max(0, xB - xA) * max(0, yB - yA)
+    if inter == 0:
+        return 0.0
+    areaA = max(1, (boxA[2] - boxA[0]) * (boxA[3] - boxA[1]))
+    areaB = max(1, (boxB[2] - boxB[0]) * (boxB[3] - boxB[1]))
+    union = areaA + areaB - inter
+    return float(inter) / float(max(1, union))
 
 
 class AdaptiveAIController:
@@ -694,35 +852,21 @@ class StreamAIService:
             self.plate_ocr = None
             print(f"[AI STREAM WARNING] OCR tidak tersedia: {exc}")
 
-        self.person_tracker = sv.ByteTrack(
-            track_activation_threshold=TRACKER_ACTIVATION_THRESHOLD,
-            lost_track_buffer=TRACKER_LOST_BUFFER,
-            minimum_matching_threshold=TRACKER_MATCH_THRESHOLD,
-            frame_rate=25,
-        )
-
-        self.plate_tracker = PlateTracker(
-            iou_threshold=PLATE_TRACKER_IOU,
-            max_frame_gap=PLATE_TRACKER_FRAME_GAP,
-            ocr_every_n_matches=PLATE_TRACKER_OCR_EVERY,
-            min_final_confidence=PLATE_TRACKER_MIN_CONFIDENCE,
-            min_consistent_reads=2,
-            single_read_ocr_confidence=0.72,
-            single_read_detection_confidence=0.55,
-            max_history=PLATE_TRACKER_MAX_HISTORY,
-        )
-
         self.captured_tracks = {}
         self.saved_plate_events = {}
         self.last_ai_time = 0.0
         self.track_lifecycle = {}
+
+        self.event_session_id = uuid.uuid4().hex[:EVENT_SESSION_ID_LENGTH]
+
         self.adaptive_ai = AdaptiveAIController()
 
-        # ✅ Cache untuk dedup
         self._visual_hashes = {}
         self._plate_text_cache = {}
-        # ✅ FIX BARU: Cache centroid untuk dedup kendaraan
         self._vehicle_centroids = {}
+
+        self.object_groups = {}
+        self._group_counter = 0
 
         self.frame_queue = collections.deque(maxlen=2)
         self.frame_queue_lock = threading.Lock()
@@ -765,11 +909,9 @@ class StreamAIService:
         print(f"[AI STREAM] Distance zone  : {'ON' if ENABLE_DISTANCE_ZONE else 'OFF'}")
         print("[AI STREAM] Plate ROI       : NEAR zone vehicle")
         print("[AI STREAM] PlateTracker    : multi-frame voting")
-        print("[AI STREAM] Arah            : per-kamera (bukan line crossing)")
-        print(f"[AI STREAM] Anti-dup        : centroid_dist={VEHICLE_CENTROID_DEDUP_DISTANCE}px, "
-              f"centroid_ratio={VEHICLE_CENTROID_DEDUP_AREA_RATIO}, "
-              f"centroid_cool={VEHICLE_CENTROID_DEDUP_COOLDOWN}s")
-        print("[AI STREAM] OCR variants    : original/clahe/sharpen/threshold")
+        print("[AI STREAM] Event identity  : object_group_id (stable across track_id switch)")
+        print("[AI STREAM] Best frame only : confidence improvement > 5%")
+        print(f"[AI STREAM] Plate validator : {'AKTIF (kode wilayah)' if HAS_PLATE_VALIDATOR else 'FALLBACK REGEX'}")
         print("=" * 75)
 
     def get_performance_status(self):
@@ -810,12 +952,193 @@ class StreamAIService:
             self.camera_states[camera_id] = state
         return state
 
+    # ============================================================
+    # OBJECT GROUPING
+    # ============================================================
+    def _assign_object_groups(self, detections, camera_id, current_time=None, frame=None):
+        """Object Grouping: hubungkan track_id temporer dengan object_group_id stabil."""
+        camera_id = _normalize_camera_id(camera_id)
+        now = float(current_time if current_time is not None else time.time())
+        assigned_in_this_frame = set()
+
+        for d in detections:
+            bbox = d.get("box", [0, 0, 0, 0])
+            if not bbox or len(bbox) != 4:
+                continue
+
+            cx = (bbox[0] + bbox[2]) / 2.0
+            cy = (bbox[1] + bbox[3]) / 2.0
+            bw = max(1, bbox[2] - bbox[0])
+            bh = max(1, bbox[3] - bbox[1])
+            area = bw * bh
+
+            track_id = int(d.get("track_id", -1)) if d.get("track_id") is not None else -1
+            conf = _safe_float(d.get("conf", d.get("confidence", 0.0)))
+            object_type = d.get("object_type", "vehicle")
+            vehicle_type = d.get("vehicle_type", "unknown")
+            zone = d.get("distance_zone", "UNKNOWN")
+
+            v_hash = None
+            if object_type == "person" and frame is not None:
+                try:
+                    h, w = frame.shape[:2]
+                    px1 = max(0, min(w - 1, bbox[0]))
+                    py1 = max(0, min(h - 1, bbox[1]))
+                    px2 = max(0, min(w, bbox[2]))
+                    py2 = max(0, min(h, bbox[3]))
+                    if px2 > px1 and py2 > py1:
+                        crop = frame[py1:py2, px1:px2]
+                        v_hash = self._visual_hash(crop)
+                except Exception:
+                    v_hash = None
+
+            matched_group = None
+            best_score = -1.0
+            best_dist = 0.0
+            best_iou = 0.0
+            is_track_switch = False
+            old_track_id = None
+
+            max_dist_allowed = (
+                OBJECT_GROUP_PERSON_MAX_DIST
+                if object_type == "person"
+                else OBJECT_GROUP_MAX_CENTROID_DISTANCE
+            )
+
+            for gid, group in self.object_groups.items():
+                if gid in assigned_in_this_frame:
+                    continue
+                if group.get("camera_id") != camera_id:
+                    continue
+                if group.get("object_type") != object_type:
+                    continue
+                if group.get("last_zone") != zone:
+                    continue
+                if now - group.get("last_seen", 0) > OBJECT_GROUP_MAX_GAP:
+                    continue
+
+                g_last_track = group.get("last_track_id", -1)
+                g_centroid = group.get("last_centroid", (0, 0))
+                g_bbox = group.get("last_bbox", [0, 0, 0, 0])
+                g_area = max(1, (g_bbox[2] - g_bbox[0]) * (g_bbox[3] - g_bbox[1]))
+
+                dist = ((cx - g_centroid[0]) ** 2 + (cy - g_centroid[1]) ** 2) ** 0.5
+                iou_val = _calculate_iou(bbox, g_bbox)
+                area_ratio = abs(area - g_area) / max(1, max(area, g_area))
+
+                if track_id >= 0 and g_last_track == track_id:
+                    if dist <= max_dist_allowed * 1.5 or iou_val > 0.0:
+                        score = 1000.0 - dist
+                        if score > best_score:
+                            best_score = score
+                            matched_group = group
+                            best_dist = dist
+                            best_iou = iou_val
+                            is_track_switch = False
+                            old_track_id = g_last_track
+                        continue
+
+                if object_type == "vehicle":
+                    two_wheelers = {"motorcycle", "bicycle"}
+                    g_two = group.get("vehicle_type") in two_wheelers
+                    v_two = vehicle_type in two_wheelers
+                    if group.get("vehicle_type") != "unknown" and vehicle_type != "unknown":
+                        if g_two != v_two:
+                            continue
+
+                if dist > max_dist_allowed:
+                    continue
+                if area_ratio > OBJECT_GROUP_AREA_TOLERANCE:
+                    continue
+                if iou_val < OBJECT_GROUP_MIN_IOU and dist > (max_dist_allowed * 0.65):
+                    continue
+
+                if object_type == "person" and v_hash and group.get("v_hash"):
+                    hdist = self._hamming_distance(v_hash, group["v_hash"])
+                    if hdist > PERSON_HAMMING_THRESHOLD * 2:
+                        continue
+
+                score = (iou_val * 100.0) + (100.0 - (dist / max(1.0, max_dist_allowed)) * 50.0)
+                if score > best_score:
+                    best_score = score
+                    matched_group = group
+                    best_dist = dist
+                    best_iou = iou_val
+                    old_track_id = g_last_track
+                    is_track_switch = (
+                        g_last_track != track_id
+                        and g_last_track >= 0
+                        and track_id >= 0
+                    )
+
+            if matched_group is not None:
+                group_id = matched_group["object_group_id"]
+                assigned_in_this_frame.add(group_id)
+
+                if is_track_switch and DEBUG_PERFORMANCE:
+                    print(
+                        f"[TRACK ID SWITCH -> SAME GROUP] "
+                        f"camera={camera_id} old_track_id={old_track_id} "
+                        f"new_track_id={track_id} object_group_id={group_id} "
+                        f"distance={best_dist:.1f} iou={best_iou:.2f}"
+                    )
+
+                matched_group["last_seen"] = now
+                matched_group["last_bbox"] = bbox
+                matched_group["last_centroid"] = (cx, cy)
+                matched_group["last_track_id"] = track_id
+                matched_group["last_zone"] = zone
+                if track_id >= 0:
+                    matched_group.setdefault("tracks_seen", set()).add(track_id)
+                if conf > matched_group.get("best_confidence", 0.0):
+                    matched_group["best_confidence"] = conf
+                    matched_group["best_bbox"] = bbox
+                    matched_group["best_track_id"] = track_id
+                if vehicle_type != "unknown":
+                    matched_group["vehicle_type"] = vehicle_type
+                if v_hash:
+                    matched_group["v_hash"] = v_hash
+
+            else:
+                self._group_counter += 1
+                group_id = f"{object_type}_group_{self._group_counter:03d}"
+                assigned_in_this_frame.add(group_id)
+
+                new_group = {
+                    "object_group_id": group_id,
+                    "camera_id": camera_id,
+                    "object_type": object_type,
+                    "vehicle_type": vehicle_type,
+                    "last_zone": zone,
+                    "last_seen": now,
+                    "last_bbox": bbox,
+                    "last_centroid": (cx, cy),
+                    "last_track_id": track_id,
+                    "best_confidence": conf,
+                    "best_bbox": bbox,
+                    "best_track_id": track_id,
+                    "tracks_seen": {track_id} if track_id >= 0 else set(),
+                    "v_hash": v_hash,
+                }
+                self.object_groups[group_id] = new_group
+
+            d["object_group_id"] = group_id
+            d["track_id"] = track_id
+            d["confidence"] = conf
+            d["conf"] = conf
+
+    # ============================================================
+    # DETECTION
+    # ============================================================
     def _detect_vehicles(self, frame, camera_id=1):
         camera_id = _normalize_camera_id(camera_id)
         detections = []
         try:
             h, w = frame.shape[:2]
-            result = self.yolo_person(frame, classes=VEHICLE_CLASSES, imgsz=VEHICLE_IMGSZ, conf=VEHICLE_CONFIDENCE, verbose=False)[0]
+            result = self.yolo_person(
+                frame, classes=VEHICLE_CLASSES, imgsz=VEHICLE_IMGSZ,
+                conf=VEHICLE_CONFIDENCE, verbose=False
+            )[0]
             boxes = result.boxes
             if boxes is None or len(boxes) == 0:
                 tracked = sv.Detections.empty()
@@ -828,31 +1151,21 @@ class StreamAIService:
                     bw = max(0, x2 - x1); bh = max(0, y2 - y1)
                     zone = _get_distance_zone(bbox, camera_id, w, h)
 
-                    if DEBUG_PERFORMANCE:
-                        print(f"[ZONE DEBUG] cam={camera_id} cls={cls_id} bbox={bbox} bw={bw} bh={bh} zone={zone}")
-
                     if ENABLE_DISTANCE_ZONE and zone == "FAR":
-                        if DEBUG_PERFORMANCE:
-                            print(f"[SKIP] FAR: {bbox}")
                         continue
                     if cls_id == 0:
                         if bw < MIN_PERSON_WIDTH or bh < MIN_PERSON_HEIGHT:
-                            if DEBUG_PERFORMANCE:
-                                print(f"[SKIP] PERSON TOO SMALL: bw={bw} bh={bh}")
                             continue
                     elif cls_id in VEHICLE_TYPES:
                         if bw < MIN_VEHICLE_WIDTH or bh < MIN_VEHICLE_HEIGHT:
-                            if DEBUG_PERFORMANCE:
-                                print(f"[SKIP] VEHICLE TOO SMALL: bw={bw} bh={bh}")
                             continue
                         aspect = bw / max(1, bh)
                         if aspect < FAKE_VEHICLE_ASPECT_MIN:
-                            if DEBUG_PERFORMANCE:
-                                print(f"[SKIP] FAKE VEHICLE (aspect too small): aspect={aspect:.2f} cls={cls_id}")
                             continue
                     else:
                         continue
                     keep_indices.append(i)
+
                 if keep_indices:
                     filtered_result = result[keep_indices]
                     tracked = self._camera_state(camera_id)["person_tracker"].update_with_detections(
@@ -860,6 +1173,7 @@ class StreamAIService:
                     )
                 else:
                     tracked = sv.Detections.empty()
+
             for i in range(len(tracked)):
                 bbox = tracked.xyxy[i].astype(int).tolist()
                 cls_id = int(tracked.class_id[i]) if tracked.class_id is not None else 0
@@ -874,15 +1188,64 @@ class StreamAIService:
                     "object_type": ("vehicle" if cls_id in VEHICLE_TYPES else "person"),
                     "vehicle_type": VEHICLE_TYPES.get(cls_id, "unknown"),
                 })
+
+            cam_state = self._camera_state(camera_id)
+            prev_objects = cam_state.setdefault("prev_tracked_objects", {})
+            current_objects = {}
+            now = time.time()
+
+            for d in detections:
+                tid = d.get("track_id")
+                if tid is None or tid < 0:
+                    continue
+                current_objects[tid] = {
+                    "box": d["box"],
+                    "conf": d["conf"],
+                    "cls": d["cls"],
+                    "time": now
+                }
+
+                if tid not in prev_objects:
+                    best_old_id = None
+                    best_iou = 0.0
+                    for old_tid, old_data in prev_objects.items():
+                        if old_tid in current_objects:
+                            continue
+                        same_type = (old_data["cls"] == d["cls"]) or (
+                            old_data["cls"] in VEHICLE_TYPES and d["cls"] in VEHICLE_TYPES
+                        )
+                        if not same_type:
+                            continue
+                        iou_val = _calculate_iou(old_data["box"], d["box"])
+                        if iou_val > best_iou:
+                            best_iou = iou_val
+                            best_old_id = old_tid
+
+                    if best_old_id is not None and best_iou >= 0.25 and DEBUG_PERFORMANCE:
+                        print(
+                            f"[TRACK SWITCH] camera={camera_id} "
+                            f"old_track_id={best_old_id} new_track_id={tid} "
+                            f"iou={best_iou:.2f}"
+                        )
+
+            updated_prev = {
+                tid: info for tid, info in prev_objects.items()
+                if now - info["time"] < 3.0 and tid not in current_objects
+            }
+            updated_prev.update(current_objects)
+            cam_state["prev_tracked_objects"] = updated_prev
+
         except Exception as exc:
             print(f"[AI STREAM ERROR] Vehicle detection failed: {exc}")
         return detections
 
-    def _detect_plates_in_vehicles(self, frame, vehicle_dets):
+    def _detect_plates_in_vehicles(self, frame, vehicle_dets, camera_id=None, current_time=None):
         h, w = frame.shape[:2]
-        candidates = [d for d in vehicle_dets
-                      if d.get("cls") in (2, 3, 5, 7)
-                      and (not ENABLE_DISTANCE_ZONE or d.get("distance_zone") == "NEAR")]
+        candidates = [
+            d for d in vehicle_dets
+            if d.get("cls") in (2, 3, 5, 7)
+            and (not ENABLE_DISTANCE_ZONE or d.get("distance_zone") == "NEAR")
+        ]
         candidates.sort(key=lambda d: (
             1 if d.get("distance_zone") == "NEAR" else 0,
             max(1, d["box"][2] - d["box"][0]) * max(1, d["box"][3] - d["box"][1]),
@@ -926,98 +1289,151 @@ class StreamAIService:
                 if plate_crop.size == 0:
                     continue
                 item = dict(plate)
-                item["bbox"] = [bx1, by1, bx2, by2]; item["box"] = item["bbox"]
+                item["bbox"] = [bx1, by1, bx2, by2]
+                item["box"] = item["bbox"]
                 item["crop"] = plate_crop
                 item["vehicle_cls"] = vehicle.get("cls", 0)
                 item["vehicle_track_id"] = vehicle.get("track_id", -1)
+                item["vehicle_object_group_id"] = vehicle.get("object_group_id")
                 item["vehicle_box"] = [vx1, vy1, vx2, vy2]
+                item["vehicle_crop"] = crop
                 item["distance_zone"] = "NEAR"
                 item["ocr_ready"] = _plate_ready_for_ocr(item)
                 all_plates.append(item)
-        all_plates.sort(key=lambda x: _safe_float(x.get("confidence", x.get("conf", 0.0))), reverse=True)
+
+        all_plates.sort(
+            key=lambda x: _safe_float(x.get("confidence", x.get("conf", 0.0))),
+            reverse=True
+        )
         final = []
         for candidate in all_plates:
             bx = candidate.get("bbox", [])
             if len(bx) != 4:
                 continue
-            cx = (bx[0] + bx[2]) / 2.0; cy = (bx[1] + bx[3]) / 2.0
+            cx = (bx[0] + bx[2]) / 2.0
+            cy = (bx[1] + bx[3]) / 2.0
             duplicate = False
             for existing in final:
                 eb = existing.get("bbox", [])
                 if len(eb) != 4:
                     continue
-                ecx = (eb[0] + eb[2]) / 2.0; ecy = (eb[1] + eb[3]) / 2.0
+                ecx = (eb[0] + eb[2]) / 2.0
+                ecy = (eb[1] + eb[3]) / 2.0
                 if ((cx - ecx) ** 2 + (cy - ecy) ** 2) ** 0.5 < 18:
-                    duplicate = True; break
+                    duplicate = True
+                    break
             if not duplicate:
                 final.append(candidate)
         return final
 
     def _consume_finished_plate(self, frame, vehicle_dets, camera_id):
+        """✅ Ambil plate yang sudah finalized, koreksi, simpan raw_text."""
         camera_id = _normalize_camera_id(camera_id)
         plate_tracker = self._camera_state(camera_id)["plate_tracker"]
-        finished = plate_tracker.consume_latest_finished_capture()
-        if finished is None:
-            return None
-        text = _normalize_text(_get_value(finished, ["text", "formatted"], ""))
-        formatted = finished.get("formatted", text)
-        ocr_conf = _safe_float(finished.get("confidence", 0.0))
-        det_conf = _safe_float(finished.get("detection_confidence", 0.0))
-        track_id = _get_value(finished, ["track_id", "id"], "unknown")
-        crop = finished.get("crop")
-        bbox = finished.get("bbox")
-        if frame is not None and bbox and len(bbox) == 4:
-            original_plate_crop = _prepare_high_quality_capture(frame, bbox, padding=0.20, target_short_side=400, max_scale=3.0, max_long_side=1000, sharpen=True)
-            if original_plate_crop is not None:
-                crop = original_plate_crop
-        valid = _valid_indonesian_plate(text)
-        if not valid and det_conf < PLATE_REVIEW_CONFIDENCE:
-            return None
-        plate_key = f"plate:{camera_id}:{text}" if valid and text else f"plate-track:{camera_id}:{track_id}"
-        last_saved = self.saved_plate_events.get(plate_key)
-        if last_saved is not None and time.time() - last_saved < PLATE_COOLDOWN:
-            return None
-        self.saved_plate_events[plate_key] = time.time()
-        prefix = "plate" if valid else "plate_review"
-        plate_path = save_plate_capture(crop, track_id, camera_id, formatted or text or "unknown", prefix=prefix)
-        finished = dict(finished)
-        vehicle_track_id = finished.get("vehicle_track_id")
-        if vehicle_track_id is None and bbox and len(bbox) == 4:
-            px1, py1, px2, py2 = [float(v) for v in bbox]
-            pcx = (px1 + px2) / 2.0; pcy = (py1 + py2) / 2.0
-            best_vehicle = None; best_score = 0.0
-            for vehicle in vehicle_dets or []:
-                if vehicle.get("cls") not in VEHICLE_TYPES:
-                    continue
-                vb = vehicle.get("box") or []
-                if len(vb) != 4:
-                    continue
-                vx1, vy1, vx2, vy2 = [float(v) for v in vb]
-                if not (vx1 <= pcx <= vx2 and vy1 <= pcy <= vy2):
-                    continue
-                vw = max(1.0, vx2 - vx1); vh = max(1.0, vy2 - vy1)
-                score = 1.0 / (vw * vh)
-                if score > best_score:
-                    best_score = score; best_vehicle = vehicle
-            if best_vehicle is not None:
-                vehicle_track_id = best_vehicle.get("track_id")
-        try:
-            vehicle_track_id = int(vehicle_track_id) if vehicle_track_id is not None else None
-        except (TypeError, ValueError):
-            vehicle_track_id = None
-        finished.update({
-            "text": text, "formatted": formatted or text, "ocr_conf": ocr_conf,
-            "conf": det_conf, "valid": valid, "plate_image_path": plate_path,
-            "vehicle_track_id": vehicle_track_id,
-        })
-        self.last_plate_capture = finished
-        self.last_plate_history = list(plate_tracker.history)
-        print(f"[PLATE RESULT] Cam={camera_id} Track={track_id} {formatted or text or 'REVIEW'} | OCR={ocr_conf:.1%} | YOLO={det_conf:.1%}")
-        return finished
+        finished_list = plate_tracker.consume_finished_captures()
+        if not finished_list:
+            return []
 
-    def _save_person_events(self, frame, person_dets, camera_id, current_time):
-        return None
+        processed = []
+        now = time.time()
+        for finished in finished_list:
+            # ✅ Ambil raw_text dari tracker
+            raw_text_from_ocr = finished.get("raw_text") or finished.get("text", "")
+            text = _normalize_text(_get_value(finished, ["text", "formatted"], ""))
 
+            # ✅ Koreksi & validasi
+            corrected_text, is_valid_from_validator, penalty = _correct_plate_text(text)
+            if is_valid_from_validator:
+                text = corrected_text
+
+            formatted = finished.get("formatted", text) or _format_plate_display(text)
+            ocr_conf = _safe_float(finished.get("confidence", 0.0))
+            det_conf = _safe_float(finished.get("detection_confidence", 0.0))
+            track_id = _get_value(finished, ["track_id", "id"], "unknown")
+            crop = finished.get("crop")
+            bbox = finished.get("bbox")
+
+            if frame is not None and bbox and len(bbox) == 4:
+                original_plate_crop = _prepare_high_quality_capture(
+                    frame, bbox, padding=0.20, target_short_side=400,
+                    max_scale=3.0, max_long_side=1000, sharpen=True
+                )
+                if original_plate_crop is not None:
+                    crop = original_plate_crop
+
+            valid = _valid_indonesian_plate(text)
+            if not valid and det_conf < PLATE_REVIEW_CONFIDENCE:
+                continue
+
+            plate_key = f"plate:{camera_id}:{text}" if valid and text else f"plate-track:{camera_id}:{track_id}"
+            last_saved = self.saved_plate_events.get(plate_key)
+            if last_saved is not None and now - last_saved < PLATE_COOLDOWN:
+                continue
+            self.saved_plate_events[plate_key] = now
+
+            prefix = "plate" if valid else "plate_review"
+            plate_path = save_plate_capture(
+                crop, track_id, camera_id, formatted or text or "unknown", prefix=prefix
+            )
+
+            finished = dict(finished)
+            vehicle_track_id = finished.get("vehicle_track_id")
+            if vehicle_track_id is None and bbox and len(bbox) == 4:
+                px1, py1, px2, py2 = [float(v) for v in bbox]
+                pcx = (px1 + px2) / 2.0
+                pcy = (py1 + py2) / 2.0
+                best_vehicle = None
+                best_score = 0.0
+                for vehicle in vehicle_dets or []:
+                    if vehicle.get("cls") not in VEHICLE_TYPES:
+                        continue
+                    vb = vehicle.get("box") or []
+                    if len(vb) != 4:
+                        continue
+                    vx1, vy1, vx2, vy2 = [float(v) for v in vb]
+                    if not (vx1 <= pcx <= vx2 and vy1 <= pcy <= vy2):
+                        continue
+                    vw = max(1.0, vx2 - vx1)
+                    vh = max(1.0, vy2 - vy1)
+                    score = 1.0 / (vw * vh)
+                    if score > best_score:
+                        best_score = score
+                        best_vehicle = vehicle
+                if best_vehicle is not None:
+                    vehicle_track_id = best_vehicle.get("track_id")
+                    finished["vehicle_object_group_id"] = best_vehicle.get("object_group_id")
+
+            try:
+                vehicle_track_id = int(vehicle_track_id) if vehicle_track_id is not None else None
+            except (TypeError, ValueError):
+                vehicle_track_id = None
+
+            vehicle_crop = finished.get("vehicle_crop")
+            vehicle_object_group_id = finished.get("vehicle_object_group_id")
+
+            finished.update({
+                "text": text,
+                "formatted": formatted or text,
+                "raw_text": raw_text_from_ocr,  # ✅ simpan raw
+                "ocr_conf": ocr_conf,
+                "conf": det_conf,
+                "valid": valid,
+                "plate_image_path": plate_path,
+                "vehicle_track_id": vehicle_track_id,
+                "vehicle_object_group_id": vehicle_object_group_id,
+                "vehicle_crop": vehicle_crop,
+                "region_code": _extract_region_code(text),
+                "correction_penalty": penalty,
+            })
+            self.last_plate_capture = finished
+            self.last_plate_history = list(plate_tracker.history)
+            processed.append(finished)
+
+        return processed
+
+    # ============================================================
+    # SAVE EVENTS (ANTI-DUPLIKAT UTAMA)
+    # ============================================================
     @staticmethod
     def _intersection_ratio(inner_box, outer_box):
         ix1 = max(inner_box[0], outer_box[0])
@@ -1028,14 +1444,340 @@ class StreamAIService:
         area = max(1, (inner_box[2] - inner_box[0]) * (inner_box[3] - inner_box[1]))
         return intersection / area
 
+    def _save_consistent_events(self, frame, person_dets, plate_dets, camera_id, current_time):
+        """Simpan event dengan dedup object_group_id + koreksi plat."""
+        camera_id = _normalize_camera_id(camera_id)
+        camera_orientation = db.get_camera_direction(camera_id)
+
+        vehicles = [item for item in person_dets if item.get("cls") in VEHICLE_TYPES]
+        people = [item for item in person_dets if item.get("cls") == 0]
+
+        associated_people = set()
+
+        # ========================================================
+        # VEHICLE EVENTS
+        # ========================================================
+        for vehicle in vehicles:
+            vehicle_box = vehicle.get("box", [0, 0, 0, 0])
+
+            try:
+                vehicle_id = int(vehicle.get("track_id", -1))
+            except (TypeError, ValueError):
+                vehicle_id = -1
+
+            object_group_id = vehicle.get("object_group_id")
+
+            vehicle_type = (
+                vehicle.get("vehicle_type")
+                or VEHICLE_TYPES.get(vehicle.get("cls"), "unknown")
+            )
+
+            matching_plates = []
+            geometric_plates = []
+            for plate in plate_dets:
+                plate_vehicle_group = plate.get("vehicle_object_group_id")
+                plate_vehicle_id = plate.get("vehicle_track_id")
+
+                if plate_vehicle_group is not None and object_group_id is not None:
+                    if str(plate_vehicle_group) == str(object_group_id):
+                        matching_plates.append(plate)
+                        continue
+
+                if plate_vehicle_id is not None:
+                    try:
+                        if int(plate_vehicle_id) == vehicle_id:
+                            matching_plates.append(plate)
+                            continue
+                    except (TypeError, ValueError):
+                        pass
+
+                plate_box = plate.get("bbox") or plate.get("box") or [0, 0, 0, 0]
+                if len(plate_box) != 4:
+                    continue
+
+                center = plate.get("center") or [
+                    (plate_box[0] + plate_box[2]) / 2,
+                    (plate_box[1] + plate_box[3]) / 2,
+                ]
+
+                if (
+                    vehicle_box[0] <= center[0] <= vehicle_box[2]
+                    and vehicle_box[1] <= center[1] <= vehicle_box[3]
+                ):
+                    geometric_plates.append(plate)
+
+            if not matching_plates:
+                matching_plates = geometric_plates
+
+            plate = max(
+                matching_plates,
+                key=lambda item: float(
+                    item.get("conf", item.get("confidence", 0)) or 0
+                ),
+                default=None,
+            )
+
+            bx1, by1, bx2, by2 = vehicle_box
+            bw = max(1, bx2 - bx1)
+            bh = max(1, by2 - by1)
+            aspect = bw / bh
+
+            if plate is None and aspect < FAKE_VEHICLE_ASPECT_MIN:
+                continue
+
+            driver = None
+            for index, person in enumerate(people):
+                if index in associated_people:
+                    continue
+                person_box = person.get("box", [0, 0, 0, 0])
+                if self._intersection_ratio(person_box, vehicle_box) >= 0.25:
+                    driver = person
+                    associated_people.add(index)
+                    break
+
+            # ✅ Ambil text terkoreksi DAN raw
+            plate_text_corrected = _normalize_text((plate or {}).get("text") or "")
+            plate_text_raw = (plate or {}).get("raw_text") or plate_text_corrected
+
+            # ✅ EVENT IDENTITY: pakai object_group_id
+            if object_group_id:
+                event_key = f"vehicle:{camera_id}:{object_group_id}:sess_{self.event_session_id}"
+                generation = 1
+                tracked = True
+            elif vehicle_id >= 0:
+                generation = self._get_track_generation(camera_id, vehicle_id, current_time)
+                event_key = self._build_event_key(
+                    camera_id=camera_id,
+                    object_type="vehicle",
+                    track_id=vehicle_id,
+                    generation=generation,
+                )
+                tracked = True
+            else:
+                center = (
+                    int((vehicle_box[0] + vehicle_box[2]) / 2),
+                    int((vehicle_box[1] + vehicle_box[3]) / 2),
+                )
+                generation = int(current_time)
+                event_key = (
+                    f"vehicle:{camera_id}:"
+                    f"untracked_{center[0]}_{center[1]}:"
+                    f"gen{generation}:sess_{self.event_session_id}"
+                )
+                tracked = False
+
+            previous_meta = self.saved_event_meta.get(event_key)
+            is_new_event = event_key not in self.captured_tracks
+
+            ocr_conf_now = float((plate or {}).get("ocr_conf", (plate or {}).get("confidence", 0.0)) or 0.0)
+            prev_ocr_conf = float((previous_meta or {}).get("ocr_conf", 0.0) or 0.0)
+            vehicle_conf_now = float(vehicle.get("conf", 0.0) or 0.0)
+            prev_vehicle_conf = float((previous_meta or {}).get("vehicle_confidence", 0.0) or 0.0)
+
+            if not is_new_event and previous_meta is not None:
+                better_ocr = plate_text_corrected and (
+                    not previous_meta.get("plate_text")
+                    or ocr_conf_now > prev_ocr_conf + CONFIDENCE_IMPROVEMENT_THRESHOLD
+                    or (not previous_meta.get("plate_valid") and (plate or {}).get("valid"))
+                )
+                better_vehicle = vehicle_conf_now > prev_vehicle_conf + CONFIDENCE_IMPROVEMENT_THRESHOLD
+                needs_driver = driver is not None and not previous_meta.get("has_driver")
+
+                if not (better_ocr or better_vehicle or needs_driver):
+                    if DEBUG_PERFORMANCE and self.ai_cycle_counter % DEBUG_LOG_SAMPLE_EVERY == 0:
+                        print(
+                            f"[SKIP NOT BETTER] camera={camera_id} "
+                            f"group={object_group_id} vehicle_conf={vehicle_conf_now:.2f} "
+                            f"(prev {prev_vehicle_conf:.2f})"
+                        )
+                    continue
+
+            if not tracked:
+                if plate_text_corrected and _valid_indonesian_plate(plate_text_corrected):
+                    if self._is_duplicate_plate(camera_id, plate_text_corrected, current_time):
+                        self.captured_tracks[event_key] = current_time
+                        continue
+
+                if self._is_duplicate_centroid(camera_id, vehicle_box, current_time):
+                    self.captured_tracks[event_key] = current_time
+                    continue
+
+            vehicle_crop = _prepare_vehicle_capture(frame, vehicle_box)
+
+            if not tracked:
+                v_hash = self._visual_hash(vehicle_crop)
+                if self._is_duplicate_visual(camera_id, "vehicle", v_hash, current_time):
+                    self.captured_tracks[event_key] = current_time
+                    continue
+
+            final_direction = camera_orientation
+
+            try:
+                result = db.save_detection_event(
+                    camera_id=camera_id,
+                    plate_number=plate_text_corrected or None,
+                    raw_ocr_text=plate_text_raw or None,  # ✅ raw
+                    plate_crop=(plate or {}).get("crop"),
+                    plate_conf=float(
+                        (plate or {}).get("conf", (plate or {}).get("confidence", 0.0)) or 0
+                    ),
+                    ocr_conf=float((plate or {}).get("ocr_conf", 0.0) or 0),
+                    track_id=(vehicle_id if vehicle_id >= 0 else None),
+                    object_type="vehicle",
+                    vehicle_type=vehicle_type,
+                    vehicle_confidence=vehicle_conf_now,
+                    vehicle_crop=vehicle_crop,
+                    has_driver=driver is not None,
+                    driver_track_id=(driver or {}).get("track_id"),
+                    direction=final_direction,
+                    event_key=event_key,
+                )
+
+                self.captured_tracks[event_key] = current_time
+
+                previous_plate = (previous_meta or {}).get("plate_text", "")
+                previous_driver = bool((previous_meta or {}).get("has_driver", False))
+
+                self.saved_event_meta[event_key] = {
+                    "plate_text": (plate_text_corrected or previous_plate),
+                    "plate_valid": bool((plate or {}).get("valid")) or (previous_meta or {}).get("plate_valid", False),
+                    "ocr_conf": max(ocr_conf_now, prev_ocr_conf),
+                    "has_driver": (driver is not None or previous_driver),
+                    "direction": final_direction,
+                    "generation": generation,
+                    "track_id": vehicle_id,
+                    "object_group_id": object_group_id,
+                    "vehicle_confidence": max(vehicle_conf_now, prev_vehicle_conf),
+                    "vehicle_type": vehicle_type,
+                    "updated_at": current_time,
+                }
+
+                if DEBUG_PERFORMANCE:
+                    region = _extract_region_code(plate_text_corrected or "")
+                    print(
+                        f"[DETECTION] camera={camera_id} track_id={vehicle_id} "
+                        f"group={object_group_id} gen={generation} "
+                        f"type={vehicle_type} conf={vehicle_conf_now:.3f} "
+                        f"plate_raw='{plate_text_raw or '-'}' "
+                        f"plate_corrected='{plate_text_corrected or '-'}' "
+                        f"region={region or '-'} "
+                        f"ocr={float((plate or {}).get('ocr_conf', 0) or 0):.3f} "
+                        f"driver={driver is not None} "
+                        f"event_key={event_key} "
+                        f"dup={result.get('duplicate', False)}"
+                    )
+
+            except Exception as exc:
+                print(f"[AI STREAM ERROR] Save vehicle event failed: {exc}")
+
+        # ========================================================
+        # PERSON EVENTS
+        # ========================================================
+        for index, person in enumerate(people):
+            if index in associated_people:
+                continue
+
+            try:
+                track_id = int(person.get("track_id", -1))
+            except (TypeError, ValueError):
+                track_id = -1
+
+            object_group_id = person.get("object_group_id")
+
+            if object_group_id:
+                event_key = f"person:{camera_id}:{object_group_id}:sess_{self.event_session_id}"
+                generation = 1
+            elif track_id >= 0:
+                generation = self._get_track_generation(camera_id, track_id, current_time)
+                event_key = self._build_event_key(
+                    camera_id=camera_id,
+                    object_type="person",
+                    track_id=track_id,
+                    generation=generation,
+                )
+            else:
+                continue
+
+            previous_meta = self.saved_event_meta.get(event_key)
+            person_conf_now = float(person.get("conf", 0.0) or 0.0)
+            prev_person_conf = float((previous_meta or {}).get("person_confidence", 0.0) or 0.0)
+
+            if event_key in self.captured_tracks:
+                if previous_meta is not None:
+                    if person_conf_now <= prev_person_conf + CONFIDENCE_IMPROVEMENT_THRESHOLD:
+                        continue
+
+            bx1, by1, bx2, by2 = person.get("box", [0, 0, 0, 0])
+
+            crop = _prepare_high_quality_capture(
+                frame, (bx1, by1, bx2, by2),
+                padding=0.20, target_short_side=360,
+                max_scale=2.5, max_long_side=960, sharpen=True,
+            )
+
+            if crop is None or crop.size == 0:
+                continue
+
+            final_direction = camera_orientation
+
+            try:
+                result = db.save_detection_event(
+                    camera_id=camera_id,
+                    face_crop=crop,
+                    face_conf=person_conf_now,
+                    track_id=track_id if track_id >= 0 else None,
+                    object_type="person",
+                    vehicle_type="unknown",
+                    direction=final_direction,
+                    event_key=event_key,
+                )
+
+                self.captured_tracks[event_key] = current_time
+
+                self.saved_event_meta[event_key] = {
+                    "plate_text": "",
+                    "has_driver": False,
+                    "direction": final_direction,
+                    "generation": generation,
+                    "track_id": track_id,
+                    "object_group_id": object_group_id,
+                    "person_confidence": max(person_conf_now, prev_person_conf),
+                    "face_saved": True,
+                    "updated_at": current_time,
+                }
+
+                if DEBUG_PERFORMANCE:
+                    print(
+                        f"[DETECTION] camera={camera_id} track_id={track_id} "
+                        f"group={object_group_id} gen={generation} "
+                        f"object_type=person conf={person_conf_now:.3f} "
+                        f"event_key={event_key} "
+                        f"dup={result.get('duplicate', False)}"
+                    )
+
+            except Exception as exc:
+                print(f"[AI STREAM ERROR] Save person event failed: {exc}")
+
+    def _save_new_events(self, frame, person_dets, plate_dets, camera_id, current_time):
+        return self._save_consistent_events(
+            frame, person_dets, plate_dets, camera_id, current_time,
+        )
+
+    # ============================================================
+    # TRACK GENERATION & EVENT KEY
+    # ============================================================
     def _get_track_generation(self, camera_id, track_id, current_time):
         camera_id = _normalize_camera_id(camera_id)
         try:
-            camera_id = int(camera_id); track_id = int(track_id); current_time = float(current_time)
+            camera_id = int(camera_id)
+            track_id = int(track_id)
+            current_time = float(current_time)
         except (TypeError, ValueError):
             return 1
+
         key = (camera_id, track_id)
         state = self.track_lifecycle.get(key)
+
         if state is None:
             state = {"generation": 1, "last_seen": current_time}
         else:
@@ -1046,60 +1788,112 @@ class StreamAIService:
             elif gap > TRACK_REUSE_GAP:
                 state["generation"] = int(state.get("generation", 1)) + 1
             state["last_seen"] = current_time
+
         self.track_lifecycle[key] = state
         return int(state["generation"])
 
+    def _build_event_key(self, camera_id, object_type, track_id, generation):
+        camera_id = _normalize_camera_id(camera_id)
+        try:
+            camera_id = int(camera_id)
+        except (TypeError, ValueError):
+            camera_id = str(camera_id)
+        try:
+            track_id = int(track_id)
+        except (TypeError, ValueError):
+            track_id = str(track_id)
+        try:
+            generation = int(generation)
+        except (TypeError, ValueError):
+            generation = 1
+        object_type = str(object_type or "unknown").lower().strip()
+        return (
+            f"{object_type}:{camera_id}:{track_id}:"
+            f"gen{generation}:sess_{self.event_session_id}"
+        )
+
+    # ============================================================
+    # CLEANUP
+    # ============================================================
     def _cleanup_runtime_state(self, current_time):
         now = float(current_time)
-        lifecycle_ttl = 300.0
+        lifecycle_ttl = max(600.0, TRACK_REUSE_GAP * 4.0)
         event_ttl = 1800.0
+
         for key, state in list(self.track_lifecycle.items()):
-            if now - float(state.get("last_seen", now)) > lifecycle_ttl:
+            try:
+                last_seen = float(state.get("last_seen", now))
+            except (TypeError, ValueError, AttributeError):
                 self.track_lifecycle.pop(key, None)
+                continue
+            if now - last_seen > lifecycle_ttl:
+                self.track_lifecycle.pop(key, None)
+
         for cache_name in ("captured_tracks", "saved_plate_events", "saved_event_meta"):
             cache = getattr(self, cache_name, None)
             if not isinstance(cache, dict):
                 continue
             for key, value in list(cache.items()):
                 try:
-                    stamp = float(value if cache_name != "saved_event_meta" else value.get("updated_at", now))
+                    if cache_name == "saved_event_meta":
+                        stamp = float(value.get("updated_at", now))
+                    else:
+                        stamp = float(value)
                 except (TypeError, ValueError, AttributeError):
                     continue
                 if now - stamp > event_ttl:
                     cache.pop(key, None)
+
         for key, value in list(self._track_last_event.items()):
             try:
-                if now - float(value.get("last_ts", now)) > 7200.0:
-                    self._track_last_event.pop(key, None)
+                stamp = float(value.get("last_ts", now))
             except (TypeError, ValueError, AttributeError):
                 self._track_last_event.pop(key, None)
+                continue
+            if now - stamp > 7200.0:
+                self._track_last_event.pop(key, None)
+
         for key, value in list(self._visual_hashes.items()):
             try:
-                if now - float(value.get("ts", now)) > 600.0:
-                    self._visual_hashes.pop(key, None)
+                stamp = float(value.get("ts", now))
             except (TypeError, ValueError, AttributeError):
                 self._visual_hashes.pop(key, None)
+                continue
+            if now - stamp > 600.0:
+                self._visual_hashes.pop(key, None)
+
         for key, value in list(self._plate_text_cache.items()):
             try:
-                if now - float(value.get("ts", now)) > 600.0:
-                    self._plate_text_cache.pop(key, None)
+                stamp = float(value.get("ts", now))
             except (TypeError, ValueError, AttributeError):
                 self._plate_text_cache.pop(key, None)
-        # cleanup centroid cache
+                continue
+            if now - stamp > 600.0:
+                self._plate_text_cache.pop(key, None)
+
         for cam_key, items in list(self._vehicle_centroids.items()):
             self._vehicle_centroids[cam_key] = [
-                it for it in items
-                if now - it.get("ts", 0) < VEHICLE_CENTROID_DEDUP_COOLDOWN
+                item for item in items
+                if now - item.get("ts", 0) < VEHICLE_CENTROID_DEDUP_COOLDOWN
             ]
 
+        for gid, group in list(self.object_groups.items()):
+            try:
+                last_seen = float(group.get("last_seen", now))
+            except (TypeError, ValueError, AttributeError):
+                self.object_groups.pop(gid, None)
+                continue
+            if now - last_seen > OBJECT_GROUP_MAX_GAP * 30:
+                self.object_groups.pop(gid, None)
+
     # ============================================================
-    # Dedup visual dengan perceptual hash
+    # DEDUP VISUAL
     # ============================================================
     def _visual_hash(self, crop):
         if crop is None or not hasattr(crop, "size") or crop.size == 0:
             return None
         try:
-            small = cv2.resize(crop, (16, 16), interpolation=cv2.INTER_AREA)
+            small = cv2.resize(crop, (8, 8), interpolation=cv2.INTER_AREA)
             if len(small.shape) == 3:
                 gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).astype(np.float32)
             else:
@@ -1108,12 +1902,12 @@ class StreamAIService:
             bits = (gray > avg).flatten()
             hex_str = ""
             for i in range(0, len(bits), 4):
-                nibble = bits[i:i+4]
+                nibble = bits[i:i + 4]
                 val = 0
                 for b in nibble:
                     val = (val << 1) | int(b)
-                hex_str += format(val, 'x')
-            return hex_str[:16]
+                hex_str += format(val, "x")
+            return hex_str
         except Exception:
             return None
 
@@ -1130,14 +1924,20 @@ class StreamAIService:
     def _is_duplicate_visual(self, camera_id, object_type, v_hash, current_time):
         if v_hash is None:
             return False
+
+        object_type = str(object_type or "vehicle").lower().strip()
         if object_type == "person":
             threshold = PERSON_HAMMING_THRESHOLD
             cooldown = PERSON_DEDUP_COOLDOWN
+            bucket = "person"
         else:
             threshold = VISUAL_HAMMING_THRESHOLD
             cooldown = VISUAL_DEDUP_COOLDOWN
+            bucket = "vehicle"
 
-        prefix = f"vhash:{camera_id}:{object_type}:"
+        camera_id = _normalize_camera_id(camera_id)
+        prefix = f"vhash:{camera_id}:{bucket}:"
+
         for key, val in list(self._visual_hashes.items()):
             if not key.startswith(prefix):
                 continue
@@ -1156,6 +1956,7 @@ class StreamAIService:
     def _is_duplicate_plate(self, camera_id, plate_text, current_time):
         if not plate_text:
             return False
+        camera_id = _normalize_camera_id(camera_id)
         key = f"plate-text:{camera_id}:{plate_text}"
         last = self._plate_text_cache.get(key)
         if last is not None:
@@ -1166,6 +1967,7 @@ class StreamAIService:
         return False
 
     def _is_duplicate_person_track(self, camera_id, track_id, current_time):
+        camera_id = _normalize_camera_id(camera_id)
         key = f"person-track:{camera_id}:{track_id}"
         last = self._plate_text_cache.get(key)
         if last is not None:
@@ -1175,30 +1977,23 @@ class StreamAIService:
         self._plate_text_cache[key] = {"ts": current_time, "text": str(track_id)}
         return False
 
-    # ============================================================
-    # ✅ FIX BARU: Dedup berbasis centroid untuk kendaraan
-    # ============================================================
     def _bbox_centroid(self, bbox):
         x1, y1, x2, y2 = bbox
         return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
 
     def _is_duplicate_centroid(self, camera_id, bbox, current_time):
-        """
-        Cek apakah kendaraan mirip sudah disimpan berdasarkan:
-        - Centroid jarak < threshold px
-        - Ukuran bbox (area) mirip dalam toleransi ratio
-        - Waktu < cooldown
-        """
+        camera_id = _normalize_camera_id(camera_id)
         cx, cy = self._bbox_centroid(bbox)
         bw = max(1, bbox[2] - bbox[0])
         bh = max(1, bbox[3] - bbox[1])
         area = bw * bh
 
-        # Bersihkan cache lama
         cache = self._vehicle_centroids.get(camera_id, [])
-        cache = [it for it in cache if current_time - it["ts"] < VEHICLE_CENTROID_DEDUP_COOLDOWN]
+        cache = [
+            item for item in cache
+            if current_time - item["ts"] < VEHICLE_CENTROID_DEDUP_COOLDOWN
+        ]
 
-        # Cek duplikat
         for item in cache:
             pcx, pcy = item["centroid"]
             dist = ((cx - pcx) ** 2 + (cy - pcy) ** 2) ** 0.5
@@ -1209,234 +2004,31 @@ class StreamAIService:
                 if ratio < VEHICLE_CENTROID_DEDUP_AREA_RATIO:
                     return True
 
-        # Simpan entry baru
-        cache.append({
-            "centroid": (cx, cy),
-            "area": area,
-            "ts": current_time,
-        })
-        # Batasi panjang
+        cache.append({"centroid": (cx, cy), "area": area, "ts": current_time})
         if len(cache) > VEHICLE_CENTROID_MAX_HISTORY:
             cache = cache[-VEHICLE_CENTROID_MAX_HISTORY:]
         self._vehicle_centroids[camera_id] = cache
         return False
 
-    def _resolve_event_key(self, lookup_key, current_time, plate_text_now=None):
-        now_ts = float(current_time)
-        last_event = self._track_last_event.get(lookup_key)
-        if last_event is not None:
-            age = now_ts - last_event["last_ts"]
-            if age < TRACK_EVENT_COOLDOWN:
-                prev_plate = (last_event.get("plate_text") or "").strip()
-                new_plate = (plate_text_now or "").strip()
-                if prev_plate and new_plate and prev_plate != new_plate:
-                    event_key = f"{lookup_key}:t{int(now_ts)}"
-                else:
-                    event_key = last_event["event_key"]
-            else:
-                event_key = f"{lookup_key}:t{int(now_ts)}"
-        else:
-            event_key = f"{lookup_key}:t{int(now_ts)}"
-        self._track_last_event[lookup_key] = {
-            "event_key": event_key,
-            "last_ts": now_ts,
-            "plate_text": plate_text_now or "",
-        }
-        return event_key
-
-    def _save_consistent_events(self, frame, person_dets, plate_dets, camera_id, current_time):
-        camera_id = _normalize_camera_id(camera_id)
-        camera_orientation = db.get_camera_direction(camera_id)
-        vehicles = [item for item in person_dets if item.get("cls") in VEHICLE_TYPES]
-        people = [item for item in person_dets if item.get("cls") == 0]
-        associated_people = set()
-
-        for vehicle in vehicles:
-            vehicle_box = vehicle.get("box", [0, 0, 0, 0])
-            vehicle_id = int(vehicle.get("track_id", -1))
-            vehicle_type = vehicle.get("vehicle_type") or VEHICLE_TYPES.get(vehicle.get("cls"), "unknown")
-
-            matching_plates = []
-            geometric_plates = []
-            for plate in plate_dets:
-                plate_vehicle_id = plate.get("vehicle_track_id")
-                if plate_vehicle_id is not None:
-                    try:
-                        if int(plate_vehicle_id) == vehicle_id:
-                            matching_plates.append(plate); continue
-                    except (TypeError, ValueError):
-                        pass
-                plate_box = plate.get("bbox") or plate.get("box") or [0, 0, 0, 0]
-                if len(plate_box) != 4:
-                    continue
-                center = plate.get("center") or [(plate_box[0] + plate_box[2]) / 2, (plate_box[1] + plate_box[3]) / 2]
-                if vehicle_box[0] <= center[0] <= vehicle_box[2] and vehicle_box[1] <= center[1] <= vehicle_box[3]:
-                    geometric_plates.append(plate)
-
-            if not matching_plates:
-                matching_plates = geometric_plates
-            plate = max(matching_plates, key=lambda item: float(item.get("conf", item.get("confidence", 0)) or 0), default=None)
-
-            # ✅ FIX #1: Tolak kendaraan tanpa plat + aspect kecil
-            bx1, by1, bx2, by2 = vehicle_box
-            bw = max(1, bx2 - bx1); bh = max(1, by2 - by1)
-            aspect = bw / bh
-            if plate is None and aspect < FAKE_VEHICLE_ASPECT_MIN:
-                if DEBUG_PERFORMANCE:
-                    print(f"[SKIP FALSE VEHICLE] aspect={aspect:.2f} type={vehicle_type} conf={vehicle.get('conf', 0):.2f}")
-                continue
-
-            driver = None
-            for index, person in enumerate(people):
-                if index in associated_people:
-                    continue
-                person_box = person.get("box", [0, 0, 0, 0])
-                if self._intersection_ratio(person_box, vehicle_box) >= 0.25:
-                    driver = person; associated_people.add(index); break
-
-            center = ((vehicle_box[0] + vehicle_box[2]) // 2, (vehicle_box[1] + vehicle_box[3]) // 2)
-            stable_id = vehicle_id if vehicle_id >= 0 else f"{center[0]}_{center[1]}"
-
-            if vehicle_id >= 0:
-                generation = self._get_track_generation(camera_id, vehicle_id, current_time)
-            else:
-                generation = int(current_time)
-
-            plate_text_now = _normalize_text((plate or {}).get("text") or "")
-            track_lookup_key = f"vehicle:{camera_id}:{stable_id}"
-            event_key = self._resolve_event_key(track_lookup_key, current_time, plate_text_now)
-
-            has_driver_now = driver is not None
-            previous_meta = self.saved_event_meta.get(event_key)
-            is_new_event = event_key not in self.captured_tracks
-            needs_enrichment = (
-                not is_new_event and previous_meta is not None
-                and ((plate_text_now and not previous_meta.get("plate_text"))
-                     or (has_driver_now and not previous_meta.get("has_driver")))
-            )
-            if not is_new_event and not needs_enrichment:
-                continue
-
-            # 1. Dedup plat (paling akurat)
-            if plate_text_now and _valid_indonesian_plate(plate_text_now):
-                if self._is_duplicate_plate(camera_id, plate_text_now, current_time):
-                    if DEBUG_PERFORMANCE:
-                        print(f"[DEDUP PLAT] Skip: cam={camera_id} plate={plate_text_now}")
-                    self.captured_tracks[event_key] = current_time
-                    continue
-
-            # ✅ 2. FIX BARU: Dedup centroid (paling cocok untuk kendaraan bergerak)
-            if self._is_duplicate_centroid(camera_id, vehicle_box, current_time):
-                if DEBUG_PERFORMANCE:
-                    print(f"[DEDUP CENTROID] Skip: cam={camera_id} type={vehicle_type} bbox={vehicle_box}")
-                self.captured_tracks[event_key] = current_time
-                continue
-
-            # 3. Dedup visual
-            vehicle_crop = _prepare_vehicle_capture(frame, vehicle_box)
-            v_hash = self._visual_hash(vehicle_crop)
-            if self._is_duplicate_visual(camera_id, vehicle_type, v_hash, current_time):
-                if DEBUG_PERFORMANCE:
-                    print(f"[DEDUP VISUAL] Skip: cam={camera_id} type={vehicle_type} hash={v_hash}")
-                self.captured_tracks[event_key] = current_time
-                continue
-
-            final_direction = camera_orientation
-            try:
-                result = db.save_detection_event(
-                    camera_id=camera_id,
-                    plate_number=(plate or {}).get("text") or None,
-                    raw_ocr_text=(plate or {}).get("raw_text") or None,
-                    plate_crop=(plate or {}).get("crop"),
-                    plate_conf=float((plate or {}).get("conf", (plate or {}).get("confidence", 0.0)) or 0),
-                    ocr_conf=float((plate or {}).get("ocr_conf", 0.0) or 0),
-                    track_id=vehicle_id if vehicle_id >= 0 else None,
-                    object_type="vehicle",
-                    vehicle_type=vehicle_type,
-                    vehicle_confidence=float(vehicle.get("conf", 0.0) or 0),
-                    vehicle_crop=vehicle_crop,
-                    has_driver=driver is not None,
-                    driver_track_id=(driver or {}).get("track_id"),
-                    direction=final_direction,
-                    event_key=event_key
-                )
-                self.captured_tracks[event_key] = current_time
-                previous_plate = (previous_meta or {}).get("plate_text", "")
-                previous_driver = bool((previous_meta or {}).get("has_driver", False))
-                self.saved_event_meta[event_key] = {
-                    "plate_text": plate_text_now or previous_plate,
-                    "has_driver": has_driver_now or previous_driver,
-                    "direction": final_direction,
-                    "updated_at": current_time,
-                }
-                print(f"[DETECTION] camera={camera_id} track_id={vehicle_id} object_type=vehicle vehicle_type={vehicle_type} vehicle_confidence={float(vehicle.get('conf', 0) or 0):.3f} plate_detected={bool(plate)} plate={(plate or {}).get('text') or '-'} plate_confidence={float((plate or {}).get('conf', 0) or 0):.3f} ocr_confidence={float((plate or {}).get('ocr_conf', 0) or 0):.3f} driver_detected={driver is not None} direction={final_direction} event_key={event_key} duplicate={result.get('duplicate', False)}")
-            except Exception as exc:
-                print(f"[AI STREAM ERROR] Save vehicle event failed: {exc}")
-
-        for index, person in enumerate(people):
-            if index in associated_people:
-                continue
-            track_id = int(person.get("track_id", -1))
-            if track_id < 0:
-                continue
-            generation = self._get_track_generation(camera_id, track_id, current_time)
-
-            if self._is_duplicate_person_track(camera_id, track_id, current_time):
-                if DEBUG_PERFORMANCE:
-                    print(f"[DEDUP PERSON TRACK] Skip: cam={camera_id} track_id={track_id}")
-                continue
-
-            track_lookup_key = f"person:{camera_id}:{track_id}"
-            event_key = self._resolve_event_key(track_lookup_key, current_time, "")
-
-            if event_key in self.captured_tracks:
-                previous_meta = self.saved_event_meta.get(event_key)
-                if previous_meta is not None and previous_meta.get("face_saved", False):
-                    continue
-
-            bx1, by1, bx2, by2 = person.get("box", [0, 0, 0, 0])
-            crop = _prepare_high_quality_capture(frame, (bx1, by1, bx2, by2), padding=0.20, target_short_side=360, max_scale=2.5, max_long_side=960, sharpen=True)
-            if crop is None or crop.size == 0:
-                continue
-
-            p_hash = self._visual_hash(crop)
-            if self._is_duplicate_visual(camera_id, "person", p_hash, current_time):
-                if DEBUG_PERFORMANCE:
-                    print(f"[DEDUP VISUAL PERSON] Skip: cam={camera_id} hash={p_hash}")
-                self.captured_tracks[event_key] = current_time
-                continue
-
-            final_direction = camera_orientation
-            try:
-                result = db.save_detection_event(
-                    camera_id=camera_id, face_crop=crop,
-                    face_conf=float(person.get("conf", 0.0) or 0),
-                    track_id=track_id, object_type="person", vehicle_type="unknown",
-                    direction=final_direction, event_key=event_key
-                )
-                self.captured_tracks[event_key] = current_time
-                self.saved_event_meta[event_key] = {
-                    "plate_text": "", "has_driver": False,
-                    "direction": final_direction, "face_saved": True,
-                    "updated_at": current_time,
-                }
-                print(f"[DETECTION] camera={camera_id} track_id={track_id} object_type=person person_confidence={float(person.get('conf', 0) or 0):.3f} direction={final_direction} duplicate={result.get('duplicate', False)}")
-            except Exception as exc:
-                print(f"[AI STREAM ERROR] Save person event failed: {exc}")
-
-    def _save_new_events(self, frame, person_dets, plate_dets, camera_id, current_time):
-        return self._save_consistent_events(frame, person_dets, plate_dets, camera_id, current_time)
-
+    # ============================================================
+    # DYNAMIC FOCUS
+    # ============================================================
     def _select_dynamic_focus(self, frame, vehicle_dets, plate_raw, now):
         h, w = frame.shape[:2]
-        vehicles = [d for d in vehicle_dets if d.get("cls") in (2, 3, 5, 7) and d.get("track_id", -1) >= 0]
+        vehicles = [
+            d for d in vehicle_dets
+            if d.get("cls") in (2, 3, 5, 7) and d.get("track_id", -1) >= 0
+        ]
         if ENABLE_DISTANCE_ZONE:
             near_vehicles = [d for d in vehicles if d.get("distance_zone") == "NEAR"]
             if near_vehicles:
                 vehicles = near_vehicles
         target_type = "VEHICLE"
         if not vehicles:
-            people = [d for d in vehicle_dets if d.get("cls") == 0 and d.get("track_id", -1) >= 0]
+            people = [
+                d for d in vehicle_dets
+                if d.get("cls") == 0 and d.get("track_id", -1) >= 0
+            ]
             if ENABLE_DISTANCE_ZONE:
                 near_people = [d for d in people if d.get("distance_zone") == "NEAR"]
                 vehicles = near_people or people
@@ -1452,18 +2044,27 @@ class StreamAIService:
                 self.focus_info["lighting"] = m
                 return
         if target is None and vehicles:
-            target = max(vehicles, key=lambda d: max(1, d["box"][2] - d["box"][0]) * max(1, d["box"][3] - d["box"][1]))
+            target = max(
+                vehicles,
+                key=lambda d: max(1, d["box"][2] - d["box"][0]) * max(1, d["box"][3] - d["box"][1])
+            )
             self.focus_track_id = int(target["track_id"])
         if target is None:
             self.focus_track_id = None
             box = [int(w * .20), int(h * .42), int(w * .88), int(h * .96)]
-            self.focus_info = {"type": "AREA", "box": box, "track_id": None, "lighting": _lighting_metrics(frame, box)}
+            self.focus_info = {
+                "type": "AREA", "box": box, "track_id": None,
+                "lighting": _lighting_metrics(frame, box)
+            }
             return
         self.focus_last_seen = now
         tid = int(target["track_id"])
         focus_type = target_type
         box = _clamp_box(target["box"], w, h, FOCUS_PADDING_VEHICLE)
-        matches = [p for p in plate_raw if int(p.get("vehicle_track_id", -999)) == tid and len(p.get("bbox", [])) == 4]
+        matches = [
+            p for p in plate_raw
+            if int(p.get("vehicle_track_id", -999)) == tid and len(p.get("bbox", [])) == 4
+        ]
         if matches:
             best = max(matches, key=lambda p: _safe_float(p.get("confidence", p.get("conf", 0))))
             box = _clamp_box(best["bbox"], w, h, FOCUS_PADDING_PLATE)
@@ -1472,10 +2073,14 @@ class StreamAIService:
         elif self.focus_info.get("type") == "PLATE" and now - self.focus_plate_last_seen < FOCUS_TARGET_HOLD_SECONDS:
             box = self.focus_info.get("box") or box
             focus_type = "PLATE"
-        self.focus_info = {"type": focus_type, "box": box, "track_id": tid, "lighting": _lighting_metrics(frame, box)}
+        self.focus_info = {
+            "type": focus_type, "box": box, "track_id": tid,
+            "lighting": _lighting_metrics(frame, box)
+        }
 
     def _draw_dynamic_focus(self, frame):
-        info = self.focus_info or {}; box = info.get('box')
+        info = self.focus_info or {}
+        box = info.get('box')
         if not box:
             return
         x1, y1, x2, y2 = [int(v) for v in box]
@@ -1494,23 +2099,40 @@ class StreamAIService:
         text = f"LIGHT {m.get('status', '-')} | Score {m.get('score', 0):.0f}% | Bright {m.get('brightness', 0):.0f}"
         cv2.putText(frame, text, (10, 22), cv2.FONT_HERSHEY_SIMPLEX, .52, color, 2, cv2.LINE_AA)
 
+    # ============================================================
+    # AI PIPELINE
+    # ============================================================
     def _run_ai_pipeline(self, frame, camera_id):
         camera_id = _normalize_camera_id(camera_id)
         camera_state = self._camera_state(camera_id)
         now = time.time()
         ai_pipeline_start = time.perf_counter()
-        person_dets = []; plate_dets = []; plate_raw = []
+        person_dets = []
+        plate_dets = []
+        plate_raw = []
         try:
             h0, w0 = frame.shape[:2]
-            base_box = self.focus_info.get("box") or [int(w0 * 0.20), int(h0 * 0.42), int(w0 * 0.88), int(h0 * 0.96)]
+            base_box = self.focus_info.get("box") or [
+                int(w0 * 0.20), int(h0 * 0.42), int(w0 * 0.88), int(h0 * 0.96)
+            ]
             base_light = _lighting_metrics(frame, base_box)
             ai_frame = _enhance_for_lighting(frame, base_light)
             person_dets = self._detect_vehicles(ai_frame, camera_id) or []
-            if DEBUG_PERFORMANCE:
-                print(f"[AI RUN] camera={camera_id} objects={len(person_dets)} interval={self.adaptive_ai.get_interval():.2f}s")
-            plate_dets = []; plate_raw = []
+
+            # ✅ Panggil object grouping SEBELUM plate detection
             try:
-                plate_raw = self._detect_plates_in_vehicles(ai_frame, person_dets) or []
+                self._assign_object_groups(
+                    person_dets, camera_id, current_time=now, frame=ai_frame
+                )
+            except Exception as exc:
+                print(f"[AI STREAM WARNING] Object grouping failed: {exc}")
+
+            plate_dets = []
+            plate_raw = []
+            try:
+                plate_raw = self._detect_plates_in_vehicles(
+                    ai_frame, person_dets, camera_id=camera_id, current_time=now
+                ) or []
                 self.latest_raw_plate_detections = plate_raw
                 self._select_dynamic_focus(frame, person_dets, plate_raw, now)
                 plate_tracker = camera_state["plate_tracker"]
@@ -1525,9 +2147,9 @@ class StreamAIService:
                         result = _track_to_result(track)
                         if result is not None:
                             plate_dets.append(result)
-                    finished = self._consume_finished_plate(frame, person_dets, camera_id)
-                    if finished is not None:
-                        plate_dets.append(finished)
+                    finished_items = self._consume_finished_plate(frame, person_dets, camera_id)
+                    if finished_items:
+                        plate_dets.extend(finished_items)
                 else:
                     for item in plate_raw:
                         bbox = item.get("bbox") or item.get("box")
@@ -1539,28 +2161,34 @@ class StreamAIService:
                             "id": int(item.get("vehicle_track_id", -1)),
                             "track_id": int(item.get("vehicle_track_id", -1)),
                             "box": bbox, "bbox": bbox, "conf": conf,
-                            "detection_confidence": conf, "text": "", "formatted": "",
-                            "raw_text": "", "ocr_conf": 0.0, "confidence": 0.0,
+                            "detection_confidence": conf,
+                            "text": "", "formatted": "", "raw_text": "",
+                            "ocr_conf": 0.0, "confidence": 0.0,
                             "valid": False, "votes": 0, "total_reads": 0,
                             "distance_zone": item.get("distance_zone", "NEAR"),
                             "ocr_ready": bool(item.get("ocr_ready", False)),
                         })
             except Exception as exc:
                 print(f"[AI STREAM ERROR] Plate pipeline failed: {exc}")
+
             camera_state["last_results"] = {"persons": person_dets, "plates": plate_dets}
             camera_state["last_results_time"] = now
-            person_dets = person_dets or []
-            plate_dets = plate_dets or []
+
             self._save_consistent_events(frame, person_dets, plate_dets, camera_id, now)
             self._cleanup_runtime_state(now)
+
+            self.ai_cycle_counter += 1
         except Exception as exc:
             print(f"[AI STREAM ERROR] Background AI cycle failed: {exc}")
         finally:
             elapsed = time.perf_counter() - ai_pipeline_start
             self.last_ai_time = elapsed
             self.adaptive_ai.update(elapsed)
-            if DEBUG_PERFORMANCE:
-                print(f"[AI PERF] camera={camera_id} elapsed={elapsed * 1000:.0f}ms next_interval={self.adaptive_ai.get_interval():.2f}s")
+            if DEBUG_PERFORMANCE and self.ai_cycle_counter % DEBUG_LOG_SAMPLE_EVERY == 0:
+                print(
+                    f"[AI PERF] camera={camera_id} elapsed={elapsed * 1000:.0f}ms "
+                    f"groups={len(self.object_groups)} next_interval={self.adaptive_ai.get_interval():.2f}s"
+                )
 
     def _ai_loop(self):
         print("[AI THREAD] Background AI worker started")
@@ -1589,6 +2217,9 @@ class StreamAIService:
             self._run_ai_pipeline(frame, camera_id)
         print("[AI THREAD] Background AI worker stopped")
 
+    # ============================================================
+    # PUBLIC API
+    # ============================================================
     def process_frame(self, frame, draw_bbox=True, camera_id=1):
         if frame is None or not hasattr(frame, "size") or frame.size == 0:
             return frame
@@ -1622,6 +2253,9 @@ class StreamAIService:
         self.last_display_time[camera_id] = time.time()
         return frame
 
+    # ============================================================
+    # DRAWING
+    # ============================================================
     def _draw_detection_zones(self, frame, camera_id):
         if not ENABLE_DISTANCE_ZONE:
             return
@@ -1650,19 +2284,26 @@ class StreamAIService:
             cls_id = int(obj.get("cls", 0))
             conf = _safe_float(obj.get("conf", 0.0))
             track_id = int(obj.get("track_id", -1))
+            group_id = obj.get("object_group_id", "-")
             zone = obj.get("distance_zone", "")
             zone_label = f" {zone}" if zone else ""
-            if cls_id == 0: label = f"Orang ID:{track_id} {conf:.0%}{zone_label}"; color = (0, 165, 255)
-            elif cls_id == 2: label = f"Mobil ID:{track_id} {conf:.0%}{zone_label}"; color = (0, 200, 255)
-            elif cls_id == 3: label = f"Motor ID:{track_id} {conf:.0%}{zone_label}"; color = (0, 200, 255)
-            elif cls_id == 5: label = f"Bus ID:{track_id} {conf:.0%}{zone_label}"; color = (0, 200, 255)
-            elif cls_id == 7: label = f"Truk ID:{track_id} {conf:.0%}{zone_label}"; color = (0, 200, 255)
-            else: label = f"Objek {conf:.0%}{zone_label}"; color = (0, 200, 255)
+            if cls_id == 0:
+                label = f"Orang ID:{track_id} G:{group_id} {conf:.0%}{zone_label}"; color = (0, 165, 255)
+            elif cls_id == 2:
+                label = f"Mobil ID:{track_id} G:{group_id} {conf:.0%}{zone_label}"; color = (0, 200, 255)
+            elif cls_id == 3:
+                label = f"Motor ID:{track_id} G:{group_id} {conf:.0%}{zone_label}"; color = (0, 200, 255)
+            elif cls_id == 5:
+                label = f"Bus ID:{track_id} G:{group_id} {conf:.0%}{zone_label}"; color = (0, 200, 255)
+            elif cls_id == 7:
+                label = f"Truk ID:{track_id} G:{group_id} {conf:.0%}{zone_label}"; color = (0, 200, 255)
+            else:
+                label = f"Objek {conf:.0%}{zone_label}"; color = (0, 200, 255)
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 1)
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.44, 1)
             by = max(0, y1 - th - 8)
             cv2.rectangle(frame, (x1, by), (x1 + tw + 10, y1), color, -1)
-            cv2.putText(frame, label, (x1 + 5, max(12, y1 - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.putText(frame, label, (x1 + 5, max(12, y1 - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (255, 255, 255), 1, cv2.LINE_AA)
         for plate in results.get("plates", []):
             bbox = plate.get("box", plate.get("bbox"))
             if not bbox or len(bbox) != 4:
@@ -1673,8 +2314,9 @@ class StreamAIService:
             p_conf = _safe_float(plate.get("conf", 0.0))
             valid = bool(plate.get("valid", False))
             votes = int(plate.get("votes", 0) or 0)
+            region = plate.get("region_code") or "-"
             if valid and text:
-                label = f"{text} OCR:{ocr_conf:.0%} V:{votes}"; color = (0, 230, 118)
+                label = f"{text} OCR:{ocr_conf:.0%} V:{votes} [{region}]"; color = (0, 230, 118)
             elif text:
                 label = f"Review {text} {ocr_conf:.0%}"; color = (0, 215, 255)
             else:

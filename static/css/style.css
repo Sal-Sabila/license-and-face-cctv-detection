@@ -1318,3 +1318,664 @@ html.dark .livestream-banner {
     background: linear-gradient(135deg, #0d1627 0%, #101c32 100%);
     border-bottom-color: rgba(255, 255, 255, 0.08);
 }
+
+/* ============================================================
+   FIX MOBILE - DETECTION TABLE + ALL FILTERS
+   WIKO VISION
+   ============================================================ */
+
+@media (max-width: 767.98px) {
+
+    /* ========================================================
+       1. GLOBAL - HILANGKAN HORIZONTAL OVERFLOW
+       ======================================================== */
+
+    html,
+    body {
+        width: 100%;
+        max-width: 100%;
+        overflow-x: hidden !important;
+    }
+
+    .app-layout,
+    .main-panel,
+    .panel,
+    .panel-body,
+    .panel-header {
+        width: 100%;
+        max-width: 100%;
+        min-width: 0 !important;
+        box-sizing: border-box;
+    }
+
+
+    /* ========================================================
+       2. FILTER - SEMUA FITUR
+       ======================================================== */
+
+    .filter-toolbar,
+    .analytics-filters,
+    .filter-fields-row {
+        width: 100% !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
+        box-sizing: border-box;
+    }
+
+    /*
+       Semua kelompok filter menjadi satu kolom.
+       Ini mencegah filter keluar layar.
+    */
+
+    .filter-fields-row {
+        display: flex !important;
+        flex-direction: column !important;
+        flex-wrap: nowrap !important;
+        gap: 8px !important;
+    }
+
+    .filter-fields-row > div,
+    .filter-fields-row > .filter-group,
+    .filter-fields-row > .form-group {
+        width: 100% !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
+        flex: 0 0 100% !important;
+        box-sizing: border-box;
+    }
+
+    .filter-toolbar .form-control,
+    .filter-toolbar .form-select,
+    .analytics-filters .form-control,
+    .analytics-filters .form-select,
+    .filter-fields-row input,
+    .filter-fields-row select {
+        width: 100% !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
+        box-sizing: border-box;
+    }
+
+
+    /* ========================================================
+       SEARCH + EXPORT
+       ======================================================== */
+
+    .filter-toolbar .input-group {
+        width: 100% !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
+    }
+
+    .filter-toolbar .input-group input {
+        min-width: 0 !important;
+        width: 100% !important;
+    }
+
+    .filter-toolbar .btn,
+    .analytics-filters .btn {
+        min-height: 40px;
+    }
+
+
+    /* ========================================================
+       TYPE FILTER
+       ======================================================== */
+
+    .detection-type-filter,
+    .type-filter,
+    .filter-type-buttons,
+    .btn-group {
+        max-width: 100%;
+    }
+
+    /*
+       Tombol:
+       Semua Tipe | Plat Nomor | Wajah/Orang
+
+       Tetap satu baris kalau cukup.
+       Kalau layar sangat kecil, boleh wrap.
+    */
+
+    .filter-type-buttons,
+    .detection-type-filter {
+        display: flex;
+        flex-wrap: wrap;
+        width: 100%;
+    }
+
+    .filter-type-buttons > *,
+    .detection-type-filter > * {
+        flex: 1 1 auto;
+        min-width: 0;
+    }
+
+
+    /* ========================================================
+       DATE FILTER
+       ======================================================== */
+
+    .date-filter-group,
+    .date-range-group,
+    .filter-date-group {
+        width: 100% !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
+        display: flex !important;
+        flex-direction: column !important;
+        gap: 8px !important;
+    }
+
+    .date-filter-group > *,
+    .date-range-group > *,
+    .filter-date-group > * {
+        width: 100% !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
+        flex: 1 1 100% !important;
+    }
+
+    .date-filter-group input[type="date"],
+    .date-range-group input[type="date"],
+    .filter-date-group input[type="date"] {
+        width: 100% !important;
+        min-width: 0 !important;
+    }
+
+
+    /* ========================================================
+       PERIOD BUTTON
+       ======================================================== */
+
+    .period-btn-group {
+        width: 100% !important;
+        max-width: 100% !important;
+        display: flex;
+        flex-wrap: wrap;
+    }
+
+    .period-btn-group .btn {
+        flex: 1 1 auto;
+        min-height: 40px;
+    }
+
+
+    /* ========================================================
+       3. DETECTION TABLE
+       ======================================================== */
+
+    /*
+       PENTING:
+       Jangan lagi gunakan:
+       .table { min-width: 720px; }
+
+       Karena itu menyebabkan tabel melebar di HP.
+    */
+
+    .table-responsive {
+        width: 100% !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
+
+        overflow-x: hidden !important;
+        overflow-y: visible !important;
+
+        padding: 0 !important;
+        margin: 0 !important;
+
+        background: transparent !important;
+    }
+
+    .table-responsive > .table {
+        width: 100% !important;
+        min-width: 0 !important;
+        max-width: 100% !important;
+
+        display: block !important;
+
+        margin: 0 !important;
+        border-collapse: separate !important;
+        border-spacing: 0 !important;
+    }
+
+
+    /* ========================================================
+       HEADER TABEL
+       ======================================================== */
+
+    .table-responsive .table thead {
+        display: none !important;
+    }
+
+
+    /* ========================================================
+       SETIAP ROW MENJADI CARD
+       ======================================================== */
+
+    .table-responsive .table tbody {
+        display: block !important;
+        width: 100% !important;
+    }
+
+    .table-responsive .table tbody tr {
+        display: grid !important;
+
+        width: 100% !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
+
+        grid-template-columns: 72px minmax(0, 1fr) !important;
+
+        gap: 0 12px !important;
+
+        margin: 0 0 8px 0 !important;
+        padding: 10px !important;
+
+        border: 1px solid rgba(80, 110, 150, 0.22) !important;
+        border-radius: 9px !important;
+
+        background: #0c1627 !important;
+
+        box-sizing: border-box !important;
+
+        overflow: hidden !important;
+    }
+
+
+    /* ========================================================
+       CELL
+       ======================================================== */
+
+    .table-responsive .table tbody td {
+        display: flex !important;
+
+        width: 100% !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
+
+        padding: 5px 0 !important;
+
+        border: 0 !important;
+
+        white-space: normal !important;
+        overflow: hidden !important;
+
+        font-size: 0.72rem !important;
+
+        box-sizing: border-box !important;
+    }
+
+
+    /* ========================================================
+       FOTO
+       ======================================================== */
+
+    .table-responsive .table tbody td:first-child {
+        grid-row: 1 / span 5;
+
+        width: 72px !important;
+        height: 72px !important;
+
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+
+        padding: 0 !important;
+
+        overflow: hidden !important;
+    }
+
+    .table-responsive .table tbody td:first-child img {
+        width: 64px !important;
+        height: 64px !important;
+
+        max-width: 64px !important;
+        max-height: 64px !important;
+
+        object-fit: cover !important;
+
+        border-radius: 7px !important;
+    }
+
+
+    /* ========================================================
+       TARGET / NILAI
+       ======================================================== */
+
+    .table-responsive .table tbody td:nth-child(2) {
+        font-size: 0.80rem !important;
+        font-weight: 600 !important;
+
+        color: #f1f5f9 !important;
+
+        align-items: center;
+    }
+
+
+    /* ========================================================
+       TYPE
+       ======================================================== */
+
+    .table-responsive .table tbody td:nth-child(3) {
+        align-items: center;
+    }
+
+    .table-responsive .table tbody td:nth-child(3) .badge {
+        max-width: 100%;
+        white-space: normal;
+    }
+
+
+    /* ========================================================
+       CELL LAIN
+       ======================================================== */
+
+    .table-responsive .table tbody td:nth-child(n+4) {
+        grid-column: 2;
+    }
+
+
+    /* ========================================================
+       CAMERA / TEXT PANJANG
+       ======================================================== */
+
+    .table-responsive .camera-url {
+        display: block !important;
+
+        max-width: 100% !important;
+        width: 100% !important;
+
+        overflow: hidden !important;
+
+        text-overflow: ellipsis !important;
+        white-space: nowrap !important;
+    }
+
+
+    /* ========================================================
+       CONFIDENCE
+       ======================================================== */
+
+    .table-responsive .progress {
+        width: 100% !important;
+        max-width: 120px !important;
+    }
+
+
+    /* ========================================================
+       ACTION BUTTON
+       ======================================================== */
+
+    .table-responsive .table tbody td:last-child {
+        grid-column: 2;
+
+        display: flex !important;
+        justify-content: flex-start !important;
+        align-items: center !important;
+
+        padding-top: 7px !important;
+    }
+
+    .table-responsive .table-actions {
+        display: flex !important;
+
+        width: 100% !important;
+
+        gap: 7px !important;
+
+        justify-content: flex-start !important;
+        align-items: center !important;
+    }
+
+    .table-responsive .table-actions button {
+        width: 40px !important;
+        height: 40px !important;
+
+        min-width: 40px !important;
+        min-height: 40px !important;
+
+        padding: 0 !important;
+
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+    }
+
+
+    /* ========================================================
+       4. PANEL DETECTION
+       ======================================================== */
+
+    .panel {
+        overflow: hidden !important;
+    }
+
+    .panel-header {
+        width: 100%;
+        max-width: 100%;
+        min-width: 0;
+
+        overflow: hidden;
+    }
+
+    .panel-header h3,
+    .panel-header p {
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+
+    /* ========================================================
+       5. SEARCH + EXPORT DI ATAS DETECTION
+       ======================================================== */
+
+    .panel-header + .filter-toolbar,
+    .panel-header + .analytics-filters {
+        margin-top: 0;
+    }
+
+    .filter-toolbar {
+        padding: 10px !important;
+
+        width: 100% !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
+
+        overflow: hidden !important;
+        box-sizing: border-box;
+    }
+
+    .filter-toolbar .row,
+    .analytics-filters .row {
+        width: 100% !important;
+        max-width: 100% !important;
+        margin: 0 !important;
+    }
+
+    .filter-toolbar [class*="col-"],
+    .analytics-filters [class*="col-"] {
+        width: 100% !important;
+        max-width: 100% !important;
+
+        padding-left: 0 !important;
+        padding-right: 0 !important;
+
+        margin-bottom: 8px;
+    }
+
+
+    /* ========================================================
+       6. MOBILE INPUT
+       ======================================================== */
+
+    input,
+    select,
+    textarea,
+    .form-control,
+    .form-select {
+        max-width: 100% !important;
+        box-sizing: border-box !important;
+    }
+
+    .form-control,
+    .form-select {
+        min-height: 40px;
+    }
+
+
+    /* ========================================================
+       7. BUTTON GROUP
+       ======================================================== */
+
+    .btn-group {
+        max-width: 100% !important;
+        flex-wrap: wrap !important;
+    }
+
+    .btn-group > .btn {
+        min-height: 40px;
+    }
+
+
+    /* ========================================================
+       8. EXPORT EXCEL
+       ======================================================== */
+
+    .btn-action-outline,
+    .btn-action-primary {
+        min-height: 40px;
+    }
+
+
+    /* ========================================================
+       9. MODAL CAPTURE
+       ======================================================== */
+
+    .detection-image-modal {
+        width: calc(100vw - 16px) !important;
+        max-width: calc(100vw - 16px) !important;
+
+        margin: 8px auto !important;
+    }
+
+    .detection-image-modal .modal-content {
+        max-height: calc(100vh - 16px) !important;
+        overflow: hidden !important;
+    }
+
+    .preview-img-container {
+        width: 100% !important;
+
+        height: auto !important;
+
+        min-height: 200px !important;
+        max-height: 55vh !important;
+
+        aspect-ratio: 4 / 3;
+    }
+
+    .detection-preview-image {
+        width: 100% !important;
+        height: 100% !important;
+
+        max-width: 100% !important;
+        max-height: 55vh !important;
+
+        object-fit: contain !important;
+    }
+}
+
+
+/* ============================================================
+   SMALL PHONE
+   ============================================================ */
+
+@media (max-width: 575.98px) {
+
+    .main-panel {
+        padding: 10px 8px 20px !important;
+    }
+
+    /* Filter tombol tipe */
+    .detection-type-filter,
+    .filter-type-buttons {
+        display: grid !important;
+        grid-template-columns: 1fr !important;
+        width: 100% !important;
+    }
+
+    .detection-type-filter > *,
+    .filter-type-buttons > * {
+        width: 100% !important;
+        max-width: 100% !important;
+    }
+
+    /* Card detection */
+    .table-responsive .table tbody tr {
+        grid-template-columns: 62px minmax(0, 1fr) !important;
+        padding: 9px !important;
+        margin-bottom: 7px !important;
+    }
+
+    .table-responsive .table tbody td:first-child {
+        width: 62px !important;
+        height: 62px !important;
+    }
+
+    .table-responsive .table tbody td:first-child img {
+        width: 55px !important;
+        height: 55px !important;
+    }
+
+    .table-responsive .table tbody td {
+        font-size: 0.68rem !important;
+    }
+
+    .table-responsive .table tbody td:nth-child(2) {
+        font-size: 0.76rem !important;
+    }
+
+    .table-responsive .table-actions button {
+        width: 38px !important;
+        height: 38px !important;
+        min-width: 38px !important;
+        min-height: 38px !important;
+    }
+}
+
+
+/* ============================================================
+   EXTRA SMALL PHONE 360px
+   ============================================================ */
+
+@media (max-width: 380px) {
+
+    .main-panel {
+        padding-left: 6px !important;
+        padding-right: 6px !important;
+    }
+
+    .table-responsive .table tbody tr {
+        grid-template-columns: 56px minmax(0, 1fr) !important;
+    }
+
+    .table-responsive .table tbody td:first-child {
+        width: 56px !important;
+        height: 56px !important;
+    }
+
+    .table-responsive .table tbody td:first-child img {
+        width: 50px !important;
+        height: 50px !important;
+    }
+
+    .table-responsive .table tbody td {
+        font-size: 0.64rem !important;
+    }
+
+    .table-responsive .table tbody td:nth-child(2) {
+        font-size: 0.70rem !important;
+    }
+}
+
