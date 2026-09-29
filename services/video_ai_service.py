@@ -21,6 +21,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime
 
 import cv2
@@ -503,6 +504,8 @@ class VideoAIService:
         self.show_window = show_window
         self.progress_callback = progress_callback
 
+        self.session_id = uuid.uuid4().hex[:12]
+        self.track_lifecycle = {}
         self.person_capture_state = {}
         self.last_results = {"persons": [], "plates": []}
         self.last_plate_result_frame = -999999
@@ -543,6 +546,40 @@ class VideoAIService:
         self.plate_tracker = None
 
         self._load_models()
+
+    def _get_track_generation(self, track_id, video_time):
+        try:
+            track_id = int(track_id)
+            video_time = float(video_time)
+        except (TypeError, ValueError):
+            return 1
+        if track_id < 0:
+            return 1
+
+        state = self.track_lifecycle.get(track_id)
+        if state is None:
+            state = {"generation": 1, "last_seen": video_time}
+        else:
+            last_seen = float(state.get("last_seen", video_time))
+            gap = video_time - last_seen
+            if gap < 0 or gap > 8.0:
+                state["generation"] = int(state.get("generation", 1)) + 1
+            state["last_seen"] = video_time
+
+        self.track_lifecycle[track_id] = state
+        return int(state["generation"])
+
+    def _build_event_key(self, object_type, track_id, generation=1):
+        try:
+            track_id = int(track_id)
+        except (TypeError, ValueError):
+            track_id = str(track_id)
+        try:
+            generation = int(generation)
+        except (TypeError, ValueError):
+            generation = 1
+        object_type = str(object_type or "unknown").lower().strip()
+        return f"{object_type}:{self.camera_id}:{track_id}:gen{generation}:sess_{self.session_id}"
 
     # ------------------------------------------------------------
     # LIGHTING / FOCUS
@@ -1191,17 +1228,17 @@ class VideoAIService:
             self.person_capture_state[track_id] = video_time
             self.person_capture_count += 1
 
-            h_frame, w_frame = frame.shape[:2]
+            generation = self._get_track_generation(track_id, video_time)
             crossing_direction = line_crossing.default_tracker.update(
                 camera_id=self.camera_id,
                 track_id=track_id,
-                generation=1,
+                generation=generation,
                 bbox=item["box"],
                 frame_width=w_frame,
                 frame_height=h_frame,
                 camera_direction=db.get_camera_direction(self.camera_id),
             )
-            event_key = f"person:{self.camera_id}:{track_id}:g1"
+            event_key = self._build_event_key("person", track_id, generation)
             previous_meta = self.person_capture_state.get(f"{event_key}:meta")
             direction_final = (
                 crossing_direction
@@ -1252,17 +1289,18 @@ class VideoAIService:
             if track_id < 0:
                 continue
 
+            generation = self._get_track_generation(track_id, video_time)
             crossing_direction = line_crossing.default_tracker.update(
                 camera_id=self.camera_id,
                 track_id=track_id,
-                generation=1,
+                generation=generation,
                 bbox=item["box"],
                 frame_width=w_frame,
                 frame_height=h_frame,
                 camera_direction=camera_orientation,
             )
 
-            event_key = f"vehicle:{self.camera_id}:{track_id}:g1"
+            event_key = self._build_event_key("vehicle", track_id, generation)
             meta_key = f"{event_key}:meta"
             previous_meta = self.person_capture_state.get(meta_key) or {}
             previous_direction = previous_meta.get("direction", "unknown")
@@ -1305,7 +1343,7 @@ class VideoAIService:
     # PLATE ROI
     # ------------------------------------------------------------
 
-    def _detect_plates_in_vehicles(self, frame, vehicle_dets):
+    def _detect_plates_in_vehicles(self, frame, vehicle_dets, video_time=0.0):
         h, w = frame.shape[:2]
         vehicles = [
             item for item in vehicle_dets
@@ -1404,6 +1442,10 @@ class VideoAIService:
                 item["vehicle_cls"] = vehicle.get("cls", 0)
                 item["vehicle_track_id"] = vehicle.get("track_id", -1)
                 item["vehicle_box"] = [vx1, vy1, vx2, vy2]
+                item["vehicle_crop"] = vehicle_crop
+                item["vehicle_generation"] = self._get_track_generation(
+                    vehicle.get("track_id", -1), video_time
+                )
                 results.append(item)
 
         # Deduplikasi center.
@@ -1517,19 +1559,33 @@ class VideoAIService:
             prefix=prefix,
         )
 
-        vehicle_crop, vehicle_score, vehicle_track_id = get_vehicle_crop_for_plate(
-            frame,
-            bbox,
-            vehicle_dets,
-        )
+        vehicle_track_id = finished.get("vehicle_track_id")
+        if vehicle_track_id is None or str(vehicle_track_id).strip() == "" or str(vehicle_track_id) == "-1":
+            vehicle_crop, vehicle_score, found_vid = get_vehicle_crop_for_plate(
+                frame,
+                bbox,
+                vehicle_dets,
+            )
+            vehicle_track_id = found_vid if found_vid is not None else track_id
+        else:
+            vehicle_score = 0.8
+            vehicle_crop = finished.get("vehicle_crop")
+            if vehicle_crop is None or getattr(vehicle_crop, "size", 0) == 0:
+                vehicle_crop, vehicle_score, _ = get_vehicle_crop_for_plate(
+                    frame,
+                    bbox,
+                    vehicle_dets,
+                )
 
-        vehicle_track_id = finished.get("vehicle_track_id") or vehicle_track_id or track_id
+        vehicle_generation = finished.get("vehicle_generation")
+        if vehicle_generation is None:
+            vehicle_generation = self.track_lifecycle.get(vehicle_track_id, {}).get("generation", 1)
 
         # Event plat SELALU terhubung ke event kendaraan yang sama
         # (event_key sama dengan yang dipakai _save_vehicle_events),
         # supaya arah yang tersimpan konsisten - bukan dihitung ulang
         # dari kamera secara statis.
-        event_key = f"vehicle:{self.camera_id}:{vehicle_track_id}:g1"
+        event_key = self._build_event_key("vehicle", vehicle_track_id, vehicle_generation)
         previous_meta = self.person_capture_state.get(f"{event_key}:meta") or {}
         direction = previous_meta.get("direction", "unknown")
 
@@ -1612,6 +1668,7 @@ class VideoAIService:
                 detections = self._detect_plates_in_vehicles(
                     ai_frame,
                     person_dets,
+                    video_time,
                 )
 
                 # Tahap 2: jika plat milik target kendaraan ditemukan,
@@ -1632,8 +1689,7 @@ class VideoAIService:
                     if item is not None:
                         plate_display.append(item)
 
-                finished = self.plate_tracker.consume_latest_finished_capture()
-                if finished is not None:
+                for finished in self.plate_tracker.consume_finished_captures():
                     self._save_finished_capture(
                         finished,
                         frame,
@@ -1676,8 +1732,7 @@ class VideoAIService:
                     last_frame,
                     self.plate_ocr,
                 )
-                finished = self.plate_tracker.consume_latest_finished_capture()
-                if finished is not None:
+                for finished in self.plate_tracker.consume_finished_captures():
                     self._save_finished_capture(
                         finished,
                         last_frame,
