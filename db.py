@@ -463,6 +463,23 @@ def _delete_capture_file(path):
         pass
 
 
+def _capture_file_exists(path):
+    if not path:
+        return False
+    absolute_path = os.path.join(BASE_DIR, str(path).replace("/", os.sep))
+    return os.path.isfile(absolute_path)
+
+
+def _vehicle_capture_is_referenced(cur, path):
+    if not path:
+        return False
+    cur.execute(
+        "SELECT 1 FROM full_detection WHERE vehicle_image_path = %s LIMIT 1",
+        (path,)
+    )
+    return cur.fetchone() is not None
+
+
 def delete_detection(detection_id: int) -> bool:
     with get_db() as conn:
         try:
@@ -562,6 +579,7 @@ def save_detection_event(
     vehicle_rel_path = None
     plate_rel_path = None
     face_rel_path = None
+    vehicle_file_referenced = False
 
     try:
         with conn.cursor() as cur:
@@ -618,10 +636,14 @@ def save_detection_event(
                     new_driver = has_driver and not prev_has_driver
                     new_direction = direction in ("entry", "exit") and prev_direction == "unknown"
                     need_plate = has_plate_input and not existing_plate_id
+                    need_vehicle_image = (
+                        vehicle_crop is not None
+                        and not _capture_file_exists(existing_vehicle_path)
+                    )
 
                     should_enrich = (
                         better_vehicle or better_ocr
-                        or new_driver or new_direction or need_plate
+                        or new_driver or new_direction or need_plate or need_vehicle_image
                     )
 
                     if not should_enrich:
@@ -641,7 +663,9 @@ def save_detection_event(
                             "has_driver": prev_has_driver,
                         }
 
-                    if vehicle_crop is not None and (better_vehicle or not existing_vehicle_path):
+                    if vehicle_crop is not None and (
+                        better_vehicle or not _capture_file_exists(existing_vehicle_path)
+                    ):
                         vehicle_rel_path = save_crop_locally(
                             vehicle_crop, VEHICLE_DIR,
                             prefix="vehicle", camera_id=camera_id, track_id=track_id
@@ -743,8 +767,25 @@ def save_detection_event(
                          vehicle_rel_path, existing_id)
                     )
 
-                    if vehicle_rel_path and existing_vehicle_path:
-                        _delete_capture_file(vehicle_rel_path)
+                    cur.execute(
+                        "SELECT vehicle_image_path FROM full_detection WHERE detection_id = %s",
+                        (existing_id,)
+                    )
+                    updated_event = cur.fetchone()
+                    persisted_vehicle_path = (
+                        updated_event.get("vehicle_image_path") if updated_event else None
+                    )
+                    if vehicle_rel_path and persisted_vehicle_path == vehicle_rel_path:
+                        vehicle_file_referenced = True
+                        if (
+                            existing_vehicle_path
+                            and existing_vehicle_path != vehicle_rel_path
+                            and not _vehicle_capture_is_referenced(cur, existing_vehicle_path)
+                        ):
+                            _delete_capture_file(existing_vehicle_path)
+                    elif vehicle_rel_path:
+                        if not _vehicle_capture_is_referenced(cur, vehicle_rel_path):
+                            _delete_capture_file(vehicle_rel_path)
                         vehicle_rel_path = None
 
                     return {
@@ -754,7 +795,7 @@ def save_detection_event(
                         "enriched": True,
                         "plate_image_path": plate_rel_path or existing.get("plate_image_path"),
                         "face_image_path": existing_face_path,
-                        "vehicle_image_path": existing_vehicle_path or vehicle_rel_path,
+                        "vehicle_image_path": persisted_vehicle_path,
                         "plate_number": normalized_plate or prev_plate_number or None,
                         "object_type": "vehicle",
                         "vehicle_type": vehicle_type,
@@ -943,6 +984,9 @@ def save_detection_event(
                      vehicle_hash, face_hash)
                 )
                 detection_id = cur.lastrowid
+                vehicle_file_referenced = bool(
+                    object_type == "vehicle" and vehicle_rel_path
+                )
             except IntegrityError as ie:
                 if event_key:
                     print(f"[DB EVENT RACE] Tabrakan event_key={event_key}, fallback ke enrichment: {ie}")
@@ -963,10 +1007,21 @@ def save_detection_event(
                         final_plate_id = plate_id or existing_race.get("plate_id")
                         prev_vconf = float(existing_race.get("vehicle_confidence") or 0.0)
                         prev_ocr = float(existing_race.get("event_ocr_confidence") or 0.0)
-                        if (
+                        old_race_vehicle_path = existing_race.get("vehicle_image_path")
+                        replace_race_vehicle_image = bool(
+                            object_type == "vehicle"
+                            and vehicle_rel_path
+                            and (
+                                vehicle_confidence > prev_vconf + CONFIDENCE_IMPROVEMENT_THRESHOLD
+                                or not _capture_file_exists(old_race_vehicle_path)
+                            )
+                        )
+                        update_race = (
                             vehicle_confidence > prev_vconf + CONFIDENCE_IMPROVEMENT_THRESHOLD
                             or ocr_conf > prev_ocr + CONFIDENCE_IMPROVEMENT_THRESHOLD
-                        ):
+                            or replace_race_vehicle_image
+                        )
+                        if update_race:
                             cur.execute(
                                 """UPDATE full_detection SET
                                     plate_id = COALESCE(%s, plate_id),
@@ -975,19 +1030,40 @@ def save_detection_event(
                                     detection_confidence = GREATEST(COALESCE(detection_confidence, 0), %s),
                                     vehicle_confidence = GREATEST(COALESCE(vehicle_confidence, 0), %s),
                                     ocr_confidence = GREATEST(COALESCE(ocr_confidence, 0), %s),
-                                    vehicle_image_path = COALESCE(vehicle_image_path, %s),
+                                    vehicle_image_path = COALESCE(%s, vehicle_image_path),
                                     face_image_path = COALESCE(face_image_path, %s)
                                    WHERE detection_id = %s""",
                                 (final_plate_id, final_plate_id, status_val, conf_val,
                                  vehicle_confidence, ocr_conf,
-                                 vehicle_rel_path, face_rel_path, detection_id)
+                                 vehicle_rel_path if replace_race_vehicle_image else None,
+                                 face_rel_path, detection_id)
                             )
+                        cur.execute(
+                            "SELECT vehicle_image_path FROM full_detection WHERE detection_id = %s",
+                            (detection_id,)
+                        )
+                        updated_race = cur.fetchone()
+                        persisted_vehicle_path = (
+                            updated_race.get("vehicle_image_path") if updated_race else None
+                        )
+                        if vehicle_rel_path and persisted_vehicle_path == vehicle_rel_path:
+                            vehicle_file_referenced = True
+                            if (
+                                old_race_vehicle_path
+                                and old_race_vehicle_path != vehicle_rel_path
+                                and not _vehicle_capture_is_referenced(cur, old_race_vehicle_path)
+                            ):
+                                _delete_capture_file(old_race_vehicle_path)
+                        elif vehicle_rel_path:
+                            if not _vehicle_capture_is_referenced(cur, vehicle_rel_path):
+                                _delete_capture_file(vehicle_rel_path)
+                            vehicle_rel_path = None
                         return {
                             "plate_id": final_plate_id,
                             "detection_id": detection_id,
                             "plate_image_path": plate_rel_path,
                             "face_image_path": face_rel_path or existing_race.get("face_image_path"),
-                            "vehicle_image_path": vehicle_rel_path or existing_race.get("vehicle_image_path"),
+                            "vehicle_image_path": persisted_vehicle_path,
                             "plate_number": normalized_plate or None,
                             "object_type": object_type,
                             "vehicle_type": vehicle_type,
@@ -1023,7 +1099,21 @@ def save_detection_event(
             }
 
     except Exception as exc:
-        if vehicle_rel_path: _delete_capture_file(vehicle_rel_path)
+        if vehicle_rel_path and not vehicle_file_referenced:
+            can_delete_vehicle_file = True
+            try:
+                with conn.cursor() as cleanup_cur:
+                    vehicle_file_referenced = _vehicle_capture_is_referenced(
+                        cleanup_cur, vehicle_rel_path
+                    )
+            except Exception as cleanup_exc:
+                can_delete_vehicle_file = False
+                print(
+                    f"[CAPTURE CLEANUP WARNING] Tidak dapat memastikan referensi "
+                    f"{vehicle_rel_path}; file dipertahankan: {cleanup_exc}"
+                )
+            if can_delete_vehicle_file and not vehicle_file_referenced:
+                _delete_capture_file(vehicle_rel_path)
         if plate_rel_path: _delete_capture_file(plate_rel_path)
         if face_rel_path: _delete_capture_file(face_rel_path)
         try: conn.rollback()
