@@ -38,7 +38,7 @@
             corePlugins: { preflight: false }
         };
     </script>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=2.9">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=2.11">
     <style>
         .detection-image-modal { width: 820px; max-width: 90vw; margin: 1rem auto; }
         .detection-image-modal .modal-content { max-height: 90vh; overflow: hidden; border-radius: 12px; }
@@ -206,14 +206,29 @@
                             <div id="topbarAvatar" class="avatar">A</div>
                             <div><strong id="topbarName">Administrator</strong><span id="topbarRole">Operator</span></div>
                         </button>
-                        <ul class="dropdown-menu dropdown-menu-end shadow-sm">
-                            <li><span class="dropdown-item-text small text-muted">{{ session.get('user_email', '') }}</span></li>
-                            <li><hr class="dropdown-divider"></li>
-                            <li><a class="dropdown-item" href="{{ url_for('settings_page.settings') }}"><i class="bi bi-person me-2"></i>Profil</a></li>
+                        <ul class="dropdown-menu dropdown-menu-end account-menu">
+                            <li class="account-menu-header">
+                                <span class="account-menu-avatar"><i class="bi bi-person-fill"></i></span>
+                                <span class="account-menu-identity">
+                                    <small>Sedang masuk</small>
+                                    <strong>{{ session.get('user_email', '') }}</strong>
+                                </span>
+                            </li>
+                            <li><hr class="dropdown-divider account-menu-divider"></li>
+                            <li>
+                                <a class="dropdown-item account-menu-link" href="{{ url_for('settings_page.settings') }}">
+                                    <span class="account-menu-icon"><i class="bi bi-person-vcard"></i></span>
+                                    <span class="account-menu-action"><strong>Profil saya</strong><small>Kelola info operator</small></span>
+                                    <i class="bi bi-chevron-right account-menu-arrow"></i>
+                                </a>
+                            </li>
                             <li>
                                 <form method="post" action="{{ url_for('auth.logout') }}">
                                     <input type="hidden" name="logout_token" value="{{ session.get('logout_token', '') }}">
-                                    <button class="dropdown-item text-danger" type="submit"><i class="bi bi-box-arrow-right me-2"></i>Keluar</button>
+                                    <button class="dropdown-item account-menu-link account-menu-signout" type="submit">
+                                        <span class="account-menu-icon"><i class="bi bi-box-arrow-right"></i></span>
+                                        <span class="account-menu-action"><strong>Keluar</strong><small>Akhiri sesi ini</small></span>
+                                    </button>
                                 </form>
                             </li>
                         </ul>
