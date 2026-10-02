@@ -1074,7 +1074,7 @@ button, input, select { font: inherit; }
     .topbar-left { width: 100%; }
     .topbar-actions { width: 100%; justify-content: space-between; }
     .search-box { flex: 1 1 180px; }
-    .user-pill { display: none; }
+    .user-pill { display: flex; }
     .video-stage { min-height: 300px; max-height: 360px; }
     .camera-url { max-width: 200px; }
     .playlist-actions { width: 100%; margin-top: 10px; }
