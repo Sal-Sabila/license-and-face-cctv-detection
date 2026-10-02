@@ -2242,6 +2242,18 @@ class StreamAIService:
         self._draw_dynamic_focus(output)
         return self._display_frame(output, camera_id)
 
+    def render_frame(self, frame, camera_id=1):
+        """Render hasil deteksi terakhir ke frame tanpa memasukkannya ke antrean AI."""
+        if frame is None or not hasattr(frame, "size") or frame.size == 0:
+            return frame
+        camera_id = _normalize_camera_id(camera_id)
+        camera_state = self._camera_state(camera_id)
+        output = frame.copy()
+        self._draw_detection_zones(output, camera_id)
+        self._draw_clean_bboxes(output, camera_state["last_results"])
+        self._draw_dynamic_focus(output)
+        return self._display_frame(output, camera_id)
+
     def stop(self):
         self.running = False
         self.ai_wakeup.set()

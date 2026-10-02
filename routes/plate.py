@@ -1,14 +1,11 @@
 import time
 import cv2
-import numpy as np
 import os
 import threading
 import uuid
-import queue
 from flask import Blueprint, jsonify, request, Response, send_from_directory, send_file
 from datetime import datetime
 import db
-from ffmpeg_stream_reader import FFmpegStreamReader, normalize_stream_url
 from report_export import (
     build_detections_excel,
     build_detections_pdf,
@@ -925,90 +922,30 @@ def export_cameras_pdf():
 # ENDPOINT LIVE CCTV STREAM (MJPEG UNTUK BROWSER)
 # ============================================================
 
-def generate_mjpeg_stream(stream_url, width=960, height=540, draw_bbox=True, camera_id=1):
-    """Membaca frame dari CCTV via FFmpegStreamReader dan stream MJPEG ke browser dengan AI bounding box."""
-    norm_url = normalize_stream_url(stream_url)
-    reader = FFmpegStreamReader(norm_url, width=width, height=height)
+def generate_mjpeg_stream(camera_id, draw_bbox=True):
+    """Stream frame cache worker kamera tanpa membaca atau memproses ulang CCTV."""
+    from services.camera_worker_manager import CameraWorkerManager
 
+    manager = CameraWorkerManager.get_instance()
     ai_service = None
-    try:
+    if draw_bbox:
         from services.stream_ai_service import StreamAIService
         ai_service = StreamAIService.get_instance()
-    except Exception as e:
-        print(f"[AI STREAM WARNING] AI Service load error: {e}")
-
-    ai_input = queue.Queue(maxsize=1)
-    ai_output = queue.Queue(maxsize=1)
-    stop_worker = threading.Event()
-
-    def run_ai_worker():
-        while not stop_worker.is_set():
-            try:
-                source_frame = ai_input.get(timeout=0.2)
-            except queue.Empty:
-                continue
-            try:
-                result_frame = ai_service.process_frame(
-                    source_frame,
-                    draw_bbox=draw_bbox,
-                    camera_id=camera_id
-                )
-                while True:
-                    try:
-                        ai_output.get_nowait()
-                    except queue.Empty:
-                        break
-                if result_frame is not None and getattr(result_frame, "size", 0):
-                    ai_output.put_nowait(result_frame)
-                else:
-                    print(f"[AI STREAM ERROR] Invalid processed frame for camera={camera_id}")
-            except Exception as e:
-                print(f"[AI STREAM ERROR] Frame processing failed: {e}")
-
-    worker = None
-    if ai_service is not None:
-        worker = threading.Thread(target=run_ai_worker, daemon=True)
-        worker.start()
 
     try:
-        failed_reads = 0
         while True:
-            ret, frame = reader.read()
-            if not ret or frame is None:
-                failed_reads += 1
-                if failed_reads < 3 and reader.isOpened():
-                    time.sleep(0.2)
-                    continue
-
-                error_frame = np.zeros((height, width, 3), dtype=np.uint8)
-                cv2.putText(error_frame, "STREAM CCTV TIDAK TERSEDIA", (30, 70), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (80, 180, 255), 2)
-                error_message = reader.error_message or "FFmpeg tidak menerima frame dari sumber CCTV"
-                cv2.putText(error_frame, error_message[:110], (30, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1)
-                ret, buffer = cv2.imencode('.jpg', error_frame)
-                if ret:
-                    yield (b'--frame\r\n'
-                           b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+            worker = manager.get_worker(camera_id)
+            if worker is None:
                 break
 
-            if ai_service is not None:
-                try:
-                    while True:
-                        ai_input.get_nowait()
-                except queue.Empty:
-                    pass
-                try:
-                    ai_input.put_nowait(frame.copy())
-                except Exception as e:
-                    print(f"[AI STREAM ERROR] Queue frame failed: {e}")
-
-                try:
-                    frame = ai_output.get_nowait()
-                except queue.Empty:
-                    pass
-
+            frame = worker.get_last_frame()
             if frame is None or not hasattr(frame, "size") or frame.size == 0:
-                print(f"[STREAM ERROR] Empty frame skipped for camera={camera_id}")
+                time.sleep(0.05)
                 continue
+
+            if ai_service is not None:
+                frame = ai_service.render_frame(frame, camera_id=camera_id)
+
             ret, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
             if not ret:
                 print(f"[STREAM ERROR] JPEG encode failed for camera={camera_id}")
@@ -1020,37 +957,31 @@ def generate_mjpeg_stream(stream_url, width=960, height=540, draw_bbox=True, cam
         pass
     except Exception as exc:
         print(f"[STREAM ERROR] MJPEG generator failed for camera={camera_id}: {exc}")
-    finally:
-        stop_worker.set()
-        reader.release()
 
 
 @plate_bp.route("/video_feed")
 @plate_bp.route("/video_feed/<int:camera_id>")
 def video_feed(camera_id=None):
     """Endpoint feed video real-time untuk elemen <img class='live-stream-feed'> di browser."""
+    from services.camera_worker_manager import CameraWorkerManager
+
     draw_bbox = request.args.get("bbox", "1").lower() in ("1", "true", "yes", "on")
-
     cams = db.get_all_cameras()
-    target_cam = None
-
     if camera_id is not None:
         target_cam = next((c for c in cams if c["camera_id"] == camera_id), None)
-
-    if not target_cam:
+    else:
         target_cam = next((c for c in cams if c["status"] == 1), None)
 
-    if not target_cam and cams:
-        target_cam = cams[0]
-
-    if not target_cam or not target_cam.get("stream_url"):
+    if not target_cam or target_cam.get("status") != 1 or not target_cam.get("stream_url"):
         return "Kamera tidak ditemukan atau belum aktif", 404
+
+    if CameraWorkerManager.get_instance().get_worker(target_cam["camera_id"]) is None:
+        return "Worker kamera belum tersedia", 503
 
     return Response(
         generate_mjpeg_stream(
-            target_cam["stream_url"],
-            draw_bbox=draw_bbox,
-            camera_id=target_cam["camera_id"]
+            camera_id=target_cam["camera_id"],
+            draw_bbox=draw_bbox
         ),
         mimetype='multipart/x-mixed-replace; boundary=frame'
     )
@@ -1060,38 +991,29 @@ def video_feed(camera_id=None):
 # ENDPOINT SNAPSHOT (1 FRAME) — untuk Editor Zona
 # ============================================================
 
-def _grab_single_frame(stream_url, width=960, height=540, camera_id=1, draw_bbox=False):
-    """
-    Ambil 1 frame dari stream CCTV via FFmpegStreamReader.
-    Return: np.ndarray (BGR) atau None kalau gagal.
-    """
-    norm_url = normalize_stream_url(stream_url)
-    reader = FFmpegStreamReader(norm_url, width=width, height=height)
+def _grab_single_frame(camera_id, draw_bbox=False, timeout=3.0):
+    """Ambil salinan frame terbaru dari worker kamera yang sudah aktif."""
+    from services.camera_worker_manager import CameraWorkerManager
 
+    manager = CameraWorkerManager.get_instance()
+    deadline = time.monotonic() + timeout
     frame = None
-    try:
-        # Baca beberapa kali untuk skip frame pertama yang kadang korup
-        for attempt in range(8):
-            ret, f = reader.read()
-            if ret and f is not None and getattr(f, "size", 0) > 0:
-                frame = f
+    while time.monotonic() < deadline:
+        worker = manager.get_worker(camera_id)
+        if worker is not None:
+            frame = worker.get_last_frame()
+            if frame is not None and getattr(frame, "size", 0) > 0:
                 break
-            time.sleep(0.15)
-    finally:
-        try:
-            reader.release()
-        except Exception:
-            pass
+        time.sleep(0.05)
 
-    if frame is None:
+    if frame is None or not getattr(frame, "size", 0):
         return None
 
-    # Optional: overlay bbox deteksi terakhir
     if draw_bbox:
         try:
             from services.stream_ai_service import StreamAIService
             svc = StreamAIService.get_instance()
-            processed = svc.process_frame(frame, draw_bbox=True, camera_id=camera_id)
+            processed = svc.render_frame(frame, camera_id=camera_id)
             if processed is not None and getattr(processed, "size", 0) > 0:
                 frame = processed
         except Exception as exc:
@@ -1134,9 +1056,6 @@ def video_snapshot(camera_id):
             }), 404
 
         frame = _grab_single_frame(
-            target_cam["stream_url"],
-            width=width,
-            height=height,
             camera_id=camera_id,
             draw_bbox=draw_bbox,
         )
@@ -1144,8 +1063,11 @@ def video_snapshot(camera_id):
         if frame is None:
             return jsonify({
                 "success": False,
-                "message": "Gagal membaca frame dari stream CCTV"
+                "message": "Frame worker kamera belum tersedia"
             }), 503
+
+        if width > 0 and height > 0 and frame.shape[1::-1] != (width, height):
+            frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
 
         ok, buffer = cv2.imencode(
             ".jpg",

@@ -39,7 +39,7 @@ app.register_blueprint(zones_page_bp)
 # ==============================
 
 # ==============================
-# START BACKGROUND DETECTION
+# START CAMERA WORKERS
 # ==============================
 
 if not app.debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
@@ -56,20 +56,6 @@ def health():
         "service": "license-and-face-cctv-detection",
         "message": "Flask server berjalan"
     }
-
-
-# ==============================
-# START BACKGROUND CCTV DETECTOR
-# ==============================
-
-import os
-from services.background_detector import BackgroundDetectionManager
-
-if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not app.debug:
-    try:
-        BackgroundDetectionManager.get_instance().start()
-    except Exception as e:
-        print(f"[APP WARNING] Gagal memulai BackgroundDetectionManager: {e}")
 
 
 # ==============================
