@@ -908,12 +908,12 @@ async function loadDetections() {
                     <td class="col-det-time">${timeHtml}</td>
                     <td class="col-det-status">${statusBadge}</td>
                     <td class="col-det-action text-end pe-3">
-                        <div class="d-inline-flex align-items-center gap-1">
-                            <button type="button" class="btn-table-action" title="Lihat detail" aria-label="Lihat detail" onclick="openImageModal('${esc(photo)}', '${esc(item.plate || 'Detail Deteksi')}', '${esc(item.camera)} · ${esc(item.timestamp)}', '${esc(confidenceText)} · Status: ${esc(item.status)}')">
+                        <div class="camera-actions-wrap justify-content-end">
+                            <button type="button" class="btn-action-icon" title="Lihat detail" aria-label="Lihat detail" onclick="openImageModal('${esc(photo)}', '${esc(item.plate || 'Detail Deteksi')}', '${esc(item.camera)} · ${esc(item.timestamp)}', '${esc(confidenceText)} · Status: ${esc(item.status)}')">
                                 <i class="bi bi-eye"></i>
                             </button>
-                            <button type="button" class="btn-table-action action-delete" title="Hapus" aria-label="Hapus" onclick="deleteDetection(${detectionId})">
-                                <i class="bi bi-trash3"></i>
+                            <button type="button" class="btn-action-icon btn-action-delete" title="Hapus" aria-label="Hapus" onclick="deleteDetection(${detectionId})">
+                                <i class="bi bi-trash"></i>
                             </button>
                         </div>
                     </td>
@@ -1807,11 +1807,35 @@ function renderTopPlatesTable() {
         const camera = p.camera || p.last_camera || '-';
         const lastSeen = p.last_seen || '-';
         const conf = p.confidence ?? p.avg_confidence_percent ?? 0;
-        const statusCode = p.status_code !== undefined ? p.status_code : (p.status === 'Aktual' ? 1 : 0);
-        const statusText = p.status || (statusCode === 1 ? 'Aktual' : 'Perlu Cek');
+        let statusCode = 1;
+        let statusText = 'Terbaca';
+
+        if (p.status_code !== undefined && p.status_code !== null) {
+            statusCode = Number(p.status_code);
+            if (statusCode === 1) {
+                statusText = p.status || 'Terbaca';
+            } else if (statusCode === 2) {
+                statusText = p.status || 'Perlu Cek';
+            } else {
+                statusText = p.status || 'Gagal';
+            }
+        } else if (p.status) {
+            const st = String(p.status).toLowerCase();
+            if (st.includes('baca') || st.includes('aktual') || st.includes('sukses') || st.includes('valid')) {
+                statusCode = 1;
+                statusText = p.status;
+            } else if (st.includes('cek') || st.includes('review') || st.includes('ragu')) {
+                statusCode = 2;
+                statusText = p.status;
+            } else {
+                statusCode = 0;
+                statusText = p.status;
+            }
+        }
+
         const badgeClass = statusCode === 1
             ? 'det-status-pill status-terbaca'
-            : (statusCode === 2 ? 'det-status-pill status-review' : 'det-status-pill status-gagal');
+            : (statusCode === 2 ? 'det-status-pill status-perlu-cek' : 'det-status-pill status-gagal');
 
         let timeHtml = `<span class="time-primary-line">${esc(lastSeen)}</span>`;
         if (lastSeen.includes(' ') || lastSeen.includes('T')) {
@@ -2159,6 +2183,7 @@ async function loadSettingsFromDb() {
         const topbarName = document.getElementById('topbarName');
         const topbarRole = document.getElementById('topbarRole');
         const avatar = document.getElementById('topbarAvatar');
+        const cardAvatar = document.getElementById('profileCardAvatar');
         const name = settings.operator_name || 'Super Admin CCTV';
         const profileRole = settings.profile_role || 'Kepala Operator';
         if (displayName) displayName.textContent = name;
@@ -2166,6 +2191,7 @@ async function loadSettingsFromDb() {
         if (topbarName) topbarName.textContent = name;
         if (topbarRole) topbarRole.textContent = profileRole;
         if (avatar) avatar.textContent = name.charAt(0).toUpperCase();
+        if (cardAvatar) cardAvatar.textContent = name.charAt(0).toUpperCase();
 
         // 2. Isi diagnostik sistem
         const diagStatus = document.getElementById('diagDbStatus');
