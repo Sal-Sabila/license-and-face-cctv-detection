@@ -216,13 +216,29 @@ window.openImageModal = openImageModal;
 // MODUL: MONITORING CCTV
 // ============================================================
 
-function renderCameraRows(camerasList) {
+function updateCameraSummary(camerasList) {
+    const totalEl = document.getElementById('summaryTotalCameras');
+    const activeEl = document.getElementById('summaryActiveCameras');
+    const inactiveEl = document.getElementById('summaryInactiveCameras');
+    if (!totalEl && !activeEl && !inactiveEl) return;
+
+    const total = camerasList.length;
+    const active = camerasList.filter(c => Boolean(c.active)).length;
+    const inactive = total - active;
+
+    if (totalEl) totalEl.textContent = total;
+    if (activeEl) activeEl.textContent = active;
+    if (inactiveEl) inactiveEl.textContent = inactive;
+}
+
+function renderCameraRows(camerasList, totalCamerasCount = null) {
     const table = document.getElementById('cameraTable');
     if (!table) return;
 
+    const total = totalCamerasCount !== null ? totalCamerasCount : camerasList.length;
     const pagInfo = document.getElementById('cameraPaginationInfo');
     if (pagInfo) {
-        pagInfo.textContent = `Menampilkan ${camerasList.length} kamera`;
+        pagInfo.textContent = `Menampilkan ${camerasList.length} dari ${total} kamera`;
     }
 
     if (!camerasList.length) {
@@ -233,29 +249,34 @@ function renderCameraRows(camerasList) {
     table.innerHTML = camerasList.map((camera, index) => {
         let dirBadge = '';
         if (camera.direction === 'entry') {
-            dirBadge = '<span class="badge bg-success-subtle text-success border border-success-subtle">Masuk</span>';
+            dirBadge = '<span class="direction-badge dir-entry">Masuk</span>';
         } else if (camera.direction === 'exit') {
-            dirBadge = '<span class="badge bg-danger-subtle text-danger border border-danger-subtle">Keluar</span>';
+            dirBadge = '<span class="direction-badge dir-exit">Keluar</span>';
         } else {
-            dirBadge = '<span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle">Tidak ditentukan</span>';
+            dirBadge = '<span class="direction-badge dir-unassigned">Belum diatur</span>';
         }
 
         const isAct = Boolean(camera.active);
 
         return `
         <tr>
-            <td class="text-center text-muted fw-semibold">${index + 1}</td>
-            <td><strong>${esc(camera.name)}</strong></td>
-            <td class="camera-url-cell"><span class="camera-url" title="${esc(camera.url)}">${esc(camera.url)}</span></td>
+            <td class="text-center text-muted col-num-text">${index + 1}</td>
+            <td><strong class="camera-name">${esc(camera.name)}</strong></td>
+            <td class="camera-url-cell"><span class="camera-url-code" title="${esc(camera.url)}">${esc(camera.url)}</span></td>
             <td class="text-center">${dirBadge}</td>
-            <td class="text-center"><span class="status ${isAct ? 'success' : 'warning'}">${isAct ? 'Aktif' : 'Nonaktif'}</span></td>
             <td class="text-center">
-                <div class="table-actions justify-content-center">
-                    <button class="action-btn action-toggle ${isAct ? 'deactivate' : 'activate'}" data-action="toggle" data-id="${camera.id}" title="${isAct ? 'Nonaktifkan Kamera' : 'Aktifkan Kamera'}">
-                        ${isAct ? 'Nonaktifkan' : 'Aktifkan'}
+                <button type="button" role="switch" aria-checked="${isAct}" class="camera-toggle-switch ${isAct ? 'is-active' : ''}" data-action="toggle" data-id="${camera.id}" aria-label="${isAct ? 'Nonaktifkan kamera' : 'Aktifkan kamera'}" title="${isAct ? 'Nonaktifkan kamera' : 'Aktifkan kamera'}">
+                    <span class="toggle-slider"></span>
+                </button>
+            </td>
+            <td class="text-end pe-3">
+                <div class="camera-actions-wrap justify-content-end">
+                    <button type="button" class="btn-action-icon btn-action-edit" data-action="edit" data-id="${camera.id}" aria-label="Edit" title="Edit">
+                        <i class="bi bi-pencil"></i>
                     </button>
-                    <button class="action-btn action-edit" data-action="edit" data-id="${camera.id}" title="Edit Kamera">Edit</button>
-                    <button class="action-btn action-delete" data-action="delete" data-id="${camera.id}" title="Hapus Kamera">Hapus</button>
+                    <button type="button" class="btn-action-icon btn-action-delete" data-action="delete" data-id="${camera.id}" aria-label="Hapus" title="Hapus">
+                        <i class="bi bi-trash3"></i>
+                    </button>
                 </div>
             </td>
         </tr>
@@ -270,6 +291,8 @@ async function loadCameras() {
         const count = document.getElementById('cameraCountTitle');
         if (count) count.textContent = cameras.length;
 
+        updateCameraSummary(cameras);
+
         const select = document.getElementById('cameraSelect');
         if (select) {
             select.innerHTML = cameras.map(item => `<option value="${item.id}">${esc(item.name)}</option>`).join('') || '<option value="">Belum ada kamera</option>';
@@ -281,7 +304,7 @@ async function loadCameras() {
             ? cameras.filter(c => (c.name || '').toLowerCase().includes(query) || (c.url || '').toLowerCase().includes(query))
             : cameras;
 
-        renderCameraRows(displayList);
+        renderCameraRows(displayList, cameras.length);
         return cameras;
     } catch (err) {
         console.error('Error loadCameras:', err);
@@ -358,7 +381,7 @@ async function initMonitoring() {
             const filtered = query
                 ? cameras.filter(c => (c.name || '').toLowerCase().includes(query) || (c.url || '').toLowerCase().includes(query))
                 : cameras;
-            renderCameraRows(filtered);
+            renderCameraRows(filtered, cameras.length);
         });
     }
 
@@ -444,6 +467,40 @@ async function initDashboard() {
             if (peopleTotal) peopleTotal.textContent = data.people || 0;
             if (vehicleDetail) vehicleDetail.textContent = `Masuk ${data.vehicle_entry || 0} · Keluar ${data.vehicle_exit || 0}`;
             if (peopleDetail) peopleDetail.textContent = `Masuk ${data.people_entry || 0} · Keluar ${data.people_exit || 0}`;
+
+            // Kalkulasi Bar Proporsi Masuk / Keluar (Ringkasan Arus)
+            const vIn = Number(data.vehicle_entry) || 0;
+            const vOut = Number(data.vehicle_exit) || 0;
+            const vSum = vIn + vOut;
+            const vInPct = vSum > 0 ? (vIn / vSum) * 100 : 0;
+            const vOutPct = vSum > 0 ? (vOut / vSum) * 100 : 0;
+
+            const elVBarIn = document.getElementById('vehicleFlowBarIn');
+            const elVBarOut = document.getElementById('vehicleFlowBarOut');
+            if (elVBarIn) elVBarIn.style.width = `${vInPct}%`;
+            if (elVBarOut) elVBarOut.style.width = `${vOutPct}%`;
+
+            const elVEntryText = document.getElementById('vehicleFlowEntryText');
+            const elVExitText = document.getElementById('vehicleFlowExitText');
+            if (elVEntryText) elVEntryText.textContent = `Masuk ${vIn}`;
+            if (elVExitText) elVExitText.textContent = `Keluar ${vOut}`;
+
+            const pIn = Number(data.people_entry) || 0;
+            const pOut = Number(data.people_exit) || 0;
+            const pSum = pIn + pOut;
+            const pInPct = pSum > 0 ? (pIn / pSum) * 100 : 0;
+            const pOutPct = pSum > 0 ? (pOut / pSum) * 100 : 0;
+
+            const elPBarIn = document.getElementById('peopleFlowBarIn');
+            const elPBarOut = document.getElementById('peopleFlowBarOut');
+            if (elPBarIn) elPBarIn.style.width = `${pInPct}%`;
+            if (elPBarOut) elPBarOut.style.width = `${pOutPct}%`;
+
+            const elPEntryText = document.getElementById('peopleFlowEntryText');
+            const elPExitText = document.getElementById('peopleFlowExitText');
+            if (elPEntryText) elPEntryText.textContent = `Masuk ${pIn}`;
+            if (elPExitText) elPExitText.textContent = `Keluar ${pOut}`;
+
             const insight = document.getElementById('dashboardInsights');
             if (insight) {
                 const insightData = summaryRes.data?.insights || [];
@@ -680,22 +737,24 @@ async function initDashboard() {
                         photoPath = item.face_image_path || item.faceImagePath || '';
                     }
 
+                    const isSuccess = item.status === 'Terbaca';
+                    const statusPillClass = isSuccess ? 'recent-status-success' : 'recent-status-warning';
+
                     return `
-                        <div class="recent d-flex align-items-center justify-content-between p-2 rounded mb-2" 
+                        <div class="recent recent-row" 
                              data-detection-id="${detectionId}"
                              data-event-key="${esc(eventKey)}"
-                             style="cursor: pointer; transition: background 0.2s;" 
                              onclick="openImageModal('${photoPath}', '${label}', '${esc(item.camera)} · ${esc(item.timestamp)}', 'Akurasi AI: <b>${item.confidence_percent}%</b> · Status: <b>${esc(item.status)}</b>', '${item.object_type}')">
-                            <div class="d-flex align-items-center gap-3">
-                                <div class="plate-icon ${isPlate ? '' : 'bg-primary text-white'}">${icon}</div>
-                                <div class="recent-info">
-                                    <strong class="d-block">${label}</strong>
-                                    <span class="text-muted small">${esc(item.camera)} · ${esc(item.timestamp)}</span>
-                                </div>
+                            <div class="recent-badge-col">
+                                <div class="recent-badge">${icon}</div>
                             </div>
-                            <div class="text-end">
-                                <b class="d-block text-primary">${item.confidence_percent}%</b>
-                                <span class="badge ${item.status === 'Terbaca' ? 'bg-success-subtle text-success border border-success-subtle' : 'bg-warning-subtle text-warning border border-warning-subtle'} small">${esc(item.status)}</span>
+                            <div class="recent-info-col">
+                                <strong class="recent-type-label">${label}</strong>
+                                <span class="recent-meta-label">${esc(item.camera)} · ${esc(item.timestamp)}</span>
+                            </div>
+                            <div class="recent-status-col">
+                                <span class="recent-conf-rate">${item.confidence_percent}%</span>
+                                <span class="recent-status-pill ${statusPillClass}">${esc(item.status)}</span>
                             </div>
                         </div>
                     `;
@@ -780,23 +839,32 @@ async function loadDetections() {
             const eventKey = item.event_key || '';
             const isVehicle = item.object_type === 'vehicle' || item.type === 'vehicle' || item.type === 'vehicle_with_plate' || item.type === 'plate';
             const isPlate = item.type === 'vehicle_with_plate' || (isVehicle && item.has_plate);
-            const targetLabel = isVehicle ? `<strong class=\"d-block\">${esc(isPlate ? item.plate : 'Kendaraan')}</strong>` : `<span class=\"text-muted fst-italic\">Orang</span>`;
+
+            let targetLabel = '';
+            if (isPlate) {
+                targetLabel = `<span class="target-val-plate">${esc(item.plate || 'Tanpa Plat')}</span>`;
+            } else if (isVehicle) {
+                targetLabel = `<span class="target-val-vehicle">Kendaraan</span>`;
+            } else {
+                targetLabel = `<span class="target-val-person">Orang</span>`;
+            }
+
             let typeBadge = '';
             if (isPlate) {
-                typeBadge = `<span class=\"badge bg-info-subtle text-info border border-info-subtle\"><i class=\"bi bi-car-front\"></i> Kendaraan / Plat Nomor</span>`;
+                typeBadge = `<span class="det-type-pill det-type-accent"><i class="bi bi-card-heading"></i> Plat Nomor</span>`;
             } else if (isVehicle) {
-                typeBadge = `<span class=\"badge bg-primary-subtle text-primary border border-primary-subtle\"><i class=\"bi bi-car-front\"></i> Kendaraan</span>`;
+                typeBadge = `<span class="det-type-pill det-type-accent"><i class="bi bi-car-front"></i> Kendaraan</span>`;
             } else {
-                typeBadge = `<span class=\"badge bg-secondary-subtle text-secondary border border-secondary-subtle\"><i class=\"bi bi-person\"></i> Orang</span>`;
+                typeBadge = `<span class="det-type-pill det-type-neutral"><i class="bi bi-person"></i> Orang</span>`;
             }
 
             let statusBadge = '';
             if (item.status_code === 1) {
-                statusBadge = `<span class="badge bg-success-subtle text-success border border-success-subtle">Terbaca</span>`;
+                statusBadge = `<span class="det-status-pill status-terbaca">Terbaca</span>`;
             } else if (item.status_code === 2) {
-                statusBadge = `<span class="badge bg-warning-subtle text-warning border border-warning-subtle">Perlu Cek</span>`;
+                statusBadge = `<span class="det-status-pill status-perlu-cek">Perlu Cek</span>`;
             } else {
-                statusBadge = `<span class="badge bg-danger-subtle text-danger border border-danger-subtle">Gagal</span>`;
+                statusBadge = `<span class="det-status-pill status-gagal">Gagal</span>`;
             }
 
             let photo = '';
@@ -805,36 +873,49 @@ async function loadDetections() {
             } else {
                 photo = item.face_image_path || item.faceImagePath || '';
             }
+
             const confidenceText = isPlate
                 ? `Kendaraan ${item.vehicle_confidence_percent || 0}% · Plat ${item.plate_confidence_percent || 0}% · OCR ${item.ocr_confidence_percent || 0}%`
                 : (isVehicle ? `Kendaraan ${item.vehicle_confidence_percent || item.confidence_percent || 0}%` : `Orang ${item.person_confidence_percent || item.confidence_percent || 0}%`);
+
             const thumbHtml = photo
-                ? `<img src="/${esc(photo.replace(/^\/+/, ''))}" alt="Thumb" class="rounded border" style="width: 50px; height: 36px; object-fit: cover; cursor: pointer;" onclick="openImageModal('${esc(photo)}', '${esc(item.plate || 'Deteksi')}', '${esc(item.camera)} · ${esc(item.timestamp)}', '${esc(confidenceText)}')">`
-                : `<div class="rounded border bg-light text-muted d-flex align-items-center justify-content-center small" style="width: 50px; height: 36px;"><i class="bi bi-image"></i></div>`;
+                ? `<img src="/${esc(photo.replace(/^\/+/, ''))}" alt="Thumb" class="det-thumb-img" onerror="this.onerror=null;this.parentElement.innerHTML='<div class=\\'det-thumb-placeholder\\'><i class=\\'bi bi-image\\'></i></div>';" onclick="openImageModal('${esc(photo)}', '${esc(item.plate || 'Deteksi')}', '${esc(item.camera)} · ${esc(item.timestamp)}', '${esc(confidenceText)}')">`
+                : `<div class="det-thumb-placeholder"><i class="bi bi-image"></i></div>`;
+
+            const confVal = Math.round(item.confidence_percent || 0);
+            const confClass = confVal >= 70 ? 'conf-high' : (confVal >= 40 ? 'conf-mid' : 'conf-low');
+
+            let timeHtml = esc(item.timestamp || '-');
+            if (item.timestamp && item.timestamp.includes(' ')) {
+                const parts = item.timestamp.split(' ');
+                timeHtml = `<div class="det-time-date">${esc(parts[0])}</div><div class="det-time-clock">${esc(parts.slice(1).join(' '))}</div>`;
+            }
 
             return `
                 <tr data-detection-id="${detectionId}" data-event-key="${esc(eventKey)}">
-                    <td>${thumbHtml}</td>
-                    <td>${targetLabel}</td>
-                    <td>${typeBadge}</td>
-                    <td>${esc(item.camera)}</td>
-                    <td>
-                        <div class="d-flex align-items-center gap-2" style="max-width: 140px;">
-                            <div class="progress flex-grow-1" style="height: 6px;">
-                                <div class="progress-bar ${item.confidence_percent >= 70 ? 'bg-success' : (item.confidence_percent >= 40 ? 'bg-warning' : 'bg-danger')}" style="width: ${item.confidence_percent}%;"></div>
+                    <td class="col-det-photo">${thumbHtml}</td>
+                    <td class="col-det-target">${targetLabel}</td>
+                    <td class="col-det-type">${typeBadge}</td>
+                    <td class="col-det-cctv"><div class="det-cctv-name" title="${esc(item.camera || '-')}">${esc(item.camera || '-')}</div></td>
+                    <td class="col-det-conf">
+                        <div class="det-conf-container">
+                            <div class="det-conf-track">
+                                <div class="det-conf-fill ${confClass}" style="width: ${confVal}%;"></div>
                             </div>
-                            <span class="small fw-semibold text-nowrap">${item.confidence_percent}%</span>
+                            <span class="det-conf-num">${confVal}%</span>
                         </div>
                     </td>
-                    <td><span class="small text-muted">${esc(item.timestamp)}</span></td>
-                    <td>${statusBadge}</td>
-                    <td class="text-center">
-                        <button class="btn btn-outline-primary btn-sm px-2 py-1" title="Lihat Foto" onclick="openImageModal('${esc(photo)}', '${esc(item.plate || 'Detail Deteksi')}', '${esc(item.camera)} · ${esc(item.timestamp)}', '${esc(confidenceText)} · Status: ${esc(item.status)}')">
-                            <i class="bi bi-eye"></i>
-                        </button>
-                        <button class="btn btn-outline-danger btn-sm px-2 py-1" title="Hapus Deteksi" onclick="deleteDetection(${detectionId})">
-                            <i class="bi bi-trash"></i>
-                        </button>
+                    <td class="col-det-time">${timeHtml}</td>
+                    <td class="col-det-status">${statusBadge}</td>
+                    <td class="col-det-action text-end pe-3">
+                        <div class="d-inline-flex align-items-center gap-1">
+                            <button type="button" class="btn-table-action" title="Lihat detail" aria-label="Lihat detail" onclick="openImageModal('${esc(photo)}', '${esc(item.plate || 'Detail Deteksi')}', '${esc(item.camera)} · ${esc(item.timestamp)}', '${esc(confidenceText)} · Status: ${esc(item.status)}')">
+                                <i class="bi bi-eye"></i>
+                            </button>
+                            <button type="button" class="btn-table-action action-delete" title="Hapus" aria-label="Hapus" onclick="deleteDetection(${detectionId})">
+                                <i class="bi bi-trash3"></i>
+                            </button>
+                        </div>
                     </td>
                 </tr>
             `;
@@ -1067,42 +1148,52 @@ async function loadPlateHistory() {
             const plateId = item.plate_id || item.id || '';
             const detectionId = item.detection_id || '';
             const eventKey = item.event_key || '';
+
             let statusBadge = '';
             if (item.status_code === 1) {
-                statusBadge = `<span class="badge bg-success-subtle text-success border border-success-subtle">Terbaca</span>`;
+                statusBadge = `<span class="det-status-pill status-terbaca">Terbaca</span>`;
             } else if (item.status_code === 2) {
-                statusBadge = `<span class="badge bg-warning-subtle text-warning border border-warning-subtle">Perlu Cek</span>`;
+                statusBadge = `<span class="det-status-pill status-perlu-cek">Perlu Cek</span>`;
             } else {
-                statusBadge = `<span class="badge bg-danger-subtle text-danger border border-danger-subtle">Gagal</span>`;
+                statusBadge = `<span class="det-status-pill status-gagal">Gagal</span>`;
             }
 
             const photo = item.image_path || '';
             const thumbHtml = photo
-                ? `<img src="/${esc(photo.replace(/^\/+/, ''))}" alt="Plate" class="rounded border" style="width: 54px; height: 34px; object-fit: cover; cursor: pointer;" onclick="openImageModal('${esc(photo)}', 'Plat: ${esc(item.plate)}', '${esc(item.camera)} · ${esc(item.timestamp)}', 'Akurasi OCR: <b>${item.confidence_percent}%</b>')">`
-                : `<div class="rounded border bg-light text-muted d-flex align-items-center justify-content-center small" style="width: 54px; height: 34px;"><b>P</b></div>`;
+                ? `<img src="/${esc(photo.replace(/^\/+/, ''))}" alt="Plat" class="plate-crop-img" onclick="openImageModal('${esc(photo)}', 'Plat: ${esc(item.plate)}', '${esc(item.camera)} · ${esc(item.timestamp)}', 'Akurasi OCR: <b>${item.confidence_percent}%</b>')">`
+                : `<div class="plate-crop-placeholder" title="Tidak ada foto"><i class="bi bi-card-heading"></i></div>`;
+
+            const confClass = item.confidence_percent >= 70 ? 'conf-high' : 'conf-mid';
+
+            const timeParts = (item.timestamp || '').split(' ');
+            const timeHtml = timeParts.length >= 2
+                ? `<div class="det-time-date">${esc(timeParts[0])}</div><div class="det-time-clock">${esc(timeParts.slice(1).join(' '))}</div>`
+                : `<div class="det-time-date">${esc(item.timestamp || '-')}</div>`;
 
             return `
                 <tr data-plate-id="${plateId}" data-detection-id="${detectionId}" data-event-key="${esc(eventKey)}">
                     <td>${thumbHtml}</td>
-                    <td><strong class="fs-6 text-primary">${esc(item.plate)}</strong></td>
-                    <td>${esc(item.camera)}</td>
+                    <td><span class="target-val-plate">${esc(item.plate)}</span></td>
+                    <td><div class="det-cctv-name" title="${esc(item.camera)}">${esc(item.camera)}</div></td>
                     <td>
-                        <div class="d-flex align-items-center gap-2" style="max-width: 130px;">
-                            <div class="progress flex-grow-1" style="height: 6px;">
-                                <div class="progress-bar ${item.confidence_percent >= 70 ? 'bg-success' : 'bg-warning'}" style="width: ${item.confidence_percent}%;"></div>
+                        <div class="det-conf-container">
+                            <div class="det-conf-track">
+                                <div class="det-conf-fill ${confClass}" style="width: ${item.confidence_percent}%;"></div>
                             </div>
-                            <span class="small fw-semibold text-nowrap">${item.confidence_percent}%</span>
+                            <span class="det-conf-num">${item.confidence_percent}%</span>
                         </div>
                     </td>
-                    <td><span class="small text-muted">${esc(item.timestamp)}</span></td>
+                    <td>${timeHtml}</td>
                     <td>${statusBadge}</td>
-                    <td class="text-center">
-                        <button class="btn btn-outline-primary btn-sm px-2 py-1" title="Lihat Foto Crop" onclick="openImageModal('${esc(photo)}', 'Plat Nomor: ${esc(item.plate)}', '${esc(item.camera)} · ${esc(item.timestamp)}', 'Confidence OCR: <b>${item.confidence_percent}%</b> · Status: <b>${esc(item.status)}</b>')">
-                            <i class="bi bi-eye"></i>
-                        </button>
-                        <button class="btn btn-outline-danger btn-sm px-2 py-1" title="Hapus Riwayat Plat" onclick="deletePlateHistory(${plateId})">
-                            <i class="bi bi-trash"></i>
-                        </button>
+                    <td class="text-end pe-3">
+                        <div class="camera-actions-wrap justify-content-end">
+                            <button type="button" class="btn-action-icon" title="Lihat foto" aria-label="Lihat foto" onclick="openImageModal('${esc(photo)}', 'Plat Nomor: ${esc(item.plate)}', '${esc(item.camera)} · ${esc(item.timestamp)}', 'Confidence OCR: <b>${item.confidence_percent}%</b> · Status: <b>${esc(item.status)}</b>')">
+                                <i class="bi bi-eye"></i>
+                            </button>
+                            <button type="button" class="btn-action-icon btn-action-delete" title="Hapus" aria-label="Hapus" onclick="deletePlateHistory(${plateId})">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        </div>
                     </td>
                 </tr>
             `;
@@ -1278,13 +1369,133 @@ async function populateAnalyticsCameraSelect(id) {
     select.innerHTML = '<option value="">Semua Kamera</option>' + (res.data || []).map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
 }
 
-// Kartu ringkas rincian (MASUK/KELUAR dsb) - menggunakan ulang
-// component/class card statistik ringkas yang sudah ada di masing-masing
-// halaman ("Total kendaraan"/"Total orang" di Rekapitulasi), bukan model
-// box besar. Nilai selalu diambil langsung dari summary backend
-// (data event counting asli), TIDAK PERNAH di-hardcode.
+// Formatter angka untuk rekapitulasi (tabular-nums format Indonesia)
+function formatRecapNumber(val) {
+    if (val === null || val === undefined || isNaN(Number(val))) return '0';
+    return Number(val).toLocaleString('id-ID');
+}
+
+// Kartu metrik rekapitulasi (mengikuti gaya kartu metrik Dashboard)
+function renderRecapCard(label, value, subHtml = '', isTotal = false) {
+    const totalClass = isTotal ? ' recap-card-total' : '';
+    const subContent = subHtml || '<span class="recap-sub-placeholder">&nbsp;</span>';
+    return `
+        <div class="recap-metric-col">
+            <div class="recap-metric-card${totalClass}">
+                <div class="recap-card-content">
+                    <span class="recap-card-label">${esc(label)}</span>
+                    <strong class="recap-card-value">${formatRecapNumber(value)}</strong>
+                    <div class="recap-card-sub">${subContent}</div>
+                </div>
+            </div>
+        </div>`;
+}
+
+// Wrapper backward compatibility untuk renderMiniStatCard
 function renderMiniStatCard(label, value, extra) {
-    return `<div class="col-12 col-md-6 col-xl-4"><div class="stat-card recap-stat"><div><span>${label}</span><strong>${value || 0}</strong>${extra ? `<small>${extra}</small>` : ''}</div></div></div>`;
+    const isTotal = String(label).toLowerCase().includes('total');
+    let sub = '';
+    if (extra) {
+        const clean = extra.replace(/[\u2191\u2193]/g, '').trim();
+        const icon = (extra.includes('\u2191') || extra.toLowerCase().includes('dalam')) ? 'bi-arrow-down-left' : 'bi-arrow-up-right';
+        sub = `<i class="bi ${icon}"></i> ${esc(clean)}`;
+    }
+    return renderRecapCard(label, value, sub, isTotal);
+}
+
+// Helper badge arah untuk tabel Rekap CCTV
+function renderRecapDirectionBadge(dir) {
+    const d = (dir || '').trim();
+    const lower = d.toLowerCase();
+    if (lower === 'masuk' || lower.includes('in')) {
+        return `<span class="badge-direction badge-dir-in">${esc(d || 'Masuk')}</span>`;
+    } else if (lower === 'keluar' || lower.includes('out')) {
+        return `<span class="badge-direction badge-dir-out">${esc(d || 'Keluar')}</span>`;
+    }
+    return `<span class="badge-direction badge-dir-neutral">${esc(d || 'Tidak ditentukan')}</span>`;
+}
+
+// Helper titik status (7px) untuk tabel Rekap CCTV
+function renderRecapStatusCell(status) {
+    const s = (status || '').trim();
+    const lower = s.toLowerCase();
+    let dotClass = 'dot-offline';
+    let textClass = 'recap-status-text-muted';
+
+    if (lower === 'aktif' || lower === 'active' || lower === 'online') {
+        dotClass = 'dot-active';
+        textClass = 'recap-status-text-normal';
+    }
+
+    return `
+        <span class="recap-status-cell">
+            <span class="recap-status-dot ${dotClass}"></span>
+            <span class="${textClass}">${esc(s || '-')}</span>
+        </span>`;
+}
+
+// Renderer baris tabel Rekap CCTV
+function renderRecapCameraRow(c) {
+    return `
+        <tr>
+            <td class="text-start"><span class="recap-camera-name">${esc(c.camera || '-')}</span></td>
+            <td class="text-start">${renderRecapDirectionBadge(c.direction)}</td>
+            <td class="text-end tabular-nums">${formatRecapNumber(c.vehicles)}</td>
+            <td class="text-end tabular-nums">${formatRecapNumber(c.people)}</td>
+            <td class="text-end tabular-nums">${formatRecapNumber(c.unique_plates)}</td>
+            <td class="text-start">${renderRecapStatusCell(c.status)}</td>
+        </tr>`;
+}
+
+// Renderer baris tabel Total per Hari
+function renderRecapDailyRow(d) {
+    return `
+        <tr>
+            <td class="text-start"><span class="recap-date-cell">${esc(d.date || '-')}</span></td>
+            <td class="text-end tabular-nums">${formatRecapNumber(d.vehicles)}</td>
+            <td class="text-end tabular-nums">${formatRecapNumber(d.unique_plates)}</td>
+            <td class="text-end tabular-nums">${formatRecapNumber(d.entry)}</td>
+            <td class="text-end tabular-nums">${formatRecapNumber(d.exit)}</td>
+            <td class="text-end tabular-nums">${formatRecapNumber(d.people)}</td>
+        </tr>`;
+}
+
+// State pencarian & data cache untuk Rekapitulasi
+window._lastRecapData = null;
+let _recapSearchQuery = '';
+
+function renderRecapTables() {
+    const cameraTable = document.getElementById('recapCameraTable');
+    const dailyTable = document.getElementById('recapDailyTable');
+    if (!window._lastRecapData) return;
+
+    const data = window._lastRecapData;
+    const q = (_recapSearchQuery || '').toLowerCase().trim();
+
+    const cameras = data.cameras || [];
+    const daily = data.daily || [];
+
+    const filteredCameras = q ? cameras.filter(c => {
+        const cam = (c.camera || '').toLowerCase();
+        const dir = (c.direction || '').toLowerCase();
+        const st = (c.status || '').toLowerCase();
+        return cam.includes(q) || dir.includes(q) || st.includes(q);
+    }) : cameras;
+
+    const filteredDaily = q ? daily.filter(d => {
+        const dateStr = (d.date || '').toLowerCase();
+        return dateStr.includes(q);
+    }) : daily;
+
+    if (cameraTable) {
+        cameraTable.innerHTML = filteredCameras.map(renderRecapCameraRow).join('') ||
+            `<tr><td colspan="6" class="text-center text-muted py-4">${q ? `Tidak ada data CCTV yang cocok dengan "${esc(_recapSearchQuery)}".` : 'Belum ada event pada filter ini.'}</td></tr>`;
+    }
+
+    if (dailyTable) {
+        dailyTable.innerHTML = filteredDaily.map(renderRecapDailyRow).join('') ||
+            `<tr><td colspan="6" class="text-center text-muted py-4">${q ? `Tidak ada data harian yang cocok dengan "${esc(_recapSearchQuery)}".` : 'Belum ada data harian.'}</td></tr>`;
+    }
 }
 
 // Kartu rincian untuk halaman Statistik - menggunakan ulang component/class
@@ -1323,28 +1534,33 @@ async function loadRecap() {
         if (!res.success) throw new Error(res.message || 'Data rekap tidak dapat dimuat.');
 
         const data = res.data || {};
+        window._lastRecapData = data;
         const s = data.summary || {};
 
         const totals = document.getElementById('recapTotals');
         if (totals) {
             totals.innerHTML = `
-                <div class="col-12">
-                    <h6 class="text-muted text-uppercase small fw-semibold mb-2">Kendaraan</h6>
-                    <div class="row g-3 mb-3">
-                        ${renderMiniStatCard('Kendaraan masuk', s.vehicle_entry, '\u2191 Arah ke dalam')}
-                        ${renderMiniStatCard('Kendaraan keluar', s.vehicle_exit, '\u2193 Arah ke luar')}
-                        ${renderMiniStatCard('Total kendaraan', s.vehicles)}
+                <div class="recap-metrics-section">
+                    <div class="recap-group-block">
+                        <div class="recap-group-label">Kendaraan</div>
+                        <div class="recap-cards-grid">
+                            ${renderRecapCard('Kendaraan masuk', s.vehicle_entry, '<i class="bi bi-arrow-down-left"></i> Arah ke dalam')}
+                            ${renderRecapCard('Kendaraan keluar', s.vehicle_exit, '<i class="bi bi-arrow-up-right"></i> Arah ke luar')}
+                            ${renderRecapCard('Total kendaraan', s.vehicles, '', true)}
+                        </div>
                     </div>
-                    <h6 class="text-muted text-uppercase small fw-semibold mb-2">Orang</h6>
-                    <div class="row g-3">
-                        ${renderMiniStatCard('Orang masuk', s.people_entry, '\u2191 Arah ke dalam')}
-                        ${renderMiniStatCard('Orang keluar', s.people_exit, '\u2193 Arah ke luar')}
-                        ${renderMiniStatCard('Total orang', s.people)}
+                    <div class="recap-group-block">
+                        <div class="recap-group-label">Orang</div>
+                        <div class="recap-cards-grid">
+                            ${renderRecapCard('Orang masuk', s.people_entry, '<i class="bi bi-arrow-down-left"></i> Arah ke dalam')}
+                            ${renderRecapCard('Orang keluar', s.people_exit, '<i class="bi bi-arrow-up-right"></i> Arah ke luar')}
+                            ${renderRecapCard('Total orang', s.people, '', true)}
+                        </div>
                     </div>
                 </div>`;
         }
-        if (cameraTable) cameraTable.innerHTML = (data.cameras || []).map(c => `<tr><td><strong>${esc(c.camera)}</strong></td><td>${esc(c.direction)}</td><td>${c.vehicles}</td><td>${c.people}</td><td>${c.unique_plates}</td><td><span class="status ${c.status === 'Aktif' ? 'success' : 'warning'}">${c.status}</span></td></tr>`).join('') || '<tr><td colspan="6" class="text-center text-muted py-4">Belum ada event pada filter ini.</td></tr>';
-        if (dailyTable) dailyTable.innerHTML = (data.daily || []).map(d => `<tr><td>${esc(d.date)}</td><td>${d.vehicles}</td><td>${d.unique_plates}</td><td>${d.entry}</td><td>${d.exit}</td><td>${d.people}</td></tr>`).join('') || '<tr><td colspan="6" class="text-center text-muted py-4">Belum ada data harian.</td></tr>';
+
+        renderRecapTables();
     } catch (error) {
         const message = esc(error.message || 'Gagal memuat data rekapitulasi.');
         if (cameraTable) cameraTable.innerHTML = `<tr><td colspan="6" class="text-center text-danger py-4">${message}</td></tr>`;
@@ -1370,28 +1586,66 @@ window.loadRecap = loadRecap;
 async function initRecap() {
     setDateFilterLimits();
     await populateAnalyticsCameraSelect('recapCamera');
+
+    // Pencarian instan ter-debounce
+    const searchInput = document.getElementById('recapSearch');
+    let searchTimer = null;
+    if (searchInput) {
+        searchInput.addEventListener('input', () => {
+            clearTimeout(searchTimer);
+            searchTimer = setTimeout(() => {
+                _recapSearchQuery = searchInput.value.trim();
+                renderRecapTables();
+            }, 200);
+        });
+    }
+
+    // Pergantian periode cepat
+    const periodSelect = document.getElementById('recapPeriod');
+    if (periodSelect) {
+        periodSelect.addEventListener('change', () => {
+            if (periodSelect.value !== 'custom') {
+                const startInput = document.getElementById('recapStart');
+                const endInput = document.getElementById('recapEnd');
+                if (startInput) startInput.value = '';
+                if (endInput) endInput.value = '';
+            }
+        });
+    }
+
+    // Tombol Terapkan
     document.getElementById('recapApply')?.addEventListener('click', () => {
         loadRecap().catch(err => {
             if (err.message) showNotification(err.message, 'warning');
         });
     });
+
+    // Tombol Reset
     document.getElementById('recapResetBtn')?.addEventListener('click', () => {
-        const periodSelect = document.getElementById('recapPeriod');
+        const pSelect = document.getElementById('recapPeriod');
         const cameraSelect = document.getElementById('recapCamera');
+        const objectTypeSelect = document.getElementById('recapObjectType');
         const directionSelect = document.getElementById('recapDirection');
         const startInput = document.getElementById('recapStart');
         const endInput = document.getElementById('recapEnd');
+        const sInput = document.getElementById('recapSearch');
 
-        if (periodSelect) periodSelect.value = 'today';
+        if (pSelect) pSelect.value = 'today';
         if (cameraSelect) cameraSelect.value = '';
+        if (objectTypeSelect) objectTypeSelect.value = '';
         if (directionSelect) directionSelect.value = '';
         if (startInput) startInput.value = '';
         if (endInput) endInput.value = '';
+        if (sInput) sInput.value = '';
+        _recapSearchQuery = '';
 
         loadRecap().catch(err => console.error('Error reset recap filter:', err));
     });
+
+    // Listener tombol ekspor (juga di-trigger lewat onclick pada menu)
     document.getElementById('recapExport')?.addEventListener('click', exportRecap);
     document.getElementById('recapExportPdf')?.addEventListener('click', exportRecapPdf);
+
     loadRecap().catch(err => console.error('Error loadRecap:', err));
 }
 
@@ -1399,6 +1653,187 @@ window._currentStatsPeriod = 'today';
 window._trendChart = null;
 window._donutChart = null;
 window._cameraChart = null;
+window._lastStatsCameras = [];
+window._statsTopPlatesData = [];
+window._statsSearchQuery = '';
+
+// Helper untuk membaca CSS variables tema untuk Chart.js
+function getThemeChartColors() {
+    const s = getComputedStyle(document.documentElement);
+    return {
+        primary: s.getPropertyValue('--primary').trim() || '#087e8b',
+        warning: s.getPropertyValue('--warning').trim() || '#f59e0b',
+        line: s.getPropertyValue('--line').trim() || '#e2e8f0',
+        muted: s.getPropertyValue('--muted').trim() || '#64748b',
+        text: s.getPropertyValue('--text').trim() || '#0f172a',
+        panel: s.getPropertyValue('--panel').trim() || '#ffffff'
+    };
+}
+
+// Render chart beban lalu lintas per titik CCTV
+function renderCameraBarChart(cameras) {
+    const camCanvas = document.getElementById('cameraBarCanvas');
+    if (!camCanvas || !window.Chart) return;
+    if (cameras) window._lastStatsCameras = cameras;
+    const cList = window._lastStatsCameras || [];
+
+    if (window._cameraChart) {
+        window._cameraChart.destroy();
+        window._cameraChart = null;
+    }
+
+    const colors = getThemeChartColors();
+    const rawLabels = cList.map(c => c.camera || c.camera_name || '-');
+    const labels = rawLabels.map(l => l.length > 18 ? l.slice(0, 16) + '…' : l);
+    const vehicleData = cList.map(c => c.vehicles ?? c.plate_count ?? 0);
+    const peopleData = cList.map(c => c.people ?? c.face_count ?? 0);
+
+    window._cameraChart = new Chart(camCanvas, {
+        type: 'bar',
+        data: {
+            labels: labels.length ? labels : ['Belum ada data'],
+            datasets: [
+                {
+                    label: 'Kendaraan',
+                    data: vehicleData.length ? vehicleData : [0],
+                    backgroundColor: colors.primary,
+                    borderRadius: 3,
+                    borderSkipped: false,
+                    maxBarThickness: 32
+                },
+                {
+                    label: 'Orang',
+                    data: peopleData.length ? peopleData : [0],
+                    backgroundColor: colors.warning,
+                    borderRadius: 3,
+                    borderSkipped: false,
+                    maxBarThickness: 32
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            plugins: {
+                legend: {
+                    position: 'top',
+                    align: 'start',
+                    labels: {
+                        boxWidth: 10,
+                        boxHeight: 10,
+                        borderRadius: 2,
+                        usePointStyle: false,
+                        color: colors.muted,
+                        font: { family: '"Segoe UI", Inter, Arial, sans-serif', size: 11, weight: '500' },
+                        padding: 12
+                    }
+                },
+                tooltip: {
+                    backgroundColor: colors.panel,
+                    borderColor: colors.line,
+                    borderWidth: 1,
+                    titleColor: colors.text,
+                    bodyColor: colors.text,
+                    titleFont: { family: '"Segoe UI", Inter, Arial, sans-serif', size: 12, weight: '500' },
+                    bodyFont: { family: '"Segoe UI", Inter, Arial, sans-serif', size: 11, weight: '400' },
+                    padding: 8,
+                    cornerRadius: 6,
+                    displayColors: true,
+                    boxWidth: 8,
+                    boxHeight: 8,
+                    boxPadding: 4,
+                    callbacks: {
+                        title: (items) => {
+                            if (!items.length) return '';
+                            const idx = items[0].dataIndex;
+                            return rawLabels[idx] || items[0].label;
+                        }
+                    }
+                }
+            },
+            scales: {
+                x: {
+                    grid: { display: false },
+                    ticks: {
+                        color: colors.muted,
+                        font: { family: '"Segoe UI", Inter, Arial, sans-serif', size: 11, weight: '400' },
+                        maxRotation: 25,
+                        minRotation: 0
+                    },
+                    border: { display: false }
+                },
+                y: {
+                    beginAtZero: true,
+                    grid: {
+                        color: colors.line,
+                        lineWidth: 0.5
+                    },
+                    ticks: {
+                        precision: 0,
+                        color: colors.muted,
+                        font: { family: '"Segoe UI", Inter, Arial, sans-serif', size: 11, weight: '400' }
+                    },
+                    border: { display: false }
+                }
+            }
+        }
+    });
+}
+window.renderCameraBarChart = renderCameraBarChart;
+
+function renderTopPlatesTable() {
+    const topBody = document.getElementById('topPlatesTable');
+    if (!topBody) return;
+
+    let plates = window._statsTopPlatesData || [];
+    const q = (window._statsSearchQuery || '').trim().toLowerCase();
+    if (q) {
+        plates = plates.filter(p => {
+            const plateStr = (p.plate || p.plate_number || '').toLowerCase();
+            const camStr = (p.camera || p.last_camera || '').toLowerCase();
+            return plateStr.includes(q) || camStr.includes(q);
+        });
+    }
+
+    if (!plates.length) {
+        topBody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">Belum ada data kendaraan / plat.</td></tr>';
+        return;
+    }
+
+    topBody.innerHTML = plates.slice(0, 10).map((p, i) => {
+        const plateNum = p.plate || p.plate_number || '-';
+        const count = p.count ?? p.total_seen ?? 0;
+        const camera = p.camera || p.last_camera || '-';
+        const lastSeen = p.last_seen || '-';
+        const conf = p.confidence ?? p.avg_confidence_percent ?? 0;
+        const statusCode = p.status_code !== undefined ? p.status_code : (p.status === 'Aktual' ? 1 : 0);
+        const statusText = p.status || (statusCode === 1 ? 'Aktual' : 'Perlu Cek');
+        const badgeClass = statusCode === 1
+            ? 'det-status-pill status-terbaca'
+            : (statusCode === 2 ? 'det-status-pill status-review' : 'det-status-pill status-gagal');
+
+        let timeHtml = `<span class="time-primary-line">${esc(lastSeen)}</span>`;
+        if (lastSeen.includes(' ') || lastSeen.includes('T')) {
+            const parts = lastSeen.split(/[\sT]+/);
+            if (parts.length >= 2) {
+                timeHtml = `<div class="time-primary-line">${esc(parts[0])}</div><div class="time-sub-line">${esc(parts[1])}</div>`;
+            }
+        }
+
+        return `
+            <tr>
+                <td class="text-center text-muted" style="font-size: 0.76rem;">${i + 1}</td>
+                <td><span class="stats-plate-badge">${esc(plateNum)}</span></td>
+                <td class="text-end font-monospace" style="font-variant-numeric: tabular-nums;">${count} kali</td>
+                <td>${esc(camera)}</td>
+                <td>${timeHtml}</td>
+                <td class="text-end font-monospace" style="font-variant-numeric: tabular-nums;">${conf}%</td>
+                <td><span class="${badgeClass}">${esc(statusText)}</span></td>
+            </tr>
+        `;
+    }).join('');
+}
 
 async function loadEnterpriseStatistics(period = 'today') {
     window._currentStatsPeriod = period;
@@ -1413,291 +1848,179 @@ async function loadEnterpriseStatistics(period = 'today') {
 
     const applyButton = document.getElementById('statsApply');
     if (applyButton) applyButton.disabled = true;
-    const analyticsRes = await json(`/api/analytics?${analyticsParams('stats', period).toString()}`).catch(() => null);
-    if (analyticsRes?.success && analyticsRes.data) {
-        const data = analyticsRes.data;
-        const s = data.summary || {};
-        const kpiValues = {
-            kpiTotalDets: s.vehicles, kpiTotalPlates: s.plates, kpiTotalFaces: s.people,
-            kpiPlateRate: s.vehicles ? `${Math.round((s.plates / s.vehicles) * 100)}%` : '0%',
-            kpiAvgConf: '-', kpiNeedCheck: '-', kpiCamStatus: `${s.active_cameras || 0} / ${s.total_cameras || 0}`, kpiCamUptime: '-'
-        };
-        Object.entries(kpiValues).forEach(([id, value]) => { const el = document.getElementById(id); if (el) el.textContent = value ?? 0; });
-
-        // Rincian Masuk & Keluar - dipisah menjadi card sendiri-sendiri,
-        // mengikuti pola visual card arah pada halaman Rekapitulasi.
-        // Card Keluar menggunakan MODEL CARD YANG SAMA (renderStatsKpiCard)
-        // dengan card Masuk - hanya label/icon/data yang berbeda. Data
-        // vehicle_exit & people_exit sudah tersedia dari summary backend
-        // (bukan angka dummy).
-        const statsBreakdown = document.getElementById('statsBreakdown');
-        if (statsBreakdown) {
-            statsBreakdown.innerHTML = `
-                ${renderStatsKpiCard('blue', 'bi-car-front-fill', 'Kendaraan masuk', s.vehicle_entry, '<small class="text-primary"><i class="bi bi-arrow-up-right"></i> Arah ke dalam</small>')}
-                ${renderStatsKpiCard('purple', 'bi-people-fill', 'Orang masuk', s.people_entry, '<small class="text-primary"><i class="bi bi-arrow-up-right"></i> Arah ke dalam</small>')}
-                ${renderStatsKpiCard('orange', 'bi-car-front-fill', 'Kendaraan keluar', s.vehicle_exit, '<small class="text-danger"><i class="bi bi-arrow-down-right"></i> Arah ke luar</small>')}
-                ${renderStatsKpiCard('green', 'bi-people-fill', 'Orang keluar', s.people_exit, '<small class="text-danger"><i class="bi bi-arrow-down-right"></i> Arah ke luar</small>')}
-            `;
-        }
-
-        const trend = data.daily?.length ? data.daily : data.hourly;
-        const labels = trend.map(item => item.date || item.label);
-        const vehicleData = trend.map(item => item.vehicles || 0);
-        const peopleData = trend.map(item => item.people || 0);
-        const trendCanvas = document.getElementById('trendChartCanvas');
-        if (trendCanvas && window.Chart) {
-            if (window._trendChart) window._trendChart.destroy();
-            window._trendChart = new Chart(trendCanvas, { type: 'line', data: { labels, datasets: [{ label: 'Kendaraan', data: vehicleData, borderColor: '#2563eb', backgroundColor: 'rgba(37,99,235,.12)', fill: true, tension: .3 }, { label: 'Orang', data: peopleData, borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,.08)', fill: true, tension: .3 }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true } } } });
-        }
-        const camCanvas = document.getElementById('cameraBarCanvas');
-        if (camCanvas && window.Chart) {
-            if (window._cameraChart) window._cameraChart.destroy();
-            window._cameraChart = new Chart(camCanvas, { type: 'bar', data: { labels: (data.cameras || []).map(c => c.camera), datasets: [{ label: 'Kendaraan', data: (data.cameras || []).map(c => c.vehicles), backgroundColor: '#2563eb' }, { label: 'Orang', data: (data.cameras || []).map(c => c.people), backgroundColor: '#f59e0b' }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true } } } });
-        }
-        const peak = (data.hourly || []).reduce((best, item) => item.vehicles > (best?.vehicles || -1) ? item : best, null);
-        const peakContainer = document.getElementById('peakHoursList');
-        if (peakContainer) peakContainer.innerHTML = peak ? `<div class="p-3 bg-light rounded border"><strong>${peak.label} - ${String((peak.hour + 1) % 24).padStart(2, '0')}:00</strong><span class="d-block text-primary mt-1">${peak.vehicles} kendaraan · ${peak.people} orang</span></div>` : '<div class="text-muted">Belum ada data.</div>';
-        const topBody = document.getElementById('topPlatesTable');
-        if (topBody) topBody.innerHTML = (data.top_plates || []).map((p, i) => `<tr><td>${i + 1}</td><td><strong>${esc(p.plate)}</strong></td><td>${p.count} kali</td><td>${esc(p.camera)}</td><td>${esc(p.last_seen)}</td><td>${p.confidence}%</td><td><span class="badge bg-success-subtle text-success">Aktual</span></td></tr>`).join('') || '<tr><td colspan="7" class="text-center text-muted py-4">Belum ada data plat.</td></tr>';
-        const badgeEl = document.getElementById('statsPeriodBadge');
-        if (badgeEl) badgeEl.textContent = { today: 'Hari Ini', '7d': '7 Hari Terakhir', '30d': '30 Hari', all: 'Semua Waktu' }[period] || period;
-        if (applyButton) applyButton.disabled = false;
-        return;
-    }
-
-    const badgeEl = document.getElementById('statsPeriodBadge');
-    if (badgeEl) {
-        const periodLabels = { 'today': 'Hari Ini', '7d': '7 Hari Terakhir', '30d': '30 Hari Terakhir', 'all': 'Semua Waktu' };
-        badgeEl.textContent = periodLabels[period] || period;
-    }
 
     try {
+        const analyticsRes = await json(`/api/analytics?${analyticsParams('stats', period).toString()}`).catch(() => null);
+        if (analyticsRes?.success && analyticsRes.data) {
+            const data = analyticsRes.data;
+            const s = data.summary || {};
+
+            // 1. Update 4 KPI Cards
+            const elTotalDets = document.getElementById('kpiTotalDets');
+            const elTotalPlates = document.getElementById('kpiTotalPlates');
+            const elPlateRate = document.getElementById('kpiPlateRate');
+            const elTotalFaces = document.getElementById('kpiTotalFaces');
+            const elCamStatus = document.getElementById('kpiCamStatus');
+            const elCamUptime = document.getElementById('kpiCamUptime');
+
+            const totalDets = (s.vehicles || 0) + (s.people || 0);
+            if (elTotalDets) elTotalDets.textContent = totalDets.toLocaleString('id-ID');
+            if (elTotalPlates) elTotalPlates.textContent = (s.plates || 0).toLocaleString('id-ID');
+            if (elPlateRate) elPlateRate.textContent = s.vehicles ? `${Math.round((s.plates / s.vehicles) * 100)}%` : '0%';
+            if (elTotalFaces) elTotalFaces.textContent = (s.people || 0).toLocaleString('id-ID');
+            if (elCamStatus) elCamStatus.textContent = `${s.active_cameras || 0} / ${s.total_cameras || 0}`;
+            if (elCamUptime) elCamUptime.textContent = s.total_cameras ? `${Math.round((s.active_cameras / s.total_cameras) * 100)}%` : '0%';
+
+            // 2. Rincian Masuk & Keluar (Dua Grup Berdampingan)
+            const statsBreakdown = document.getElementById('statsBreakdown');
+            if (statsBreakdown) {
+                statsBreakdown.innerHTML = `
+                    <div class="stats-breakdown-group">
+                        <span class="stats-group-label">Rincian masuk</span>
+                        <div class="stats-subgrid-2">
+                            <div class="stats-sub-card">
+                                <span class="metric-card-label">Kendaraan masuk</span>
+                                <strong class="metric-card-value">${(s.vehicle_entry || 0).toLocaleString('id-ID')}</strong>
+                                <span class="stats-dir-muted"><i class="bi bi-arrow-up-right"></i> Arah ke dalam</span>
+                            </div>
+                            <div class="stats-sub-card">
+                                <span class="metric-card-label">Orang masuk</span>
+                                <strong class="metric-card-value">${(s.people_entry || 0).toLocaleString('id-ID')}</strong>
+                                <span class="stats-dir-muted"><i class="bi bi-arrow-up-right"></i> Arah ke dalam</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="stats-breakdown-group">
+                        <span class="stats-group-label">Rincian keluar</span>
+                        <div class="stats-subgrid-2">
+                            <div class="stats-sub-card">
+                                <span class="metric-card-label">Kendaraan keluar</span>
+                                <strong class="metric-card-value">${(s.vehicle_exit || 0).toLocaleString('id-ID')}</strong>
+                                <span class="stats-dir-muted"><i class="bi bi-arrow-down-right"></i> Arah ke luar</span>
+                            </div>
+                            <div class="stats-sub-card">
+                                <span class="metric-card-label">Orang keluar</span>
+                                <strong class="metric-card-value">${(s.people_exit || 0).toLocaleString('id-ID')}</strong>
+                                <span class="stats-dir-muted"><i class="bi bi-arrow-down-right"></i> Arah ke luar</span>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            // 3. Render Chart.js Beban CCTV
+            renderCameraBarChart(data.cameras || []);
+
+            // 4. Render Analisis Jam Sibuk
+            const peak = (data.hourly || []).reduce((best, item) => (item.vehicles > (best?.vehicles || -1) ? item : best), null);
+            const peakContainer = document.getElementById('peakHoursList');
+            if (peakContainer) {
+                if (peak && (peak.vehicles > 0 || peak.people > 0)) {
+                    const startH = String(peak.hour ?? 0).padStart(2, '0');
+                    const endH = String(((peak.hour ?? 0) + 1) % 24).padStart(2, '0');
+                    peakContainer.innerHTML = `
+                        <div class="stats-peak-content">
+                            <div class="stats-peak-time">${startH}:00 - ${endH}:00</div>
+                            <div class="stats-peak-desc">${(peak.vehicles || 0).toLocaleString('id-ID')} kendaraan · ${(peak.people || 0).toLocaleString('id-ID')} orang</div>
+                        </div>
+                    `;
+                } else {
+                    peakContainer.innerHTML = '<div class="stats-peak-desc text-muted">Belum ada data jam sibuk pada periode ini.</div>';
+                }
+            }
+
+            // 5. Render Top 10 Tabel
+            window._statsTopPlatesData = data.top_plates || [];
+            renderTopPlatesTable();
+            return;
+        }
+
+        // Fallback ke /api/statistics/enterprise jika /api/analytics tidak tersedia
         const res = await json(`/api/statistics/enterprise?period=${period}`);
         const stats = res.data || {};
         const kpi = stats.kpi || {};
-        const trend = stats.trend || {};
         const camDist = stats.camera_distribution || [];
-        const statusBreakdown = stats.status_breakdown || {};
         const peakHours = stats.peak_hours || [];
         const topPlates = stats.top_plates || [];
 
-        // 1. Update 6 KPI Cards
         const elTotalDets = document.getElementById('kpiTotalDets');
         const elTotalPlates = document.getElementById('kpiTotalPlates');
         const elPlateRate = document.getElementById('kpiPlateRate');
         const elTotalFaces = document.getElementById('kpiTotalFaces');
-        const elAvgConf = document.getElementById('kpiAvgConf');
-        const elNeedCheck = document.getElementById('kpiNeedCheck');
         const elCamStatus = document.getElementById('kpiCamStatus');
         const elCamUptime = document.getElementById('kpiCamUptime');
 
-        if (elTotalDets) elTotalDets.textContent = kpi.total_detections || 0;
-        if (elTotalPlates) elTotalPlates.textContent = kpi.total_plates || 0;
+        if (elTotalDets) elTotalDets.textContent = (kpi.total_detections || 0).toLocaleString('id-ID');
+        if (elTotalPlates) elTotalPlates.textContent = (kpi.total_plates || 0).toLocaleString('id-ID');
         if (elPlateRate) elPlateRate.textContent = `${kpi.plate_read_rate || 0}%`;
-        if (elTotalFaces) elTotalFaces.textContent = kpi.total_faces || 0;
-        if (elAvgConf) elAvgConf.textContent = `${kpi.avg_confidence || 0}%`;
-        if (elNeedCheck) elNeedCheck.textContent = kpi.need_check_count || 0;
+        if (elTotalFaces) elTotalFaces.textContent = (kpi.total_faces || 0).toLocaleString('id-ID');
         if (elCamStatus) elCamStatus.textContent = `${kpi.active_cameras || 0} / ${kpi.total_cameras || 0}`;
         if (elCamUptime) elCamUptime.textContent = `${kpi.camera_availability || 0}%`;
 
-        // 2. Render Chart.js Tren Deteksi Waktu Nyata (Line)
-        const trendCanvas = document.getElementById('trendChartCanvas');
-        if (trendCanvas && window.Chart) {
-            if (window._trendChart) window._trendChart.destroy();
-
-            const labels = trend.labels || [];
-            const plateData = trend.plates || [];
-            const faceData = trend.faces || [];
-
-            window._trendChart = new Chart(trendCanvas, {
-                type: 'line',
-                data: {
-                    labels: labels,
-                    datasets: [
-                        {
-                            label: 'Plat Kendaraan',
-                            data: plateData,
-                            borderColor: '#10b981',
-                            backgroundColor: 'rgba(16, 185, 129, 0.12)',
-                            fill: true,
-                            tension: 0.35,
-                            borderWidth: 2.5,
-                            pointRadius: labels.length > 20 ? 1.5 : 3.5,
-                            pointHoverRadius: 6
-                        },
-                        {
-                            label: 'Wajah / Pengendara',
-                            data: faceData,
-                            borderColor: '#2563eb',
-                            backgroundColor: 'rgba(37, 99, 235, 0.08)',
-                            fill: true,
-                            tension: 0.35,
-                            borderWidth: 2.5,
-                            pointRadius: labels.length > 20 ? 1.5 : 3.5,
-                            pointHoverRadius: 6
-                        }
-                    ]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        legend: {
-                            position: 'top',
-                            labels: { font: { family: 'Segoe UI, Inter', size: 12, weight: '600' } }
-                        },
-                        tooltip: {
-                            mode: 'index',
-                            intersect: false,
-                            backgroundColor: 'rgba(15, 23, 42, 0.92)',
-                            titleFont: { weight: 'bold' }
-                        }
-                    },
-                    scales: {
-                        y: {
-                            beginAtZero: true,
-                            grid: { color: '#f1f5f9' },
-                            ticks: { precision: 0 }
-                        },
-                        x: {
-                            grid: { display: false }
-                        }
-                    }
-                }
-            });
-        }
-
-        // 3. Render Chart.js Donut Kualitas Deteksi SLA
-        const donutCanvas = document.getElementById('qualityDonutCanvas');
-        if (donutCanvas && window.Chart) {
-            if (window._donutChart) window._donutChart.destroy();
-
-            const validCount = statusBreakdown.valid || 0;
-            const warningCount = statusBreakdown.warning || 0;
-            const failedCount = statusBreakdown.failed || 0;
-
-            const elV = document.getElementById('donutValValid');
-            const elW = document.getElementById('donutValWarning');
-            const elF = document.getElementById('donutValFailed');
-            if (elV) elV.textContent = validCount;
-            if (elW) elW.textContent = warningCount;
-            if (elF) elF.textContent = failedCount;
-
-            window._donutChart = new Chart(donutCanvas, {
-                type: 'doughnut',
-                data: {
-                    labels: ['Valid (Jelas)', 'Perlu Review', 'Gagal'],
-                    datasets: [{
-                        data: [validCount, warningCount, failedCount],
-                        backgroundColor: ['#16a34a', '#f59e0b', '#ef4444'],
-                        borderWidth: 3,
-                        borderColor: '#ffffff'
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    cutout: '72%',
-                    plugins: {
-                        legend: { display: false },
-                        tooltip: { backgroundColor: 'rgba(15, 23, 42, 0.92)' }
-                    }
-                }
-            });
-        }
-
-        // 4. Render Chart.js Bar Distribusi CCTV
-        const camCanvas = document.getElementById('cameraBarCanvas');
-        if (camCanvas && window.Chart) {
-            if (window._cameraChart) window._cameraChart.destroy();
-
-            const camNames = camDist.map(c => c.camera_name);
-            const camPlates = camDist.map(c => c.plate_count);
-            const camFaces = camDist.map(c => c.face_count);
-
-            window._cameraChart = new Chart(camCanvas, {
-                type: 'bar',
-                data: {
-                    labels: camNames.length ? camNames : ['Belum Ada Data'],
-                    datasets: [
-                        {
-                            label: 'Plat Nomor',
-                            data: camPlates.length ? camPlates : [0],
-                            backgroundColor: '#10b981',
-                            borderRadius: 4
-                        },
-                        {
-                            label: 'Wajah / Orang',
-                            data: camFaces.length ? camFaces : [0],
-                            backgroundColor: '#3b82f6',
-                            borderRadius: 4
-                        }
-                    ]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        legend: { position: 'top' },
-                        tooltip: { backgroundColor: 'rgba(15, 23, 42, 0.92)' }
-                    },
-                    scales: {
-                        x: { stacked: true, grid: { display: false } },
-                        y: { stacked: true, beginAtZero: true, grid: { color: '#f1f5f9' }, ticks: { precision: 0 } }
-                    }
-                }
-            });
-        }
-
-        // 5. Render Analisis Jam Sibuk (Peak Hours)
-        const peakContainer = document.getElementById('peakHoursList');
-        if (peakContainer) {
-            if (!peakHours.length) {
-                peakContainer.innerHTML = '<div class="text-muted text-center py-4">Belum ada data jam sibuk pada periode ini.</div>';
-            } else {
-                peakContainer.innerHTML = peakHours.map((ph, idx) => `
-                    <div class="p-3 bg-light rounded border">
-                        <div class="d-flex justify-content-between align-items-center mb-1">
-                            <strong class="small text-dark">
-                                <span class="badge bg-primary me-2">#${idx + 1}</span>${esc(ph.time_range)}
-                            </strong>
-                            <span class="small fw-bold text-primary">${ph.count} deteksi (${ph.percentage}%)</span>
+        // Breakdown fallback
+        const statsBreakdown = document.getElementById('statsBreakdown');
+        if (statsBreakdown) {
+            statsBreakdown.innerHTML = `
+                <div class="stats-breakdown-group">
+                    <span class="stats-group-label">Rincian masuk</span>
+                    <div class="stats-subgrid-2">
+                        <div class="stats-sub-card">
+                            <span class="metric-card-label">Kendaraan masuk</span>
+                            <strong class="metric-card-value">${(kpi.total_plates || 0).toLocaleString('id-ID')}</strong>
+                            <span class="stats-dir-muted"><i class="bi bi-arrow-up-right"></i> Arah ke dalam</span>
                         </div>
-                        <div class="progress" style="height: 6px;">
-                            <div class="progress-bar bg-primary" style="width: ${Math.min(100, ph.percentage * 2)}%;"></div>
+                        <div class="stats-sub-card">
+                            <span class="metric-card-label">Orang masuk</span>
+                            <strong class="metric-card-value">${(kpi.total_faces || 0).toLocaleString('id-ID')}</strong>
+                            <span class="stats-dir-muted"><i class="bi bi-arrow-up-right"></i> Arah ke dalam</span>
                         </div>
                     </div>
-                `).join('');
+                </div>
+                <div class="stats-breakdown-group">
+                    <span class="stats-group-label">Rincian keluar</span>
+                    <div class="stats-subgrid-2">
+                        <div class="stats-sub-card">
+                            <span class="metric-card-label">Kendaraan keluar</span>
+                            <strong class="metric-card-value">0</strong>
+                            <span class="stats-dir-muted"><i class="bi bi-arrow-down-right"></i> Arah ke luar</span>
+                        </div>
+                        <div class="stats-sub-card">
+                            <span class="metric-card-label">Orang keluar</span>
+                            <strong class="metric-card-value">0</strong>
+                            <span class="stats-dir-muted"><i class="bi bi-arrow-down-right"></i> Arah ke luar</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        // Camera bar chart fallback
+        const camerasAdapted = camDist.map(c => ({
+            camera: c.camera_name,
+            vehicles: c.plate_count,
+            people: c.face_count
+        }));
+        renderCameraBarChart(camerasAdapted);
+
+        // Peak hours fallback
+        const peakContainer = document.getElementById('peakHoursList');
+        if (peakContainer) {
+            if (peakHours.length) {
+                const ph = peakHours[0];
+                peakContainer.innerHTML = `
+                    <div class="stats-peak-content">
+                        <div class="stats-peak-time">${esc(ph.time_range)}</div>
+                        <div class="stats-peak-desc">${(ph.count || 0).toLocaleString('id-ID')} deteksi total</div>
+                    </div>
+                `;
+            } else {
+                peakContainer.innerHTML = '<div class="stats-peak-desc text-muted">Belum ada data jam sibuk pada periode ini.</div>';
             }
         }
 
-        // 6. Render Top 10 Plat Sering Terdeteksi
-        const topPlatesBody = document.getElementById('topPlatesTable');
-        if (topPlatesBody) {
-            if (!topPlates.length) {
-                topPlatesBody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">Belum ada data plat kendaraan pada periode ini.</td></tr>';
-            } else {
-                topPlatesBody.innerHTML = topPlates.map((tp, i) => `
-                    <tr>
-                        <td class="fw-bold text-muted">${i + 1}</td>
-                        <td><strong class="fs-6 text-primary">${esc(tp.plate_number)}</strong></td>
-                        <td><span class="badge bg-secondary-subtle text-secondary border px-2 py-1">${tp.total_seen} kali</span></td>
-                        <td>${esc(tp.last_camera)}</td>
-                        <td><span class="small text-muted">${esc(tp.last_seen)}</span></td>
-                        <td>
-                            <span class="small fw-semibold ${tp.avg_confidence_percent >= 70 ? 'text-success' : 'text-warning'}">
-                                ${tp.avg_confidence_percent}%
-                            </span>
-                        </td>
-                        <td>
-                            <span class="badge ${tp.status_code === 1 ? 'bg-success-subtle text-success border border-success-subtle' : 'bg-warning-subtle text-warning border border-warning-subtle'}">
-                                ${esc(tp.status)}
-                            </span>
-                        </td>
-                    </tr>
-                `).join('');
-            }
-        }
+        // Top 10 fallback
+        window._statsTopPlatesData = topPlates;
+        renderTopPlatesTable();
     } catch (e) {
         console.error('Error loadEnterpriseStatistics:', e);
     } finally {
@@ -1721,37 +2044,91 @@ window.exportStatsPdf = exportStatsPdf;
 async function initStatistics() {
     setDateFilterLimits();
     await populateAnalyticsCameraSelect('statsCamera');
+
+    // Live search Top 10
+    const searchInput = document.getElementById('statsSearch');
+    if (searchInput) {
+        let searchTimer = null;
+        searchInput.addEventListener('input', (e) => {
+            clearTimeout(searchTimer);
+            searchTimer = setTimeout(() => {
+                window._statsSearchQuery = e.target.value;
+                renderTopPlatesTable();
+            }, 150);
+        });
+    }
+
+    // Auto set tanggal awal & akhir saat rentang cepat dipilih
+    const periodSelect = document.getElementById('statsPeriod');
+    if (periodSelect) {
+        periodSelect.addEventListener('change', (e) => {
+            const val = e.target.value;
+            const today = new Date();
+            const formatDate = d => d.toISOString().split('T')[0];
+            const startInput = document.getElementById('statsStart');
+            const endInput = document.getElementById('statsEnd');
+            if (!startInput || !endInput) return;
+
+            if (val === 'today') {
+                startInput.value = formatDate(today);
+                endInput.value = formatDate(today);
+            } else if (val === '7d') {
+                const d = new Date();
+                d.setDate(d.getDate() - 7);
+                startInput.value = formatDate(d);
+                endInput.value = formatDate(today);
+            } else if (val === '30d') {
+                const d = new Date();
+                d.setDate(d.getDate() - 30);
+                startInput.value = formatDate(d);
+                endInput.value = formatDate(today);
+            } else if (val === 'all') {
+                startInput.value = '';
+                endInput.value = '';
+            }
+        });
+    }
+
+    // Terapkan filter
     document.getElementById('statsApply')?.addEventListener('click', () => {
-        loadEnterpriseStatistics(document.getElementById('statsPeriod')?.value || 'today').catch(err => showNotification(err.message, 'warning'));
+        loadEnterpriseStatistics(document.getElementById('statsPeriod')?.value || 'today')
+            .catch(err => showNotification(err.message, 'warning'));
     });
+
+    // Reset filter
     document.getElementById('statsResetBtn')?.addEventListener('click', () => {
         const periodSelect = document.getElementById('statsPeriod');
         const startInput = document.getElementById('statsStart');
         const endInput = document.getElementById('statsEnd');
         const objectType = document.getElementById('statsObjectType');
         const cameraSelect = document.getElementById('statsCamera');
+        const searchInput = document.getElementById('statsSearch');
 
         if (periodSelect) periodSelect.value = 'today';
         if (startInput) startInput.value = '';
         if (endInput) endInput.value = '';
         if (objectType) objectType.value = '';
         if (cameraSelect) cameraSelect.value = '';
+        if (searchInput) searchInput.value = '';
+        window._statsSearchQuery = '';
         window._currentStatsPeriod = 'today';
 
         loadEnterpriseStatistics('today').catch(err => console.error('Error reset stats filter:', err));
     });
-    const periodGroup = document.getElementById('statsPeriodGroup');
-    if (periodGroup) {
-        periodGroup.addEventListener('click', e => {
-            const btn = e.target.closest('button');
-            if (!btn) return;
-            periodGroup.querySelectorAll('button').forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-            const period = btn.dataset.period || 'today';
-            const periodSelect = document.getElementById('statsPeriod');
-            if (periodSelect) periodSelect.value = period;
-            loadEnterpriseStatistics(period).catch(err => console.error('Error loadEnterpriseStatistics:', err));
-        });
+
+    // Theme observer untuk chart jika beralih dark/light mode
+    if (!window._statsThemeObserverBound) {
+        window._statsThemeObserverBound = true;
+        try {
+            const obs = new MutationObserver(() => {
+                if (document.getElementById('cameraBarCanvas') && window._lastStatsCameras) {
+                    setTimeout(() => {
+                        if (typeof renderCameraBarChart === 'function') renderCameraBarChart();
+                    }, 50);
+                }
+            });
+            obs.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-bs-theme', 'data-theme'] });
+        } catch (e) { }
     }
 
     await loadEnterpriseStatistics(document.getElementById('statsPeriod')?.value || 'today');
@@ -1782,8 +2159,8 @@ async function loadSettingsFromDb() {
         const topbarName = document.getElementById('topbarName');
         const topbarRole = document.getElementById('topbarRole');
         const avatar = document.getElementById('topbarAvatar');
-        const name = settings.operator_name || 'Administrator';
-        const profileRole = settings.profile_role || 'Operator';
+        const name = settings.operator_name || 'Super Admin CCTV';
+        const profileRole = settings.profile_role || 'Kepala Operator';
         if (displayName) displayName.textContent = name;
         if (displayRole) displayRole.textContent = profileRole;
         if (topbarName) topbarName.textContent = name;
@@ -1951,27 +2328,27 @@ function updateThemeUI(theme) {
         document.documentElement.classList.add('dark');
         document.documentElement.setAttribute('data-bs-theme', 'dark');
         if (icon) {
-            icon.className = 'bi bi-sun-fill text-warning';
+            icon.className = 'bi bi-sun';
         }
         if (label) {
             label.textContent = 'Mode Terang';
         }
         if (btn) {
-            btn.title = 'Beralih ke Mode Terang';
-            btn.setAttribute('aria-label', 'Beralih ke Mode Terang');
+            btn.title = 'Beralih ke mode terang';
+            btn.setAttribute('aria-label', 'Beralih ke mode terang');
         }
     } else {
         document.documentElement.classList.remove('dark');
         document.documentElement.setAttribute('data-bs-theme', 'light');
         if (icon) {
-            icon.className = 'bi bi-moon-stars-fill';
+            icon.className = 'bi bi-moon-stars';
         }
         if (label) {
             label.textContent = 'Mode Gelap';
         }
         if (btn) {
-            btn.title = 'Beralih ke Mode Gelap';
-            btn.setAttribute('aria-label', 'Beralih ke Mode Gelap');
+            btn.title = 'Beralih ke mode gelap';
+            btn.setAttribute('aria-label', 'Beralih ke mode gelap');
         }
     }
 
@@ -1984,7 +2361,15 @@ function refreshChartThemes(theme) {
     const textColor = isDark ? '#94a3b8' : '#64748b';
     const gridColor = isDark ? 'rgba(255, 255, 255, 0.08)' : '#f1f5f9';
 
-    [window._trendChart, window._cameraChart, window._statusChart].forEach(chart => {
+    if (document.getElementById('cameraBarCanvas') && typeof renderCameraBarChart === 'function' && window._lastStatsCameras) {
+        try {
+            renderCameraBarChart();
+        } catch (e) {
+            console.warn('Error updating cameraBarChart theme:', e);
+        }
+    }
+
+    [window._trendChart, window._statusChart].forEach(chart => {
         if (!chart) return;
         try {
             if (chart.options && chart.options.scales) {
@@ -2033,8 +2418,9 @@ function initTheme() {
     updateThemeUI(savedTheme);
 
     const toggleBtn = document.getElementById('themeToggleBtn');
-    if (toggleBtn) {
+    if (toggleBtn && !toggleBtn._hasThemeListener) {
         toggleBtn.addEventListener('click', toggleTheme);
+        toggleBtn._hasThemeListener = true;
     }
 }
 window.toggleTheme = toggleTheme;
