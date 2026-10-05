@@ -251,11 +251,14 @@ PERSON_TRACK_DEDUP_COOLDOWN = 300.0
 # ============================================================
 # Object Grouping Configurations
 # ============================================================
-OBJECT_GROUP_MAX_GAP = 4.0
+OBJECT_GROUP_MAX_GAP = 8.0
 OBJECT_GROUP_MAX_CENTROID_DISTANCE = 120.0
-OBJECT_GROUP_PERSON_MAX_DIST = 90.0
+OBJECT_GROUP_PERSON_MAX_DIST = 130.0
 OBJECT_GROUP_AREA_TOLERANCE = 0.50
 OBJECT_GROUP_MIN_IOU = 0.15
+
+PERSON_AREA_TOLERANCE = 0.45
+PERSON_PROXIMITY_DIST = 60.0
 
 VEHICLE_CENTROID_DEDUP_DISTANCE = 150.0
 VEHICLE_CENTROID_DEDUP_AREA_RATIO = 0.40
@@ -864,6 +867,8 @@ class StreamAIService:
         self._visual_hashes = {}
         self._plate_text_cache = {}
         self._vehicle_centroids = {}
+        self._person_track_cache = {}
+        self._person_alias_keys = {}
 
         self.object_groups = {}
         self._group_counter = 0
@@ -1012,12 +1017,11 @@ class StreamAIService:
                     continue
                 if group.get("object_type") != object_type:
                     continue
-                if group.get("last_zone") != zone:
-                    continue
                 if now - group.get("last_seen", 0) > OBJECT_GROUP_MAX_GAP:
                     continue
 
                 g_last_track = group.get("last_track_id", -1)
+                g_tracks_seen = group.get("tracks_seen", set())
                 g_centroid = group.get("last_centroid", (0, 0))
                 g_bbox = group.get("last_bbox", [0, 0, 0, 0])
                 g_area = max(1, (g_bbox[2] - g_bbox[0]) * (g_bbox[3] - g_bbox[1]))
@@ -1026,7 +1030,7 @@ class StreamAIService:
                 iou_val = _calculate_iou(bbox, g_bbox)
                 area_ratio = abs(area - g_area) / max(1, max(area, g_area))
 
-                if track_id >= 0 and g_last_track == track_id:
+                if track_id >= 0 and (g_last_track == track_id or track_id in g_tracks_seen):
                     if dist <= max_dist_allowed * 1.5 or iou_val > 0.0:
                         score = 1000.0 - dist
                         if score > best_score:
@@ -1050,12 +1054,17 @@ class StreamAIService:
                     continue
                 if area_ratio > OBJECT_GROUP_AREA_TOLERANCE:
                     continue
-                if iou_val < OBJECT_GROUP_MIN_IOU and dist > (max_dist_allowed * 0.65):
-                    continue
 
+                hdist = None
                 if object_type == "person" and v_hash and group.get("v_hash"):
                     hdist = self._hamming_distance(v_hash, group["v_hash"])
                     if hdist > PERSON_HAMMING_THRESHOLD * 2:
+                        continue
+
+                # Jika visual hash cocok kuat untuk person, toleransi IoU nol akibat jeda frame
+                is_visual_strong = (object_type == "person" and hdist is not None and hdist <= PERSON_HAMMING_THRESHOLD)
+                if not is_visual_strong:
+                    if iou_val < OBJECT_GROUP_MIN_IOU and dist > (max_dist_allowed * 0.65):
                         continue
 
                 score = (iou_val * 100.0) + (100.0 - (dist / max(1.0, max_dist_allowed)) * 50.0)
@@ -1126,6 +1135,7 @@ class StreamAIService:
             d["track_id"] = track_id
             d["confidence"] = conf
             d["conf"] = conf
+            d["v_hash"] = v_hash
 
     # ============================================================
     # DETECTION
@@ -1527,13 +1537,18 @@ class StreamAIService:
 
             driver = None
             for index, person in enumerate(people):
-                if index in associated_people:
-                    continue
                 person_box = person.get("box", [0, 0, 0, 0])
-                if self._intersection_ratio(person_box, vehicle_box) >= 0.25:
-                    driver = person
+                inter_ratio = self._intersection_ratio(person_box, vehicle_box)
+                pcx = (person_box[0] + person_box[2]) / 2.0
+                pcy = (person_box[1] + person_box[3]) / 2.0
+                is_inside = (
+                    vehicle_box[0] <= pcx <= vehicle_box[2]
+                    and vehicle_box[1] <= pcy <= vehicle_box[3]
+                )
+                if inter_ratio >= 0.20 or is_inside:
+                    if driver is None and index not in associated_people:
+                        driver = person
                     associated_people.add(index)
-                    break
 
             # ✅ Ambil text terkoreksi DAN raw
             plate_text_corrected = _normalize_text((plate or {}).get("text") or "")
@@ -1683,6 +1698,14 @@ class StreamAIService:
                 track_id = -1
 
             object_group_id = person.get("object_group_id")
+            person_conf_now = float(person.get("conf", person.get("confidence", 0.0)) or 0.0)
+            bbox = person.get("box", [0, 0, 0, 0])
+            bx1, by1, bx2, by2 = bbox
+            cx = (bx1 + bx2) / 2.0
+            cy = (by1 + by2) / 2.0
+            bw = max(1, bx2 - bx1)
+            bh = max(1, by2 - by1)
+            area = bw * bh
 
             if object_group_id:
                 event_key = f"person:{camera_id}:{object_group_id}:sess_{self.event_session_id}"
@@ -1698,16 +1721,91 @@ class StreamAIService:
             else:
                 continue
 
-            previous_meta = self.saved_event_meta.get(event_key)
-            person_conf_now = float(person.get("conf", 0.0) or 0.0)
-            prev_person_conf = float((previous_meta or {}).get("person_confidence", 0.0) or 0.0)
+            # Multi-layer Dedup Evaluation (A -> E)
+            is_dup, match_info = self._is_same_person_candidate(
+                camera_id, person, current_time, frame=frame
+            )
 
-            if event_key in self.captured_tracks:
-                if previous_meta is not None:
-                    if person_conf_now <= prev_person_conf + CONFIDENCE_IMPROVEMENT_THRESHOLD:
-                        continue
+            if is_dup:
+                reason = match_info.get("reason", "UNKNOWN")
+                old_track_id = match_info.get("old_track_id", -1)
+                dist = match_info.get("distance", 0.0)
+                area_ratio = match_info.get("area_ratio", 0.0)
+                hdist = match_info.get("hamming", -1)
+                matched_key = match_info.get("matched_event_key") or event_key
+                matched_meta = match_info.get("matched_meta") or self.saved_event_meta.get(matched_key, {})
 
-            bx1, by1, bx2, by2 = person.get("box", [0, 0, 0, 0])
+                print(
+                    f"[PERSON DEDUP]\n"
+                    f"camera={camera_id}\n"
+                    f"track_id={track_id}\n"
+                    f"old_track_id={old_track_id}\n"
+                    f"group={object_group_id or '-'}\n"
+                    f"reason={reason}\n"
+                    f"distance={dist:.1f}\n"
+                    f"area_ratio={area_ratio:.2f}\n"
+                    f"hamming={hdist}\n"
+                    f"action=SKIP"
+                )
+
+                # Tandai event_key saat ini dan alias ke event_key utama
+                self.captured_tracks[event_key] = current_time
+                if matched_key != event_key:
+                    self.captured_tracks[matched_key] = current_time
+                    self._person_alias_keys[event_key] = matched_key
+
+                if track_id >= 0:
+                    self._person_track_cache[f"person-track:{camera_id}:{track_id}"] = {
+                        "ts": current_time, "text": str(track_id)
+                    }
+
+                # Update metadata in-memory agar tracking posisi/waktu terus mutakhir
+                if matched_meta:
+                    matched_meta["last_seen"] = current_time
+                    matched_meta["last_centroid"] = (cx, cy)
+                    matched_meta["last_bbox"] = bbox
+                    matched_meta["area"] = area
+                    if track_id >= 0:
+                        matched_meta.setdefault("tracks_seen", set()).add(track_id)
+                    if person.get("v_hash"):
+                        matched_meta["v_hash"] = person["v_hash"]
+
+                # Peningkatan confidence: UPDATE metadata/crop terbaik di DB jika diperlukan, JANGAN insert baru
+                prev_person_conf = float(matched_meta.get("person_confidence", 0.0) or 0.0)
+                if person_conf_now > prev_person_conf + CONFIDENCE_IMPROVEMENT_THRESHOLD:
+                    crop = _prepare_high_quality_capture(
+                        frame, (bx1, by1, bx2, by2),
+                        padding=0.20, target_short_side=360,
+                        max_scale=2.5, max_long_side=960, sharpen=True,
+                    )
+                    if crop is not None and crop.size > 0:
+                        try:
+                            db.save_detection_event(
+                                camera_id=camera_id,
+                                face_crop=crop,
+                                face_conf=person_conf_now,
+                                track_id=track_id if track_id >= 0 else None,
+                                object_type="person",
+                                vehicle_type="unknown",
+                                direction=camera_orientation,
+                                event_key=matched_key,
+                            )
+                            matched_meta["person_confidence"] = person_conf_now
+                        except Exception as exc:
+                            print(f"[AI STREAM WARNING] Update person best crop failed: {exc}")
+
+                continue
+
+            # ========================================================
+            # PERSON BARU -> SAVE
+            # ========================================================
+            print(
+                f"[PERSON NEW]\n"
+                f"camera={camera_id}\n"
+                f"track_id={track_id}\n"
+                f"group={object_group_id or '-'}\n"
+                f"action=SAVE"
+            )
 
             crop = _prepare_high_quality_capture(
                 frame, (bx1, by1, bx2, by2),
@@ -1734,15 +1832,35 @@ class StreamAIService:
 
                 self.captured_tracks[event_key] = current_time
 
+                v_hash = person.get("v_hash") or self._visual_hash(crop)
+                if v_hash:
+                    self._register_visual_hash(camera_id, "person", v_hash, current_time)
+
+                if track_id >= 0:
+                    self._person_track_cache[f"person-track:{camera_id}:{track_id}"] = {
+                        "ts": current_time, "text": str(track_id)
+                    }
+
                 self.saved_event_meta[event_key] = {
+                    "object_type": "person",
+                    "camera_id": camera_id,
+                    "event_key": event_key,
                     "plate_text": "",
                     "has_driver": False,
                     "direction": final_direction,
                     "generation": generation,
                     "track_id": track_id,
+                    "tracks_seen": {track_id} if track_id >= 0 else set(),
                     "object_group_id": object_group_id,
-                    "person_confidence": max(person_conf_now, prev_person_conf),
+                    "last_centroid": (cx, cy),
+                    "last_bbox": bbox,
+                    "area": area,
+                    "v_hash": v_hash,
+                    "first_seen": current_time,
+                    "last_seen": current_time,
+                    "person_confidence": person_conf_now,
                     "face_saved": True,
+                    "detection_id": result.get("detection_id"),
                     "updated_at": current_time,
                 }
 
@@ -1762,6 +1880,263 @@ class StreamAIService:
         return self._save_consistent_events(
             frame, person_dets, plate_dets, camera_id, current_time,
         )
+
+    # ============================================================
+    # PERSON DEDUPLICATION & CANDIDATE EVALUATION
+    # ============================================================
+    def _register_visual_hash(self, camera_id, object_type, v_hash, current_time):
+        if not v_hash:
+            return
+        camera_id = _normalize_camera_id(camera_id)
+        bucket = "person" if str(object_type).lower() == "person" else "vehicle"
+        prefix = f"vhash:{camera_id}:{bucket}:"
+        key = f"{prefix}{v_hash}:{int(current_time)}"
+        self._visual_hashes[key] = {"ts": current_time, "hash": v_hash}
+
+    def _is_same_person_candidate(self, camera_id, person, current_time, frame=None):
+        """
+        Evaluasi multi-layer untuk mendeteksi apakah person saat ini merupakan duplikat
+        dari person yang sudah pernah disimpan/tercatat sebelumnya.
+
+        Urutan pengecekan (A -> E):
+        A. object_group_id sama -> match
+        B. track_id sama (atau pernah diasosiasikan) & belum timeout -> match
+        C. track_id berbeda tetapi posisi + ukuran bbox sangat mirip -> cek visual hash
+        D. visual hash mirip dalam cooldown (PERSON_DEDUP_COOLDOWN)
+        E. jika semua indikator berbeda -> False (person baru)
+        """
+        camera_id = _normalize_camera_id(camera_id)
+        now = float(current_time)
+
+        bbox = person.get("box", [0, 0, 0, 0])
+        bx1, by1, bx2, by2 = bbox
+        cx = (bx1 + bx2) / 2.0
+        cy = (by1 + by2) / 2.0
+        bw = max(1, bx2 - bx1)
+        bh = max(1, by2 - by1)
+        area = bw * bh
+
+        try:
+            track_id = int(person.get("track_id", -1))
+        except (TypeError, ValueError):
+            track_id = -1
+
+        object_group_id = person.get("object_group_id")
+
+        v_hash = person.get("v_hash")
+        if v_hash is None and frame is not None and frame.size > 0:
+            try:
+                h, w = frame.shape[:2]
+                px1 = max(0, min(w - 1, bx1))
+                py1 = max(0, min(h - 1, by1))
+                px2 = max(0, min(w, bx2))
+                py2 = max(0, min(h, by2))
+                if px2 > px1 and py2 > py1:
+                    crop = frame[py1:py2, px1:px2]
+                    v_hash = self._visual_hash(crop)
+                    person["v_hash"] = v_hash
+            except Exception:
+                v_hash = None
+
+        # Resolusi alias event_key
+        curr_event_key = (
+            f"person:{camera_id}:{object_group_id}:sess_{self.event_session_id}"
+            if object_group_id else None
+        )
+        if curr_event_key and curr_event_key in self._person_alias_keys:
+            aliased_key = self._person_alias_keys[curr_event_key]
+            aliased_meta = self.saved_event_meta.get(aliased_key)
+            if aliased_meta:
+                return True, {
+                    "reason": "GROUP_ALIAS",
+                    "matched_event_key": aliased_key,
+                    "old_track_id": aliased_meta.get("track_id", -1),
+                    "group_id": aliased_meta.get("object_group_id", object_group_id),
+                    "distance": 0.0,
+                    "area_ratio": 0.0,
+                    "hamming": 0,
+                    "matched_meta": aliased_meta,
+                }
+
+        # Kumpulkan kandidat event person pada kamera ini
+        candidates = []
+        max_cooldown = max(PERSON_DEDUP_COOLDOWN, PERSON_TRACK_DEDUP_COOLDOWN)
+        for key, meta in self.saved_event_meta.items():
+            if not isinstance(meta, dict):
+                continue
+            if meta.get("object_type") != "person":
+                continue
+            if meta.get("camera_id") != camera_id:
+                continue
+            last_ts = float(meta.get("last_seen", meta.get("updated_at", now)))
+            if now - last_ts <= max_cooldown:
+                candidates.append((key, meta, now - last_ts))
+
+        # ========================================================
+        # A. object_group_id sama -> anggap object yang sama
+        # ========================================================
+        if object_group_id:
+            for key, meta, age in candidates:
+                if meta.get("object_group_id") == object_group_id:
+                    if age <= PERSON_DEDUP_COOLDOWN:
+                        old_tid = meta.get("track_id", -1)
+                        return True, {
+                            "reason": "SAME_GROUP",
+                            "matched_event_key": key,
+                            "old_track_id": old_tid,
+                            "group_id": object_group_id,
+                            "distance": 0.0,
+                            "area_ratio": 0.0,
+                            "hamming": 0,
+                            "matched_meta": meta,
+                        }
+
+        # ========================================================
+        # B. track_id sama dan belum melewati timeout -> anggap object yang sama
+        # ========================================================
+        if track_id >= 0:
+            for key, meta, age in candidates:
+                tracks_seen = meta.get("tracks_seen", set())
+                m_track_id = meta.get("track_id", -1)
+                if track_id == m_track_id or track_id in tracks_seen:
+                    if age <= PERSON_TRACK_DEDUP_COOLDOWN:
+                        return True, {
+                            "reason": "SAME_TRACK",
+                            "matched_event_key": key,
+                            "old_track_id": m_track_id,
+                            "group_id": meta.get("object_group_id", object_group_id),
+                            "distance": 0.0,
+                            "area_ratio": 0.0,
+                            "hamming": 0,
+                            "matched_meta": meta,
+                        }
+
+            # Cek juga cache track person
+            if self._is_duplicate_person_track(camera_id, track_id, now):
+                return True, {
+                    "reason": "TRACK_CACHE_MATCH",
+                    "matched_event_key": curr_event_key,
+                    "old_track_id": track_id,
+                    "group_id": object_group_id,
+                    "distance": 0.0,
+                    "area_ratio": 0.0,
+                    "hamming": 0,
+                    "matched_meta": None,
+                }
+
+        # ========================================================
+        # C. track_id berbeda tetapi posisi + ukuran bbox sangat mirip -> cek visual hash
+        # ========================================================
+        best_candidate = None
+        best_dist = 9999.0
+        best_area_ratio = 1.0
+        best_hamming = 999
+        best_reason = None
+
+        for key, meta, age in candidates:
+            if age > PERSON_DEDUP_COOLDOWN:
+                continue
+
+            g_cx, g_cy = meta.get("last_centroid", (0, 0))
+            g_bbox = meta.get("last_bbox", [0, 0, 0, 0])
+            g_area = meta.get("area", 0)
+            if g_area <= 0 and len(g_bbox) == 4:
+                g_area = max(1, (g_bbox[2] - g_bbox[0]) * (g_bbox[3] - g_bbox[1]))
+
+            dist = ((cx - g_cx) ** 2 + (cy - g_cy) ** 2) ** 0.5
+            area_ratio = abs(area - g_area) / max(1, max(area, g_area))
+
+            hdist = None
+            g_v_hash = meta.get("v_hash")
+            if v_hash and g_v_hash:
+                hdist = self._hamming_distance(v_hash, g_v_hash)
+
+            # C1: Posisi dalam jangkauan wajar + ukuran bbox mirip + visual hash cocok
+            if dist <= OBJECT_GROUP_PERSON_MAX_DIST and area_ratio <= PERSON_AREA_TOLERANCE:
+                if hdist is not None and hdist <= PERSON_HAMMING_THRESHOLD:
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_area_ratio = area_ratio
+                        best_hamming = hdist
+                        best_candidate = (key, meta)
+                        best_reason = "SPATIAL_VISUAL_MATCH"
+                    continue
+
+            # C2: Sangat dekat (proximity / orang berdiri atau berjalan lambat pada titik serupa)
+            if dist <= PERSON_PROXIMITY_DIST and area_ratio <= 0.35 and age <= 20.0:
+                if hdist is None or hdist <= (PERSON_HAMMING_THRESHOLD + 2):
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_area_ratio = area_ratio
+                        best_hamming = hdist if hdist is not None else 0
+                        best_candidate = (key, meta)
+                        best_reason = "SPATIAL_PROXIMITY"
+                    continue
+
+        if best_candidate is not None:
+            key, meta = best_candidate
+            return True, {
+                "reason": best_reason,
+                "matched_event_key": key,
+                "old_track_id": meta.get("track_id", -1),
+                "group_id": meta.get("object_group_id", object_group_id),
+                "distance": best_dist,
+                "area_ratio": best_area_ratio,
+                "hamming": best_hamming,
+                "matched_meta": meta,
+            }
+
+        # ========================================================
+        # D. visual hash mirip dalam cooldown -> kemungkinan object yang sama
+        # ========================================================
+        if v_hash:
+            for key, meta, age in candidates:
+                if age > PERSON_DEDUP_COOLDOWN:
+                    continue
+                g_v_hash = meta.get("v_hash")
+                if not g_v_hash:
+                    continue
+
+                hdist = self._hamming_distance(v_hash, g_v_hash)
+                if hdist <= PERSON_HAMMING_THRESHOLD:
+                    g_cx, g_cy = meta.get("last_centroid", (0, 0))
+                    g_bbox = meta.get("last_bbox", [0, 0, 0, 0])
+                    g_area = meta.get("area", 0)
+                    if g_area <= 0 and len(g_bbox) == 4:
+                        g_area = max(1, (g_bbox[2] - g_bbox[0]) * (g_bbox[3] - g_bbox[1]))
+                    dist = ((cx - g_cx) ** 2 + (cy - g_cy) ** 2) ** 0.5
+                    area_ratio = abs(area - g_area) / max(1, max(area, g_area))
+
+                    # Pastikan skala tidak bertolak belakang drastis (hindari false positive)
+                    if area_ratio <= 0.60:
+                        return True, {
+                            "reason": "VISUAL_MATCH",
+                            "matched_event_key": key,
+                            "old_track_id": meta.get("track_id", -1),
+                            "group_id": meta.get("object_group_id", object_group_id),
+                            "distance": dist,
+                            "area_ratio": area_ratio,
+                            "hamming": hdist,
+                            "matched_meta": meta,
+                        }
+
+            # Cek visual hash cache global
+            if self._is_duplicate_visual(camera_id, "person", v_hash, now, auto_register=False):
+                return True, {
+                    "reason": "VISUAL_CACHE_MATCH",
+                    "matched_event_key": curr_event_key,
+                    "old_track_id": -1,
+                    "group_id": object_group_id,
+                    "distance": 0.0,
+                    "area_ratio": 0.0,
+                    "hamming": 0,
+                    "matched_meta": None,
+                }
+
+        # ========================================================
+        # E. jika semua indikator berbeda -> anggap person baru
+        # ========================================================
+        return False, None
 
     # ============================================================
     # TRACK GENERATION & EVENT KEY
@@ -1871,6 +2246,18 @@ class StreamAIService:
             if now - stamp > 600.0:
                 self._plate_text_cache.pop(key, None)
 
+        for key, value in list(self._person_track_cache.items()):
+            try:
+                stamp = float(value.get("ts", now))
+            except (TypeError, ValueError, AttributeError):
+                self._person_track_cache.pop(key, None)
+                continue
+            if now - stamp > PERSON_TRACK_DEDUP_COOLDOWN * 2.0:
+                self._person_track_cache.pop(key, None)
+
+        if len(self._person_alias_keys) > 500:
+            self._person_alias_keys.clear()
+
         for cam_key, items in list(self._vehicle_centroids.items()):
             self._vehicle_centroids[cam_key] = [
                 item for item in items
@@ -1921,7 +2308,7 @@ class StreamAIService:
         except Exception:
             return 999
 
-    def _is_duplicate_visual(self, camera_id, object_type, v_hash, current_time):
+    def _is_duplicate_visual(self, camera_id, object_type, v_hash, current_time, auto_register=True):
         if v_hash is None:
             return False
 
@@ -1949,8 +2336,9 @@ class StreamAIService:
             if dist <= threshold:
                 return True
 
-        key = f"{prefix}{v_hash}:{int(current_time)}"
-        self._visual_hashes[key] = {"ts": current_time, "hash": v_hash}
+        if auto_register:
+            key = f"{prefix}{v_hash}:{int(current_time)}"
+            self._visual_hashes[key] = {"ts": current_time, "hash": v_hash}
         return False
 
     def _is_duplicate_plate(self, camera_id, plate_text, current_time):
@@ -1967,14 +2355,16 @@ class StreamAIService:
         return False
 
     def _is_duplicate_person_track(self, camera_id, track_id, current_time):
+        if track_id is None or track_id < 0:
+            return False
         camera_id = _normalize_camera_id(camera_id)
         key = f"person-track:{camera_id}:{track_id}"
-        last = self._plate_text_cache.get(key)
+        last = self._person_track_cache.get(key)
         if last is not None:
             age = current_time - last.get("ts", 0)
             if age < PERSON_TRACK_DEDUP_COOLDOWN:
                 return True
-        self._plate_text_cache[key] = {"ts": current_time, "text": str(track_id)}
+        self._person_track_cache[key] = {"ts": current_time, "text": str(track_id)}
         return False
 
     def _bbox_centroid(self, bbox):
