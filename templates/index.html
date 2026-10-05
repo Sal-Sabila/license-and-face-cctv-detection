@@ -3,13 +3,13 @@
 
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>{{ title or 'WIKOVISION' }}</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
     <script>
-        (function() {
+        (function () {
             try {
                 var savedTheme = localStorage.getItem('platevision_theme') || localStorage.getItem('theme');
                 if (savedTheme !== 'light') {
@@ -19,7 +19,7 @@
                     document.documentElement.classList.remove('dark');
                     document.documentElement.setAttribute('data-bs-theme', 'light');
                 }
-            } catch (e) {}
+            } catch (e) { }
         })();
     </script>
     <script src="https://cdn.tailwindcss.com"></script>
@@ -38,30 +38,73 @@
             corePlugins: { preflight: false }
         };
     </script>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=2.11">
+
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=4.9">
     <style>
-        .detection-image-modal { width: 820px; max-width: 90vw; margin: 1rem auto; }
-        .detection-image-modal .modal-content { max-height: 90vh; overflow: hidden; border-radius: 12px; }
-        .detection-image-modal .modal-header { padding: 14px 18px 8px; }
-        .detection-image-modal .modal-title { font-size: 1rem; }
-        .detection-image-body { padding: 8px 18px 10px !important; }
+        .detection-image-modal {
+            width: 820px;
+            max-width: 90vw;
+            margin: 1rem auto;
+        }
+
+        .detection-image-modal .modal-content {
+            max-height: 90vh;
+            overflow: hidden;
+            border-radius: 12px;
+        }
+
+        .detection-image-modal .modal-header {
+            padding: 14px 18px 8px;
+        }
+
+        .detection-image-modal .modal-title {
+            font-size: 1rem;
+        }
+
+        .detection-image-body {
+            padding: 8px 18px 10px !important;
+        }
+
         .preview-img-container {
-            width: 100%; height: 400px; min-height: 300px; max-height: 400px;
+            width: 100%;
+            height: 400px;
+            min-height: 300px;
+            max-height: 400px;
             background: #171c22 !important;
             border: 1px solid rgba(255, 255, 255, 0.10);
             border-radius: 10px;
-            display: flex; align-items: center; justify-content: center;
-            overflow: hidden; position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            position: relative;
         }
+
         .detection-preview-image {
-            width: 78%; height: auto; max-width: 620px; max-height: 360px;
-            display: block; object-fit: contain; object-position: center;
-            border-radius: 6px; image-rendering: auto;
-            transform: none !important; transition: none !important;
+            width: 78%;
+            height: auto;
+            max-width: 620px;
+            max-height: 360px;
+            display: block;
+            object-fit: contain;
+            object-position: center;
+            border-radius: 6px;
+            image-rendering: auto;
+            transform: none !important;
+            transition: none !important;
         }
-        .detection-preview-image:hover { transform: none !important; }
-        .detection-image-modal .modal-footer { padding: 6px 18px 12px; }
-        #imagePreviewDetails { font-size: 0.78rem; }
+
+        .detection-preview-image:hover {
+            transform: none !important;
+        }
+
+        .detection-image-modal .modal-footer {
+            padding: 6px 18px 12px;
+        }
+
+        #imagePreviewDetails {
+            font-size: 0.78rem;
+        }
 
         /* === ZONA EDITOR === */
         .zone-editor-wrap {
@@ -72,28 +115,34 @@
             border-radius: 10px;
             overflow: hidden;
         }
+
         .zone-editor-wrap img {
             width: 100%;
             display: block;
             border-radius: 10px;
         }
+
         #zoneEditorCanvas {
             position: absolute;
-            top: 0; left: 0;
+            top: 0;
+            left: 0;
             cursor: crosshair;
             border-radius: 10px;
         }
+
         .zone-legend {
             display: flex;
             gap: 16px;
             flex-wrap: wrap;
             font-size: 0.82rem;
         }
+
         .zone-legend span {
             display: inline-flex;
             align-items: center;
             gap: 6px;
         }
+
         .zone-legend .dot {
             width: 12px;
             height: 12px;
@@ -102,17 +151,54 @@
         }
 
         @media (max-width: 768px) {
-            .detection-image-modal { width: 92vw; max-width: 92vw; }
-            .preview-img-container { height: 350px; min-height: 270px; max-height: 350px; }
-            .detection-preview-image { width: 82%; max-width: 560px; max-height: 315px; }
+            .detection-image-modal {
+                width: 92vw;
+                max-width: 92vw;
+            }
+
+            .preview-img-container {
+                height: 350px;
+                min-height: 270px;
+                max-height: 350px;
+            }
+
+            .detection-preview-image {
+                width: 82%;
+                max-width: 560px;
+                max-height: 315px;
+            }
         }
+
         @media (max-width: 576px) {
-            .detection-image-modal { width: 95vw; max-width: 95vw; margin: 0.5rem auto; }
-            .detection-image-body { padding: 6px 10px 8px !important; }
-            .preview-img-container { height: 300px; min-height: 220px; max-height: 300px; }
-            .detection-preview-image { width: 88%; max-width: 100%; max-height: 270px; }
-            .detection-image-modal .modal-header { padding: 12px 12px 6px; }
-            .detection-image-modal .modal-footer { padding: 4px 12px 10px; }
+            .detection-image-modal {
+                width: 95vw;
+                max-width: 95vw;
+                margin: 0.5rem auto;
+            }
+
+            .detection-image-body {
+                padding: 6px 10px 8px !important;
+            }
+
+            .preview-img-container {
+                height: 300px;
+                min-height: 220px;
+                max-height: 300px;
+            }
+
+            .detection-preview-image {
+                width: 88%;
+                max-width: 100%;
+                max-height: 270px;
+            }
+
+            .detection-image-modal .modal-header {
+                padding: 12px 12px 6px;
+            }
+
+            .detection-image-modal .modal-footer {
+                padding: 4px 12px 10px;
+            }
         }
     </style>
 </head>
@@ -121,18 +207,19 @@
     <div class="app-layout">
         <div id="sidebarBackdrop" class="sidebar-backdrop"></div>
 
+        <button id="sidebarCloseBtn" class="sidebar-close-btn" aria-label="Tutup Menu" title="Tutup Menu">
+            <i class="bi bi-x-lg"></i>
+        </button>
+
         <aside id="sidebar" class="sidebar">
             <div class="sidebar-header">
                 <div class="brand-wrap">
                     <div class="brand-mark">W</div>
                     <div class="brand-text">
-                        <h2>WIKO VISION</h2>
-                        <small>DETEKSI MONITORING</small>
+                        <h2>Wiko Vision</h2>
+                        <small>Deteksi monitoring</small>
                     </div>
                 </div>
-                <button id="sidebarCloseBtn" class="sidebar-close-btn" aria-label="Tutup Menu">
-                    <i class="bi bi-x-lg"></i>
-                </button>
             </div>
 
             <div class="sidebar-scrollable">
@@ -140,17 +227,17 @@
                 <nav class="nav flex-column gap-1">
                     <a class="nav-link {% if page == 'dashboard' %}active{% endif %}"
                         href="{{ url_for('dashboard_page.dashboard') }}" title="Dashboard">
-                        <i class="bi bi-grid-1x2-fill"></i>
+                        <i class="bi bi-grid"></i>
                         <span>Dashboard</span>
                     </a>
                     <a class="nav-link {% if page == 'monitoring' %}active{% endif %}"
                         href="{{ url_for('monitoring_page.monitoring') }}" title="Monitoring CCTV">
-                        <i class="bi bi-camera-video-fill"></i>
+                        <i class="bi bi-camera-video"></i>
                         <span>Monitoring CCTV</span>
                     </a>
                     <a class="nav-link {% if page == 'detections' %}active{% endif %}"
                         href="{{ url_for('detections_page.detections') }}" title="Hasil Deteksi">
-                        <i class="bi bi-record-circle-fill"></i>
+                        <i class="bi bi-record-circle"></i>
                         <span>Hasil Deteksi</span>
                     </a>
                     <a class="nav-link {% if page == 'history' %}active{% endif %}"
@@ -165,7 +252,7 @@
                     </a>
                     <a class="nav-link {% if page == 'statistics' %}active{% endif %}"
                         href="{{ url_for('statistics_page.statistics') }}" title="Statistik">
-                        <i class="bi bi-bar-chart-line-fill"></i>
+                        <i class="bi bi-bar-chart"></i>
                         <span>Statistik</span>
                     </a>
                 </nav>
@@ -178,7 +265,7 @@
                     </a>
                     <a class="nav-link {% if page == 'settings' %}active{% endif %}"
                         href="{{ url_for('settings_page.settings') }}" title="Profil">
-                        <i class="bi bi-person-circle"></i>
+                        <i class="bi bi-person"></i>
                         <span>Profil</span>
                     </a>
                 </nav>
@@ -188,46 +275,74 @@
         <main class="main-panel">
             <div class="topbar">
                 <div class="topbar-left">
-                    <button id="sidebarToggle" class="sidebar-toggle-btn" aria-label="Buka/Tutup Sidebar" title="Buka/Tutup Menu">
+                    <button id="sidebarToggle" class="sidebar-toggle-btn" aria-label="Buka/Tutup Sidebar"
+                        title="Buka/Tutup Menu">
                         <i class="bi bi-list"></i>
                     </button>
-                    <div>
+                    <div class="topbar-title-wrap">
                         <h1>{{ heading }}</h1>
                         <p>{{ subtitle }}</p>
                     </div>
                 </div>
                 <div class="topbar-actions">
-                    <button id="themeToggleBtn" type="button" class="theme-toggle-btn icon-btn"
-                        aria-label="Ganti Mode Gelap / Terang" title="Ganti Mode Gelap / Terang">
-                        <i id="themeToggleIcon" class="bi bi-moon-stars-fill"></i>
+                    <button id="themeToggleBtn" type="button" class="theme-toggle-btn"
+                        aria-label="Beralih ke mode terang" title="Beralih ke mode terang">
+                        <i id="themeToggleIcon" class="bi bi-sun"></i>
                     </button>
+                    <script>
+                        (function () {
+                            try {
+                                var st = localStorage.getItem('platevision_theme') || localStorage.getItem('theme');
+                                var btn = document.getElementById('themeToggleBtn');
+                                var ico = document.getElementById('themeToggleIcon');
+                                if (st === 'light') {
+                                    if (btn) { btn.title = 'Beralih ke mode gelap'; btn.setAttribute('aria-label', 'Beralih ke mode gelap'); }
+                                    if (ico) { ico.className = 'bi bi-moon-stars'; }
+                                } else {
+                                    if (btn) { btn.title = 'Beralih ke mode terang'; btn.setAttribute('aria-label', 'Beralih ke mode terang'); }
+                                    if (ico) { ico.className = 'bi bi-sun'; }
+                                }
+                            } catch (e) { }
+                        })();
+                    </script>
                     <div class="dropdown">
-                        <button class="user-pill dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="Menu akun">
-                            <div id="topbarAvatar" class="avatar">A</div>
-                            <div><strong id="topbarName">Administrator</strong><span id="topbarRole">Operator</span></div>
+                        <button class="user-pill dropdown-toggle" type="button" data-bs-toggle="dropdown"
+                            aria-expanded="false" title="Menu akun">
+                            <div id="topbarAvatar" class="avatar">S</div>
+                            <div class="user-details">
+                                <strong id="topbarName">Super Admin CCTV</strong>
+                                <span id="topbarRole">Kepala Operator</span>
+                            </div>
+                            <i class="bi bi-chevron-down user-pill-arrow"></i>
                         </button>
-                        <ul class="dropdown-menu dropdown-menu-end account-menu">
+                        <ul class="dropdown-menu dropdown-menu-end account-menu shadow-sm">
                             <li class="account-menu-header">
-                                <span class="account-menu-avatar"><i class="bi bi-person-fill"></i></span>
+                                <span class="account-menu-avatar"><i class="bi bi-person"></i></span>
                                 <span class="account-menu-identity">
                                     <small>Sedang masuk</small>
                                     <strong>{{ session.get('user_email', '') }}</strong>
                                 </span>
                             </li>
-                            <li><hr class="dropdown-divider account-menu-divider"></li>
                             <li>
-                                <a class="dropdown-item account-menu-link" href="{{ url_for('settings_page.settings') }}">
+                                <hr class="dropdown-divider account-menu-divider">
+                            </li>
+                            <li>
+                                <a class="dropdown-item account-menu-link"
+                                    href="{{ url_for('settings_page.settings') }}">
                                     <span class="account-menu-icon"><i class="bi bi-person-vcard"></i></span>
-                                    <span class="account-menu-action"><strong>Profil saya</strong><small>Kelola info operator</small></span>
+                                    <span class="account-menu-action"><strong>Profil saya</strong><small>Kelola info
+                                            operator</small></span>
                                     <i class="bi bi-chevron-right account-menu-arrow"></i>
                                 </a>
                             </li>
                             <li>
                                 <form method="post" action="{{ url_for('auth.logout') }}">
-                                    <input type="hidden" name="logout_token" value="{{ session.get('logout_token', '') }}">
+                                    <input type="hidden" name="logout_token"
+                                        value="{{ session.get('logout_token', '') }}">
                                     <button class="dropdown-item account-menu-link account-menu-signout" type="submit">
                                         <span class="account-menu-icon"><i class="bi bi-box-arrow-right"></i></span>
-                                        <span class="account-menu-action"><strong>Keluar</strong><small>Akhiri sesi ini</small></span>
+                                        <span class="account-menu-action"><strong>Keluar</strong><small>Akhiri sesi
+                                                ini</small></span>
                                     </button>
                                 </form>
                             </li>
@@ -237,774 +352,1272 @@
             </div>
 
             {% if page == 'dashboard' %}
-            <!-- ============================================== -->
-            <!-- PERBAIKAN: KOTAK STATISTIK DASHBOARD -->
-            <!-- Disamakan dengan struktur di halaman Statistik -->
-            <!-- ============================================== -->
-            <section class="row g-3 mb-4">
-                <!-- Total Kendaraan -->
-                <div class="col-xl-3 col-md-6 col-12">
-                    <div class="stat-card p-3 h-100 shadow-sm d-flex align-items-center gap-3">
-                        <div class="stat-icon blue"><i class="bi bi-car-front-fill"></i></div>
-                        <div class="w-100">
-                            <span class="text-muted small d-block">Total Kendaraan</span>
-                            <strong id="totalVehicle" class="fs-4 d-block my-1">0</strong>
-                            <small class="text-muted d-block" id="vehicleFlowLabel">Masuk 0 · Keluar 0</small>
+            <div class="dashboard-page-container">
+                <!-- 1. Baris 4 Kartu Metrik -->
+                <section class="dashboard-metrics-grid">
+                    <!-- Total Kendaraan -->
+                    <div class="dashboard-metric-card">
+                        <div class="metric-card-content">
+                            <span class="metric-card-label">Total Kendaraan</span>
+                            <strong id="totalVehicle" class="metric-card-value">0</strong>
+                            <small id="vehicleFlowLabel" class="metric-card-sub">Masuk 0 · Keluar 0</small>
+                        </div>
+                        <div class="metric-card-icon-wrap" aria-hidden="true">
+                            <i class="bi bi-car-front"></i>
                         </div>
                     </div>
-                </div>
-                
-                <!-- Total Plat Terdeteksi -->
-                <div class="col-xl-3 col-md-6 col-12">
-                    <div class="stat-card p-3 h-100 shadow-sm d-flex align-items-center gap-3">
-                        <div class="stat-icon green"><i class="bi bi-check-circle-fill"></i></div>
-                        <div class="w-100">
-                            <span class="text-muted small d-block">Total Plat Terdeteksi</span>
-                            <strong id="plateRead" class="fs-4 d-block my-1">0</strong>
-                            <small class="text-muted d-block">Plat unik: <b id="uniquePlateCount" class="text-success">0</b></small>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- Total Orang -->
-                <div class="col-xl-3 col-md-6 col-12">
-                    <div class="stat-card p-3 h-100 shadow-sm d-flex align-items-center gap-3">
-                        <div class="stat-icon orange"><i class="bi bi-exclamation-circle-fill"></i></div>
-                        <div class="w-100">
-                            <span class="text-muted small d-block">Total Orang</span>
-                            <strong id="peopleTotal" class="fs-4 d-block my-1">0</strong>
-                            <small class="text-muted d-block" id="peopleFlowLabel">Masuk 0 · Keluar 0</small>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- CCTV Aktif -->
-                <div class="col-xl-3 col-md-6 col-12">
-                    <div class="stat-card p-3 h-100 shadow-sm d-flex align-items-center gap-3">
-                        <div class="stat-icon purple"><i class="bi bi-camera-video-fill"></i></div>
-                        <div class="w-100">
-                            <span class="text-muted small d-block">CCTV Aktif</span>
-                            <strong id="cameraStatus" class="fs-4 d-block my-1">0 / 0</strong>
-                            <small class="text-muted d-block">Online dari total CCTV</small>
-                        </div>
-                    </div>
-                </div>
-            </section>
-            <!-- ============================================== -->
 
-            <section class="row g-4 mt-1">
-                <div class="col-xl-7">
-                    <div class="panel shadow-sm p-4">
-                        <div class="panel-header p-0 mb-3"><div><h3>Ringkasan Arus</h3><p>Perbandingan kendaraan dan orang berdasarkan arah kamera.</p></div></div>
-                        <div class="row g-3">
-                            <div class="col-md-6"><div class="flow-summary vehicle-flow"><span>Kendaraan</span><strong id="vehicleFlowTotal">0</strong><small id="vehicleFlowDetail">Masuk 0 · Keluar 0</small></div></div>
-                            <div class="col-md-6"><div class="flow-summary people-flow"><span>Orang</span><strong id="peopleFlowTotal">0</strong><small id="peopleFlowDetail">Masuk 0 · Keluar 0</small></div></div>
+                    <!-- Total Plat Terdeteksi -->
+                    <div class="dashboard-metric-card">
+                        <div class="metric-card-content">
+                            <span class="metric-card-label">Total Plat Terdeteksi</span>
+                            <strong id="plateRead" class="metric-card-value">0</strong>
+                            <small class="metric-card-sub">Plat unik: <b id="uniquePlateCount">0</b></small>
+                        </div>
+                        <div class="metric-card-icon-wrap" aria-hidden="true">
+                            <i class="bi bi-card-heading"></i>
                         </div>
                     </div>
-                </div>
-                <div class="col-xl-5"><div class="panel shadow-sm p-4 h-100"><div class="panel-header p-0 mb-2"><div><h3>Insight Terkini</h3><p>Berbasis data tersaring hari ini.</p></div></div><ul id="dashboardInsights" class="insight-list mb-0"><li>Memuat insight...</li></ul></div></div>
-            </section>
-            <section class="row g-4 mt-1">
-                <div class="col-xl-8 col-lg-7">
-                    <div class="panel shadow-sm">
-                        <div class="panel-header">
-                            <div>
-                                <h3>Live Monitoring CCTV</h3>
-                                <p>Satu frame untuk deteksi wajah dan plat nomor.</p>
+
+                    <!-- Total Orang -->
+                    <div class="dashboard-metric-card">
+                        <div class="metric-card-content">
+                            <span class="metric-card-label">Total Orang</span>
+                            <strong id="peopleTotal" class="metric-card-value">0</strong>
+                            <small id="peopleFlowLabel" class="metric-card-sub">Masuk 0 · Keluar 0</small>
+                        </div>
+                        <div class="metric-card-icon-wrap" aria-hidden="true">
+                            <i class="bi bi-person"></i>
+                        </div>
+                    </div>
+
+                    <!-- CCTV Aktif -->
+                    <div class="dashboard-metric-card">
+                        <div class="metric-card-content">
+                            <span class="metric-card-label">CCTV Aktif</span>
+                            <strong id="cameraStatus" class="metric-card-value">0 / 0</strong>
+                            <small class="metric-card-sub">Online dari total CCTV</small>
+                        </div>
+                        <div class="metric-card-icon-wrap" aria-hidden="true">
+                            <i class="bi bi-camera-video"></i>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- 2. Baris Dua Kolom: Live Monitoring CCTV (~60%) & Deteksi Terbaru (~40%) -->
+                <section class="dashboard-main-grid">
+                    <!-- Panel Live Monitoring CCTV -->
+                    <div class="panel dashboard-panel dashboard-live-panel">
+                        <div class="panel-header dashboard-panel-header">
+                            <div class="dashboard-panel-header-title">
+                                <h3 class="dashboard-panel-title">Live Monitoring CCTV</h3>
+                                <p class="dashboard-panel-desc">Satu frame untuk deteksi wajah dan plat nomor.</p>
                             </div>
-                            <div class="d-flex gap-2 align-items-center flex-nowrap">
-                                <select id="detectionMode" class="form-select form-select-sm" title="Pilih sumber deteksi">
+                        </div>
+
+                        <!-- Baris Kontrol Stream (Satu Baris Sejajar) -->
+                        <div class="dashboard-stream-toolbar">
+                            <div class="dashboard-toolbar-left">
+                                <select id="detectionMode"
+                                    class="form-select dashboard-control-select dashboard-select-mode"
+                                    title="Pilih sumber deteksi">
                                     <option value="stream">Stream CCTV</option>
                                     <option value="video">File Video</option>
                                 </select>
-                                <div class="form-check form-switch mb-0 d-flex align-items-center gap-2 me-1 bbox-switch-container" title="Aktifkan / Nonaktifkan Bounding Box AI">
-                                    <input class="form-check-input" type="checkbox" id="bboxToggle" checked>
-                                    <label class="form-check-label small fw-semibold text-nowrap" for="bboxToggle"></label>
+                                <select id="cameraSelect"
+                                    class="form-select dashboard-control-select dashboard-select-camera"
+                                    title="Pilih Kamera CCTV"></select>
+                                <div id="videoFileCol" class="dashboard-video-file-col" style="display: none;">
+                                    <label id="videoFileLabel"
+                                        class="btn-dashboard-control btn-dashboard-video-file mb-0"
+                                        style="display: none;" title="Pilih file video">
+                                        <i class="bi bi-file-earmark-play"></i>
+                                        <span>Pilih Video</span>
+                                        <input id="videoFileInput" type="file" accept="video/*" hidden>
+                                    </label>
                                 </div>
-                                <select id="cameraSelect" class="form-select form-select-sm"></select>
-                                <label id="videoFileLabel" class="btn btn-outline-secondary btn-sm mb-0" style="display: none;" title="Pilih file video">
-                                    <i class="bi bi-file-earmark-play"></i>
-                                    <span>Pilih Video</span>
-                                    <input id="videoFileInput" type="file" accept="video/*" hidden>
-                                </label>
-                                <button id="startStreamBtn" class="btn btn-primary btn-sm" title="Mulai Stream"><i class="bi bi-play-fill"></i></button>
-                                <button id="stopStreamBtn" class="btn btn-outline-danger btn-sm" title="Hentikan Stream"><i class="bi bi-stop-fill"></i></button>
+                            </div>
+                            <div class="dashboard-toolbar-right">
+                                <button id="startStreamBtn" type="button"
+                                    class="btn-dashboard-control btn-stream-start-solid" title="Mulai Stream">
+                                    <i class="bi bi-play-fill"></i>
+                                    <span>Mulai stream</span>
+                                </button>
+                                <button id="stopStreamBtn" type="button"
+                                    class="btn-dashboard-control btn-stream-stop-outline" title="Hentikan Stream">
+                                    <i class="bi bi-stop-fill"></i>
+                                    <span>Hentikan</span>
+                                </button>
                             </div>
                         </div>
-                        <div class="video-stage">
-                            <img id="liveStreamImg" class="live-stream-feed" alt="Live CCTV Feed" style="display: none;" />
-                            <video id="processedVideo" class="live-stream-feed" controls playsinline style="display: none;" aria-label="Hasil deteksi video"></video>
-                            <div class="video-placeholder" id="videoPlaceholder">
-                                <div class="camera-icon"><i class="bi bi-camera-video"></i></div>
-                                <strong id="cameraName">Tidak Ada Kamera</strong>
-                                <a href="{{ url_for('monitoring_page.monitoring') }}" class="btn-empty-add">
-                                    <i class="bi bi-plus-lg"></i>
-                                    <span>Tambah Kamera Sekarang</span>
-                                </a>
+
+                        <!-- Video Stage -->
+                        <div class="dashboard-video-wrap">
+                            <div class="video-stage">
+                                <img id="liveStreamImg" class="live-stream-feed" alt="Live CCTV Feed"
+                                    style="display: none;" />
+                                <video id="processedVideo" class="live-stream-feed" controls playsinline
+                                    style="display: none;" aria-label="Hasil deteksi video"></video>
+                                <div class="video-placeholder" id="videoPlaceholder">
+                                    <div class="camera-icon"><i class="bi bi-camera-video"></i></div>
+                                    <strong id="cameraName">Tidak Ada Kamera</strong>
+                                    <a href="{{ url_for('monitoring_page.monitoring') }}" class="btn-empty-add">
+                                        <i class="bi bi-plus-lg"></i>
+                                        <span>Tambah Kamera Sekarang</span>
+                                    </a>
+                                </div>
+                                <div class="video-time" id="clock">00:00:00 WIB</div>
                             </div>
-                            <div class="live-tag d-inline-flex align-items-center gap-1.5"><span class="live-pulse-dot"></span> LIVE</div>
-                            <div class="video-time" id="clock">00:00:00 WIB</div>
                         </div>
                     </div>
-                </div>
-                <div class="col-xl-4 col-lg-5">
-                    <div class="panel shadow-sm">
-                        <div class="panel-header">
-                            <div>
-                                <h3>Deteksi Terbaru</h3>
-                                <p>Hasil deteksi gabungan terakhir.</p>
+
+                    <!-- Panel Deteksi Terbaru -->
+                    <div class="panel dashboard-panel dashboard-recent-panel">
+                        <div class="panel-header dashboard-panel-header">
+                            <div class="dashboard-panel-header-title">
+                                <h3 class="dashboard-panel-title">Deteksi Terbaru</h3>
+                                <p class="dashboard-panel-desc">Hasil deteksi gabungan terakhir.</p>
                             </div>
                         </div>
-                        <div id="recentList" class="recent-list">
+                        <div id="recentList" class="recent-list-container">
                             <div class="empty-state">Belum ada deteksi</div>
                         </div>
                     </div>
-                </div>
-            </section>
+                </section>
+
+                <!-- 3. Baris Dua Kolom Sama Lebar: Ringkasan Arus (50%) & Insight Terkini (50%) -->
+                <section class="dashboard-secondary-grid">
+                    <!-- Panel Ringkasan Arus -->
+                    <div class="panel dashboard-panel dashboard-flow-panel" id="flowSummaryPanel">
+                        <div class="panel-header dashboard-panel-header">
+                            <div class="dashboard-panel-header-title">
+                                <h3 class="dashboard-panel-title">Ringkasan Arus</h3>
+                                <p class="dashboard-panel-desc">Perbandingan kendaraan dan orang berdasarkan arah
+                                    kamera.</p>
+                            </div>
+                        </div>
+                        <div class="panel-body dashboard-flow-body">
+                            <!-- Blok Kendaraan -->
+                            <div class="flow-block">
+                                <div class="flow-block-header">
+                                    <span class="flow-block-label">Kendaraan</span>
+                                    <strong id="vehicleFlowTotal" class="flow-block-total">0</strong>
+                                </div>
+                                <div class="flow-proportion-bar" role="progressbar"
+                                    aria-label="Proporsi Masuk dan Keluar Kendaraan">
+                                    <div id="vehicleFlowBarIn" class="flow-bar-segment flow-bar-entry"
+                                        style="width: 0%;"></div>
+                                    <div id="vehicleFlowBarOut" class="flow-bar-segment flow-bar-exit"
+                                        style="width: 0%;"></div>
+                                </div>
+                                <div class="flow-block-meta">
+                                    <span id="vehicleFlowEntryText" class="flow-meta-in">Masuk 0</span>
+                                    <span id="vehicleFlowExitText" class="flow-meta-out">Keluar 0</span>
+                                </div>
+                                <span id="vehicleFlowDetail" style="display: none;">Masuk 0 · Keluar 0</span>
+                            </div>
+
+                            <!-- Blok Orang -->
+                            <div class="flow-block">
+                                <div class="flow-block-header">
+                                    <span class="flow-block-label">Orang</span>
+                                    <strong id="peopleFlowTotal" class="flow-block-total">0</strong>
+                                </div>
+                                <div class="flow-proportion-bar" role="progressbar"
+                                    aria-label="Proporsi Masuk dan Keluar Orang">
+                                    <div id="peopleFlowBarIn" class="flow-bar-segment flow-bar-entry"
+                                        style="width: 0%;"></div>
+                                    <div id="peopleFlowBarOut" class="flow-bar-segment flow-bar-exit"
+                                        style="width: 0%;"></div>
+                                </div>
+                                <div class="flow-block-meta">
+                                    <span id="peopleFlowEntryText" class="flow-meta-in">Masuk 0</span>
+                                    <span id="peopleFlowExitText" class="flow-meta-out">Keluar 0</span>
+                                </div>
+                                <span id="peopleFlowDetail" style="display: none;">Masuk 0 · Keluar 0</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Panel Insight Terkini -->
+                    <div class="panel dashboard-panel dashboard-insight-panel" id="insightPanel">
+                        <div class="panel-header dashboard-panel-header">
+                            <div class="dashboard-panel-header-title">
+                                <h3 class="dashboard-panel-title">Insight Terkini</h3>
+                                <p class="dashboard-panel-desc">Berbasis data tersaring hari ini.</p>
+                            </div>
+                        </div>
+                        <div class="panel-body dashboard-insights-body" id="insightBody">
+                            <ul id="dashboardInsights" class="insight-list mb-0">
+                                <li>Memuat insight...</li>
+                            </ul>
+                        </div>
+                    </div>
+                </section>
+            </div>
 
             {% elif page == 'monitoring' %}
-            <section class="panel shadow-sm">
-                <div class="panel-header flex-wrap">
-                    <div>
-                        <h3>Daftar Kamera CCTV (<span id="cameraCountTitle">0</span>)</h3>
-                        <p>Kelola kamera CCTV untuk monitoring dan deteksi.</p>
+            <div class="monitoring-page-wrapper d-flex flex-column gap-3">
+                <!-- Kartu Ringkasan (3 kartu kecil, satu baris) -->
+                <div class="row g-3 camera-summary-row">
+                    <div class="col-md-4 col-12">
+                        <div class="camera-summary-card">
+                            <span class="camera-summary-label">Total kamera</span>
+                            <strong class="camera-summary-value" id="summaryTotalCameras">0</strong>
+                        </div>
                     </div>
-                    <div class="d-flex align-items-center gap-2 flex-wrap ms-auto">
-                        <div class="playlist-actions">
-                            <button type="button" class="btn-action-outline" onclick="exportCameras('xspf')">
-                                <i class="bi bi-filetype-xml"></i>
-                                <span>Ekspor XSPF</span>
-                            </button>
-                            <button type="button" class="btn-action-outline" onclick="exportCameras('excel')">
-                                <i class="bi bi-file-earmark-spreadsheet"></i>
-                                <span>Ekspor Excel</span>
-                            </button>
-                            <button type="button" class="btn-action-outline" onclick="exportCameras('pdf')">
-                                <i class="bi bi-file-earmark-pdf"></i>
-                                <span>Download PDF</span>
-                            </button>
-                            <div class="input-group input-group-sm" style="width: 220px;">
-                                <span class="input-group-text text-muted border-end-0"><i class="bi bi-search"></i></span>
-                                <input id="cameraSearchInput" type="text" class="form-control border-start-0" placeholder="Cari nama kamera...">
-                            </div>
-                            <button type="button" class="btn-action-primary" onclick="openCameraModal()">
-                                <i class="bi bi-plus-lg"></i>
-                                <span>Tambah Kamera</span>
-                            </button>
+                    <div class="col-md-4 col-12">
+                        <div class="camera-summary-card">
+                            <span class="camera-summary-label">Aktif</span>
+                            <strong class="camera-summary-value text-success" id="summaryActiveCameras">0</strong>
+                        </div>
+                    </div>
+                    <div class="col-md-4 col-12">
+                        <div class="camera-summary-card">
+                            <span class="camera-summary-label">Nonaktif</span>
+                            <strong class="camera-summary-value text-warning" id="summaryInactiveCameras">0</strong>
                         </div>
                     </div>
                 </div>
-                <div class="table-responsive">
-                    <table class="table align-middle mb-0 playlist-table">
-                        <thead>
-                            <tr>
-                                <th>Nama</th>
-                                <th>URL</th>
-                                <th>Arah</th>
-                                <th>Status</th>
-                                <th>Aksi</th>
-                            </tr>
-                        </thead>
-                        <tbody id="cameraTable">
-                            <tr>
-                                <td colspan="5" class="text-center text-muted py-5">Belum ada kamera.</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
 
-                <div class="panel-footer p-3 d-flex justify-content-between align-items-center flex-wrap gap-2 border-top">
-                    <div class="small text-muted" id="cameraPaginationInfo">Menampilkan 0 kamera</div>
-                    <div class="d-flex gap-2 align-items-center">
-                        <button id="cameraPrevBtn" class="btn btn-outline-secondary btn-sm" disabled>
-                            <i class="bi bi-chevron-left"></i> Sebelumnya
-                        </button>
-                        <span id="cameraPageNumber" class="small fw-bold px-2">Hal 1</span>
-                        <button id="cameraNextBtn" class="btn btn-outline-secondary btn-sm" disabled>
-                            Selanjutnya <i class="bi bi-chevron-right"></i>
-                        </button>
+                <!-- Wadah Utama Tabel & Toolbar -->
+                <section class="panel camera-panel">
+                    <!-- Toolbar (satu baris) -->
+                    <div class="camera-toolbar">
+                        <div class="camera-search-wrap">
+                            <i class="bi bi-search camera-search-icon" aria-hidden="true"></i>
+                            <input id="cameraSearchInput" type="text" class="camera-search-input"
+                                placeholder="Cari nama kamera..." aria-label="Cari nama kamera">
+                        </div>
+                        <div class="camera-toolbar-actions">
+                            <!-- Dropdown Ekspor -->
+                            <div class="dropdown camera-export-dropdown">
+                                <button class="btn-camera-export dropdown-toggle" type="button"
+                                    data-bs-toggle="dropdown" aria-expanded="false" title="Ekspor daftar kamera">
+                                    <i class="bi bi-download"></i>
+                                    <span>Ekspor</span>
+                                    <i class="bi bi-chevron-down export-chevron"></i>
+                                </button>
+                                <ul class="dropdown-menu dropdown-menu-end shadow-sm">
+                                    <li>
+                                        <button type="button" class="dropdown-item d-flex align-items-center gap-2"
+                                            onclick="exportCameras('xspf')">
+                                            <i class="bi bi-filetype-xml"></i>
+                                            <span>Ekspor XSPF</span>
+                                        </button>
+                                    </li>
+                                    <li>
+                                        <button type="button" class="dropdown-item d-flex align-items-center gap-2"
+                                            onclick="exportCameras('excel')">
+                                            <i class="bi bi-file-earmark-spreadsheet"></i>
+                                            <span>Ekspor Excel</span>
+                                        </button>
+                                    </li>
+                                    <li>
+                                        <button type="button" class="dropdown-item d-flex align-items-center gap-2"
+                                            onclick="exportCameras('pdf')">
+                                            <i class="bi bi-file-earmark-pdf"></i>
+                                            <span>Download PDF</span>
+                                        </button>
+                                    </li>
+                                </ul>
+                            </div>
+
+                            <!-- Tombol Tambah Kamera (satu-satunya tombol berwarna solid) -->
+                            <button type="button" class="btn-add-camera-solid" onclick="openCameraModal()"
+                                title="Tambah Kamera Baru">
+                                <i class="bi bi-plus-lg"></i>
+                                <span>Tambah kamera</span>
+                            </button>
+                        </div>
                     </div>
-                </div>
-            </section>
+
+                    <!-- Wadah Tabel Kamera -->
+                    <div class="camera-table-responsive table-responsive">
+                        <table class="table align-middle mb-0 camera-monitoring-table">
+                            <thead>
+                                <tr>
+                                    <th class="col-num text-center">No</th>
+                                    <th class="col-name">Nama</th>
+                                    <th class="col-url">URL</th>
+                                    <th class="col-dir text-center">Arah</th>
+                                    <th class="col-status text-center">Status</th>
+                                    <th class="col-action text-end pe-3">Aksi</th>
+                                </tr>
+                            </thead>
+                            <tbody id="cameraTable">
+                                <tr>
+                                    <td colspan="6" class="text-center text-muted py-5">Memuat data kamera...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- Footer Tabel -->
+                    <div class="camera-table-footer d-flex justify-content-between align-items-center flex-wrap gap-2">
+                        <div class="camera-pagination-info text-muted" id="cameraPaginationInfo">Menampilkan 0 dari 0
+                            kamera</div>
+                        <div class="camera-pagination-nav d-flex gap-2 align-items-center">
+                            <button id="cameraPrevBtn" class="btn-page-nav" disabled aria-label="Halaman sebelumnya">
+                                <i class="bi bi-chevron-left"></i> Sebelumnya
+                            </button>
+                            <span id="cameraPageNumber" class="page-indicator">Hal 1</span>
+                            <button id="cameraNextBtn" class="btn-page-nav" disabled aria-label="Halaman selanjutnya">
+                                Selanjutnya <i class="bi bi-chevron-right"></i>
+                            </button>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Hidden element to maintain backwards compatibility -->
+                <span id="cameraCountTitle" style="display: none;">0</span>
+            </div>
 
             {% elif page == 'detections' %}
-            <section class="panel shadow-sm">
-                <div class="panel-header flex-wrap gap-3">
-                    <div>
-                        <h3>Hasil Deteksi Terpadu</h3>
-                        <p>Data gabungan plat kendaraan dan wajah/pejalan kaki dari seluruh kamera CCTV.</p>
+            <div class="detections-page-container">
+                <!-- Baris Judul Seksi: Judul & Deskripsi di kiri, Pencarian & Dropdown Ekspor di kanan (Satu Baris) -->
+                <div class="detection-header-row d-flex justify-content-between align-items-center flex-wrap gap-3">
+                    <div class="detection-title-block">
+                        <h3 class="detection-heading">Hasil deteksi terpadu</h3>
+                        <p class="detection-subheading">Data gabungan plat kendaraan dan wajah/pejalan kaki dari seluruh
+                            kamera CCTV</p>
                     </div>
-                    <div class="d-flex gap-2 align-items-center flex-nowrap">
-                        <div class="input-group input-group-sm" style="width: 240px;">
-                            <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
-                            <input id="detectionSearch" class="form-control" placeholder="Cari plat atau lokasi...">
+                    <div class="detection-top-toolbar d-flex align-items-center gap-2">
+                        <!-- Kolom Pencarian -->
+                        <div class="detection-search-wrap">
+                            <i class="bi bi-search detection-search-icon"></i>
+                            <input id="detectionSearch" type="text" class="detection-search-input"
+                                placeholder="Cari plat atau lokasi..." aria-label="Cari plat atau lokasi">
                         </div>
-                        <button type="button" class="btn-action-outline" onclick="exportDetections()">
-                            <i class="bi bi-file-earmark-spreadsheet"></i>
-                            <span>Ekspor Excel</span>
-                        </button>
-                        <button type="button" class="btn-action-outline" onclick="exportDetectionsPdf()">
-                            <i class="bi bi-file-earmark-pdf"></i>
-                            <span>Ekspor PDF</span>
-                        </button>
+
+                        <!-- Dropdown Ekspor -->
+                        <div class="dropdown detection-export-dropdown">
+                            <button type="button" class="btn-camera-export dropdown-toggle" data-bs-toggle="dropdown"
+                                aria-expanded="false" title="Ekspor Data">
+                                <i class="bi bi-download"></i>
+                                <span>Ekspor</span>
+                                <i class="bi bi-chevron-down export-chevron"></i>
+                            </button>
+                            <ul class="dropdown-menu dropdown-menu-end shadow-sm">
+                                <li>
+                                    <button type="button" id="exportDetectionsExcelBtn"
+                                        class="dropdown-item d-flex align-items-center gap-2"
+                                        onclick="exportDetections()">
+                                        <i class="bi bi-file-earmark-spreadsheet"></i>
+                                        <span>Ekspor Excel</span>
+                                    </button>
+                                </li>
+                                <li>
+                                    <button type="button" id="exportDetectionsPdfBtn"
+                                        class="dropdown-item d-flex align-items-center gap-2"
+                                        onclick="exportDetectionsPdf()">
+                                        <i class="bi bi-file-earmark-pdf"></i>
+                                        <span>Ekspor PDF</span>
+                                    </button>
+                                </li>
+                            </ul>
+                        </div>
                     </div>
                 </div>
 
-                <div class="filter-toolbar p-3 border-bottom bg-light d-flex gap-2 flex-wrap align-items-center">
-                    <div class="btn-group btn-group-sm" role="group" id="detTypeButtonGroup">
-                        <button type="button" class="btn btn-outline-primary active" data-type="all">Semua Tipe</button>
-                        <button type="button" class="btn btn-outline-primary" data-type="plate"><i class="bi bi-card-heading"></i> Plat Nomor</button>
-                        <button type="button" class="btn btn-outline-primary" data-type="face"><i class="bi bi-person"></i> Wajah / Orang</button>
-                    </div>
+                <!-- Baris Filter (Satu Blok Bersih) -->
+                <div class="detection-filter-card">
+                    <div class="detection-filter-container">
+                        <!-- Baris 1: Filter Tipe, Kamera, dan Status -->
+                        <div class="detection-filter-row detection-filter-row-primary">
+                            <!-- Segmented Control Tipe -->
+                            <div class="filter-col filter-col-type">
+                                <div class="segmented-control" role="group" id="detTypeButtonGroup"
+                                    aria-label="Filter tipe deteksi">
+                                    <button type="button" class="segmented-item active" data-type="all">Semua
+                                        tipe</button>
+                                    <button type="button" class="segmented-item" data-type="plate"><i
+                                            class="bi bi-card-heading"></i> Plat nomor</button>
+                                    <button type="button" class="segmented-item" data-type="face"><i
+                                            class="bi bi-person"></i> Wajah/orang</button>
+                                </div>
+                            </div>
 
-                    <select id="detCameraFilter" class="form-select form-select-sm" style="max-width: 180px;">
-                        <option value="">Semua Kamera</option>
-                    </select>
+                            <!-- Filter Kamera -->
+                            <div class="filter-col filter-col-camera">
+                                <select id="detCameraFilter" class="form-select filter-control-select"
+                                    aria-label="Pilih kamera">
+                                    <option value="">Semua Kamera</option>
+                                </select>
+                            </div>
 
-                    <select id="detStatusFilter" class="form-select form-select-sm" style="max-width: 160px;">
-                        <option value="all">Semua Status</option>
-                        <option value="1">Terbaca / Valid</option>
-                        <option value="2">Perlu Pemeriksaan</option>
-                        <option value="0">Gagal / Buram</option>
-                    </select>
+                            <!-- Filter Status -->
+                            <div class="filter-col filter-col-status">
+                                <select id="detStatusFilter" class="form-select filter-control-select"
+                                    aria-label="Pilih status deteksi">
+                                    <option value="all">Semua status</option>
+                                    <option value="1">Terbaca</option>
+                                    <option value="2">Perlu pemeriksaan</option>
+                                    <option value="0">Gagal</option>
+                                </select>
+                            </div>
+                        </div>
 
-                    <div class="date-filter-group d-flex align-items-center gap-2 flex-nowrap">
-                        <select id="detPeriodFilter" class="form-select form-select-sm" title="Filter periode deteksi">
-                            <option value="today">Hari Ini</option>
-                            <option value="2d">2 Hari</option>
-                            <option value="7d">7 Hari</option>
-                            <option value="30d">1 Bulan</option>
-                            <option value="all">Semua</option>
-                        </select>
+                        <!-- Baris 2: Periode, Rentang Tanggal, dan Aksi -->
+                        <div class="detection-filter-row detection-filter-row-secondary">
+                            <!-- Shortcut Periode -->
+                            <div class="filter-col filter-col-period">
+                                <select id="detPeriodFilter" class="form-select filter-control-select"
+                                    title="Filter periode deteksi" aria-label="Filter periode deteksi">
+                                    <option value="today">Hari ini</option>
+                                    <option value="2d">2 Hari</option>
+                                    <option value="7d">7 Hari</option>
+                                    <option value="30d">1 Bulan</option>
+                                    <option value="all">Semua</option>
+                                </select>
+                            </div>
 
-                        <input id="detStartDate" type="date" class="form-control form-control-sm" title="Tanggal mulai" aria-label="Tanggal mulai deteksi">
-                        <span class="small text-muted text-nowrap">sampai</span>
-                        <input id="detEndDate" type="date" class="form-control form-control-sm" title="Tanggal akhir" aria-label="Tanggal akhir deteksi">
-                        <button id="detDateApply" type="button" class="btn btn-primary btn-sm text-nowrap" title="Terapkan rentang tanggal">
-                            <i class="bi bi-funnel"></i> Terapkan
-                        </button>
-                        <button id="detResetBtn" type="button" class="btn btn-outline-secondary btn-sm text-nowrap" title="Reset semua filter">
-                            <i class="bi bi-arrow-counterclockwise"></i> Reset
-                        </button>
+                            <!-- Rentang Tanggal -->
+                            <div class="filter-col filter-col-date-range">
+                                <div class="detection-date-box">
+                                    <div class="date-picker-wrap">
+                                        <i class="bi bi-calendar3 date-picker-icon"></i>
+                                        <input id="detStartDate" type="date" class="form-control date-picker-input"
+                                            title="Tanggal mulai" aria-label="Tanggal mulai deteksi">
+                                    </div>
+                                    <span class="date-sep-text">sampai</span>
+                                    <div class="date-picker-wrap">
+                                        <i class="bi bi-calendar3 date-picker-icon"></i>
+                                        <input id="detEndDate" type="date" class="form-control date-picker-input"
+                                            title="Tanggal akhir" aria-label="Tanggal akhir deteksi">
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Tombol Aksi: Terapkan (Solid Aksen) & Reset (Sekunder) -->
+                            <div class="filter-col filter-col-actions">
+                                <button id="detDateApply" type="button" class="btn-apply-solid"
+                                    title="Terapkan rentang tanggal">
+                                    <i class="bi bi-funnel"></i>
+                                    <span>Terapkan</span>
+                                </button>
+                                <button id="detResetBtn" type="button" class="btn-reset-outline"
+                                    title="Reset semua filter">
+                                    <i class="bi bi-arrow-counterclockwise"></i>
+                                    <span>Reset</span>
+                                </button>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
-                <div class="table-responsive">
-                    <table class="table align-middle mb-0 playlist-table">
-                        <thead>
-                            <tr>
-                                <th style="width: 70px;">Foto</th>
-                                <th>Target / Nilai</th>
-                                <th>Tipe</th>
-                                <th>CCTV</th>
-                                <th>Confidence</th>
-                                <th>Waktu Deteksi</th>
-                                <th>Status</th>
-                                <th class="text-center" style="width: 80px;">Aksi</th>
-                            </tr>
-                        </thead>
-                        <tbody id="detectionTable">
-                            <tr>
-                                <td colspan="8" class="text-center text-muted py-5">Memuat data...</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
+                <!-- Wadah Tabel Hasil Deteksi -->
+                <div class="detection-table-card">
+                    <div class="detection-table-responsive table-responsive">
+                        <table class="table align-middle mb-0 detection-grid-table">
+                            <thead>
+                                <tr>
+                                    <th class="col-det-photo">Foto</th>
+                                    <th class="col-det-target">Target / nilai</th>
+                                    <th class="col-det-type">Tipe</th>
+                                    <th class="col-det-cctv">CCTV</th>
+                                    <th class="col-det-conf">Confidence</th>
+                                    <th class="col-det-time">Waktu deteksi</th>
+                                    <th class="col-det-status">Status</th>
+                                    <th class="col-det-action text-end pe-3">Aksi</th>
+                                </tr>
+                            </thead>
+                            <tbody id="detectionTable">
+                                <tr>
+                                    <td colspan="8" class="text-center text-muted py-5">Memuat data deteksi...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
 
-                <div class="panel-footer p-3 d-flex justify-content-between align-items-center flex-wrap gap-2 border-top">
-                    <div class="small text-muted" id="detPaginationInfo">Menampilkan 0 data</div>
-                    <div class="d-flex gap-2 align-items-center">
-                        <button id="detPrevBtn" class="btn btn-outline-secondary btn-sm" disabled>
-                            <i class="bi bi-chevron-left"></i> Sebelumnya
-                        </button>
-                        <span id="detPageNumber" class="small fw-bold px-2">Hal 1</span>
-                        <button id="detNextBtn" class="btn btn-outline-secondary btn-sm" disabled>
-                            Selanjutnya <i class="bi bi-chevron-right"></i>
-                        </button>
+                    <!-- Footer Tabel Pagination -->
+                    <div
+                        class="detection-table-footer d-flex justify-content-between align-items-center flex-wrap gap-2">
+                        <div class="detection-pagination-info text-muted" id="detPaginationInfo">Menampilkan 0 data
+                        </div>
+                        <div class="detection-pagination-nav d-flex gap-2 align-items-center">
+                            <button id="detPrevBtn" class="btn-page-nav" disabled aria-label="Halaman sebelumnya">
+                                <i class="bi bi-chevron-left"></i> Sebelumnya
+                            </button>
+                            <span id="detPageNumber" class="page-indicator">Hal 1</span>
+                            <button id="detNextBtn" class="btn-page-nav" disabled aria-label="Halaman selanjutnya">
+                                Selanjutnya <i class="bi bi-chevron-right"></i>
+                            </button>
+                        </div>
                     </div>
                 </div>
-            </section>
+            </div>
 
             {% elif page == 'history' %}
-            <section class="panel shadow-sm">
-                <div class="panel-header flex-wrap gap-3">
-                    <div>
-                        <h3>Riwayat Plat Nomor</h3>
-                        <p>Database pembacaan plat nomor kendaraan otomatis dari proses OCR.</p>
+            <div class="plate-history-page-container">
+                <!-- Baris Judul Seksi: Judul & Deskripsi di kiri, Pencarian & Dropdown Ekspor di kanan -->
+                <div class="detection-header-row d-flex justify-content-between align-items-center flex-wrap gap-3">
+                    <div class="detection-title-block">
+                        <h3 class="detection-heading">Riwayat plat nomor</h3>
+                        <p class="detection-subheading">Database pembacaan plat nomor kendaraan otomatis dari proses OCR
+                        </p>
                     </div>
-                    <div class="d-flex gap-2 align-items-center flex-nowrap">
-                        <div class="input-group input-group-sm" style="max-width: 180px;">
-                            <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
-                            <input id="plateSearch" class="form-control" placeholder="Cari plat (contoh: B 1234)...">
+                    <div class="detection-top-toolbar d-flex align-items-center gap-2">
+                        <!-- Kolom Pencarian -->
+                        <div class="detection-search-wrap plate-search-wrap">
+                            <i class="bi bi-search detection-search-icon"></i>
+                            <input id="plateSearch" type="text" class="detection-search-input"
+                                placeholder="Cari plat (contoh: B 1234)..." aria-label="Cari nomor plat">
                         </div>
-                        <button type="button" class="btn-action-outline" onclick="exportPlates()">
-                            <i class="bi bi-file-earmark-spreadsheet"></i>
-                            <span>Ekspor Excel</span>
-                        </button>
-                        <button type="button" class="btn-action-outline" onclick="exportPlatesPdf()">
-                            <i class="bi bi-file-earmark-pdf"></i>
-                            <span>Ekspor PDF</span>
-                        </button>
+
+                        <!-- Dropdown Ekspor -->
+                        <div class="dropdown detection-export-dropdown">
+                            <button type="button" class="btn-camera-export dropdown-toggle" data-bs-toggle="dropdown"
+                                aria-expanded="false" title="Ekspor Data">
+                                <i class="bi bi-download"></i>
+                                <span>Ekspor</span>
+                                <i class="bi bi-chevron-down export-chevron"></i>
+                            </button>
+                            <ul class="dropdown-menu dropdown-menu-end shadow-sm">
+                                <li>
+                                    <button type="button" id="exportPlatesExcelBtn"
+                                        class="dropdown-item d-flex align-items-center gap-2" onclick="exportPlates()">
+                                        <i class="bi bi-file-earmark-spreadsheet"></i>
+                                        <span>Ekspor Excel</span>
+                                    </button>
+                                </li>
+                                <li>
+                                    <button type="button" id="exportPlatesPdfBtn"
+                                        class="dropdown-item d-flex align-items-center gap-2"
+                                        onclick="exportPlatesPdf()">
+                                        <i class="bi bi-file-earmark-pdf"></i>
+                                        <span>Ekspor PDF</span>
+                                    </button>
+                                </li>
+                            </ul>
+                        </div>
                     </div>
                 </div>
 
-                <div class="filter-toolbar p-3 border-bottom bg-light d-flex gap-2 flex-wrap align-items-center">
-                    <select id="plateCameraFilter" class="form-select form-select-sm" style="max-width: 180px;">
-                        <option value="">Semua Kamera</option>
-                    </select>
+                <!-- Baris Filter (Satu Blok Bersih) -->
+                <div class="detection-filter-card">
+                    <div class="detection-filter-container">
+                        <!-- Baris 1: Filter Kamera, Status, dan Periode -->
+                        <div class="detection-filter-row detection-filter-row-primary">
+                            <div class="filter-col filter-col-camera">
+                                <select id="plateCameraFilter" class="form-select filter-control-select"
+                                    aria-label="Pilih kamera">
+                                    <option value="">Semua Kamera</option>
+                                </select>
+                            </div>
 
-                    <select id="plateStatusFilter" class="form-select form-select-sm" style="max-width: 160px;">
-                        <option value="all">Semua Status</option>
-                        <option value="1">Terbaca / Jelas</option>
-                        <option value="2">Perlu Cek</option>
-                        <option value="0">Gagal</option>
-                    </select>
+                            <div class="filter-col filter-col-status">
+                                <select id="plateStatusFilter" class="form-select filter-control-select"
+                                    aria-label="Pilih status deteksi">
+                                    <option value="all">Semua Status</option>
+                                    <option value="1">Terbaca</option>
+                                    <option value="2">Perlu Cek</option>
+                                    <option value="0">Gagal</option>
+                                </select>
+                            </div>
 
-                    <div class="date-filter-group d-flex align-items-center gap-2 flex-nowrap">
-                        <select id="platePeriodFilter" class="form-select form-select-sm" title="Filter periode riwayat">
-                            <option value="today">Hari Ini</option>
-                            <option value="2d">2 Hari</option>
-                            <option value="7d">7 Hari</option>
-                            <option value="30d">1 Bulan</option>
-                            <option value="all">Semua</option>
-                        </select>
+                            <div class="filter-col filter-col-period">
+                                <select id="platePeriodFilter" class="form-select filter-control-select"
+                                    title="Filter periode riwayat" aria-label="Filter periode riwayat">
+                                    <option value="today">Hari ini</option>
+                                    <option value="2d">2 Hari</option>
+                                    <option value="7d">7 Hari</option>
+                                    <option value="30d">1 Bulan</option>
+                                    <option value="all">Semua</option>
+                                </select>
+                            </div>
+                        </div>
 
-                        <input id="plateStartDate" type="date" class="form-control form-control-sm" title="Tanggal mulai" aria-label="Tanggal mulai riwayat">
-                        <span class="small text-muted text-nowrap">sampai</span>
-                        <input id="plateEndDate" type="date" class="form-control form-control-sm" title="Tanggal akhir" aria-label="Tanggal akhir riwayat">
-                        <button id="plateDateApply" type="button" class="btn btn-primary btn-sm text-nowrap" title="Terapkan rentang tanggal">
-                            <i class="bi bi-funnel"></i> Terapkan
-                        </button>
-                        <button id="plateResetBtn" type="button" class="btn btn-outline-secondary btn-sm text-nowrap" title="Reset semua filter">
-                            <i class="bi bi-arrow-counterclockwise"></i> Reset
-                        </button>
+                        <!-- Baris 2: Rentang Tanggal dan Tombol Aksi -->
+                        <div class="detection-filter-row detection-filter-row-secondary">
+                            <div class="filter-col filter-col-date-range">
+                                <div class="detection-date-box">
+                                    <div class="date-picker-wrap">
+                                        <i class="bi bi-calendar3 date-picker-icon"></i>
+                                        <input id="plateStartDate" type="date" class="form-control date-picker-input"
+                                            title="Tanggal mulai" aria-label="Tanggal mulai riwayat">
+                                    </div>
+                                    <span class="date-sep-text">sampai</span>
+                                    <div class="date-picker-wrap">
+                                        <i class="bi bi-calendar3 date-picker-icon"></i>
+                                        <input id="plateEndDate" type="date" class="form-control date-picker-input"
+                                            title="Tanggal akhir" aria-label="Tanggal akhir riwayat">
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="filter-col filter-col-actions">
+                                <button id="plateDateApply" type="button" class="btn-apply-solid"
+                                    title="Terapkan rentang tanggal">
+                                    <i class="bi bi-funnel"></i>
+                                    <span>Terapkan</span>
+                                </button>
+                                <button id="plateResetBtn" type="button" class="btn-reset-outline"
+                                    title="Reset semua filter">
+                                    <i class="bi bi-arrow-counterclockwise"></i>
+                                    <span>Reset</span>
+                                </button>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
-                <div class="table-responsive">
-                    <table class="table align-middle mb-0">
-                        <thead>
-                            <tr>
-                                <th style="width: 70px;">Crop</th>
-                                <th>Nomor Plat</th>
-                                <th>Lokasi CCTV</th>
-                                <th>Confidence</th>
-                                <th>Waktu Terdeteksi</th>
-                                <th>Status</th>
-                                <th class="text-center" style="width: 80px;">Foto</th>
-                            </tr>
-                        </thead>
-                        <tbody id="plateHistoryTable">
-                            <tr>
-                                <td colspan="7" class="text-center text-muted py-5">Memuat data riwayat...</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
+                <!-- Wadah Tabel Riwayat Plat -->
+                <div class="detection-table-card">
+                    <div class="detection-table-responsive table-responsive">
+                        <table class="table align-middle mb-0 detection-grid-table plate-history-table">
+                            <thead>
+                                <tr>
+                                    <th class="col-plate-crop">Crop</th>
+                                    <th class="col-plate-number">Nomor plat</th>
+                                    <th class="col-plate-cctv">Lokasi CCTV</th>
+                                    <th class="col-plate-conf">Confidence</th>
+                                    <th class="col-plate-time">Waktu terdeteksi</th>
+                                    <th class="col-plate-status">Status</th>
+                                    <th class="col-plate-action text-end pe-3">Aksi</th>
+                                </tr>
+                            </thead>
+                            <tbody id="plateHistoryTable">
+                                <tr>
+                                    <td colspan="7" class="text-center text-muted py-5">Memuat data riwayat...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
 
-                <div class="panel-footer p-3 d-flex justify-content-between align-items-center flex-wrap gap-2 border-top">
-                    <div class="small text-muted" id="platePaginationInfo">Menampilkan 0 data</div>
-                    <div class="d-flex gap-2 align-items-center">
-                        <button id="platePrevBtn" class="btn btn-outline-secondary btn-sm" disabled>
-                            <i class="bi bi-chevron-left"></i> Sebelumnya
-                        </button>
-                        <span id="platePageNumber" class="small fw-bold px-2">Hal 1</span>
-                        <button id="plateNextBtn" class="btn btn-outline-secondary btn-sm" disabled>
-                            Selanjutnya <i class="bi bi-chevron-right"></i>
-                        </button>
+                    <!-- Footer Tabel Pagination -->
+                    <div
+                        class="detection-table-footer d-flex justify-content-between align-items-center flex-wrap gap-2">
+                        <div class="detection-pagination-info text-muted" id="platePaginationInfo">Menampilkan 0 data
+                        </div>
+                        <div class="detection-pagination-nav d-flex gap-2 align-items-center">
+                            <button id="platePrevBtn" class="btn-page-nav" disabled aria-label="Halaman sebelumnya">
+                                <i class="bi bi-chevron-left"></i> Sebelumnya
+                            </button>
+                            <span id="platePageNumber" class="page-indicator">Hal 1</span>
+                            <button id="plateNextBtn" class="btn-page-nav" disabled aria-label="Halaman selanjutnya">
+                                Selanjutnya <i class="bi bi-chevron-right"></i>
+                            </button>
+                        </div>
                     </div>
                 </div>
-            </section>
+            </div>
 
             {% elif page == 'recap' %}
-            <div class="analytics-page" id="recapPage">
-                <section class="panel shadow-sm mb-4">
-                    <div class="panel-header flex-wrap gap-3" style="justify-content: flex-end;">
-                        <div class="flex-grow-1" style="padding-left: 5px;">
-                            <h3 class="mb-1" style="font-size: 18px; font-weight: 700;">
-                                Rekapitulasi Data
-                            </h3>
-                            <p class="mb-0" style="font-size: 11px;">
-                                Ringkasan data hasil deteksi kendaraan dan pembacaan plat nomor dari sistem CCTV.
-                            </p>
+            <div class="recap-page-container" id="recapPage">
+                <!-- Baris Judul Seksi: Judul & Deskripsi di kiri, Pencarian & Dropdown Ekspor di kanan -->
+                <div class="detection-header-row d-flex justify-content-between align-items-center flex-wrap gap-3">
+                    <div class="detection-title-block">
+                        <h3 class="detection-heading">Rekapitulasi data</h3>
+                        <p class="detection-subheading">Ringkasan data hasil deteksi kendaraan dan pembacaan plat nomor
+                            dari sistem CCTV</p>
+                    </div>
+                    <div class="detection-top-toolbar d-flex align-items-center gap-2">
+                        <!-- Kolom Pencarian -->
+                        <div class="detection-search-wrap recap-search-wrap">
+                            <i class="bi bi-search detection-search-icon"></i>
+                            <input id="recapSearch" type="text" class="detection-search-input" placeholder="Cari..."
+                                aria-label="Cari rekapitulasi">
                         </div>
-                        <div class="d-flex gap-2 align-items-center flex-nowrap">
-                            <div class="input-group input-group-sm" style="max-width: 180px;">
-                                <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
-                                <input id="recapSearch" class="form-control" placeholder="Cari...">
-                            </div>
-                            <button id="recapExport" type="button" class="btn-action-outline">
-                                <i class="bi bi-file-earmark-spreadsheet"></i>
-                                <span>Ekspor Excel</span>
+
+                        <!-- Dropdown Ekspor -->
+                        <div class="dropdown detection-export-dropdown">
+                            <button type="button" class="btn-camera-export dropdown-toggle" data-bs-toggle="dropdown"
+                                aria-expanded="false" title="Ekspor Data">
+                                <i class="bi bi-download"></i>
+                                <span>Ekspor</span>
+                                <i class="bi bi-chevron-down export-chevron"></i>
                             </button>
-                            <button id="recapExportPdf" type="button" class="btn-action-outline">
-                                <i class="bi bi-file-earmark-pdf"></i>
-                                <span>Ekspor PDF</span>
-                            </button>
+                            <ul class="dropdown-menu dropdown-menu-end shadow-sm">
+                                <li>
+                                    <button type="button" id="recapExport"
+                                        class="dropdown-item d-flex align-items-center gap-2" onclick="exportRecap()">
+                                        <i class="bi bi-file-earmark-spreadsheet"></i>
+                                        <span>Ekspor Excel</span>
+                                    </button>
+                                </li>
+                                <li>
+                                    <button type="button" id="recapExportPdf"
+                                        class="dropdown-item d-flex align-items-center gap-2"
+                                        onclick="exportRecapPdf()">
+                                        <i class="bi bi-file-earmark-pdf"></i>
+                                        <span>Ekspor PDF</span>
+                                    </button>
+                                </li>
+                            </ul>
                         </div>
                     </div>
+                </div>
 
-                    <div class="filter-toolbar p-3 border-bottom bg-light d-flex gap-2 flex-wrap align-items-center">
-                        <select id="recapCamera" class="form-select form-select-sm" style="max-width: 180px;">
-                            <option value="">Semua Kamera</option>
-                        </select>
+                <!-- Baris Filter (Satu Blok Bersih Sejajar) -->
+                <div class="recap-filter-card">
+                    <div class="recap-filter-row">
+                        <!-- Filter Kamera -->
+                        <div class="filter-col recap-filter-cam">
+                            <select id="recapCamera" class="form-select filter-control-select"
+                                aria-label="Pilih kamera">
+                                <option value="">Semua Kamera</option>
+                            </select>
+                        </div>
 
-                        <select id="recapObjectType" class="form-select form-select-sm" style="max-width: 160px;" title="Filter status deteksi">
-                            <option value="">Semua Status</option>
-                            <option value="1">Terbaca / Jelas</option>
-                            <option value="2">Perlu Cek</option>
-                            <option value="0">Gagal</option>
-                        </select>
+                        <!-- Filter Status -->
+                        <div class="filter-col recap-filter-status">
+                            <select id="recapObjectType" class="form-select filter-control-select"
+                                title="Filter status deteksi" aria-label="Filter status deteksi">
+                                <option value="">Semua Status</option>
+                                <option value="1">Terbaca / Jelas</option>
+                                <option value="2">Perlu Cek</option>
+                                <option value="0">Gagal</option>
+                            </select>
+                        </div>
 
-                        <div class="date-filter-group d-flex align-items-center gap-2 flex-nowrap">
-                            <select id="recapPeriod" class="form-select form-select-sm" title="Filter periode rekapitulasi">
+                        <!-- Periode Cepat -->
+                        <div class="filter-col recap-filter-period">
+                            <select id="recapPeriod" class="form-select filter-control-select"
+                                title="Filter periode rekapitulasi" aria-label="Filter periode rekapitulasi">
                                 <option value="today">Hari ini</option>
                                 <option value="7d">7 hari terakhir</option>
                                 <option value="30d">30 hari terakhir</option>
                                 <option value="all">Semua waktu</option>
                                 <option value="custom">Kustom tanggal</option>
                             </select>
-
-                            <input id="recapStart" type="date" class="form-control form-control-sm" title="Tanggal mulai" aria-label="Tanggal mulai rekapitulasi">
-                            <span class="small text-muted text-nowrap">sampai</span>
-                            <input id="recapEnd" type="date" class="form-control form-control-sm" title="Tanggal akhir" aria-label="Tanggal akhir rekapitulasi">
                         </div>
 
-                        <button id="recapApply" type="button" class="btn btn-primary btn-sm text-nowrap" title="Terapkan filter">
-                            <i class="bi bi-funnel"></i> Terapkan
-                        </button>
-                        <button id="recapResetBtn" type="button" class="btn btn-outline-secondary btn-sm text-nowrap" title="Reset semua filter">
-                            <i class="bi bi-arrow-counterclockwise"></i> Reset
-                        </button>
+                        <!-- Rentang Tanggal -->
+                        <div class="filter-col recap-filter-dates">
+                            <div class="detection-date-box">
+                                <div class="date-picker-wrap">
+                                    <i class="bi bi-calendar3 date-picker-icon"></i>
+                                    <input id="recapStart" type="date" class="form-control date-picker-input"
+                                        title="Tanggal mulai" aria-label="Tanggal mulai rekapitulasi">
+                                </div>
+                                <span class="date-sep-text">sampai</span>
+                                <div class="date-picker-wrap">
+                                    <i class="bi bi-calendar3 date-picker-icon"></i>
+                                    <input id="recapEnd" type="date" class="form-control date-picker-input"
+                                        title="Tanggal akhir" aria-label="Tanggal akhir rekapitulasi">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Tombol Aksi Terapkan & Reset (Tetap Berpasangan) -->
+                        <div class="filter-col recap-filter-actions">
+                            <button id="recapApply" type="button" class="btn-apply-solid" title="Terapkan filter">
+                                <i class="bi bi-funnel"></i>
+                                <span>Terapkan</span>
+                            </button>
+                            <button id="recapResetBtn" type="button" class="btn-reset-outline"
+                                title="Reset semua filter">
+                                <i class="bi bi-arrow-counterclockwise"></i>
+                                <span>Reset</span>
+                            </button>
+                        </div>
                     </div>
-                </section>
-                <div class="row g-3 mb-4" id="recapTotals"></div>
-                <div class="panel shadow-sm mb-4"><div class="panel-header"><div><h3>Rekap per CCTV / Gerbang</h3><p>Agregasi berasal dari event deteksi database dan tidak menghitung frame mentah.</p></div></div><div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th>CCTV / Gerbang</th><th>Arah</th><th>Kendaraan</th><th>Orang</th><th>Plat unik</th><th>Status</th></tr></thead><tbody id="recapCameraTable"><tr><td colspan="6" class="text-center text-muted py-4">Memuat data...</td></tr></tbody></table></div></div>
-                <div class="panel shadow-sm"><div class="panel-header"><div><h3>Total per Hari</h3><p>Jumlah kendaraan, plat unik, arah, dan orang pada periode terpilih.</p></div></div><div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th>Tanggal</th><th>Kendaraan</th><th>Plat unik</th><th>Masuk</th><th>Keluar</th><th>Orang</th></tr></thead><tbody id="recapDailyTable"><tr><td colspan="6" class="text-center text-muted py-4">Memuat data...</td></tr></tbody></table></div></div>
+                </div>
+
+                <!-- Enam Kartu Angka (Dua Grup: Kendaraan & Orang) -->
+                <div id="recapTotals" class="recap-metrics-container">
+                    <!-- Di-render oleh JavaScript loadRecap() -->
+                </div>
+
+                <!-- Tabel 1: Rekap per CCTV / Gerbang -->
+                <div class="recap-table-section">
+                    <div class="recap-table-header-block">
+                        <h4 class="recap-table-title">Rekap per CCTV / gerbang</h4>
+                        <p class="recap-table-desc">Agregasi berasal dari event deteksi database dan tidak menghitung
+                            frame mentah.</p>
+                    </div>
+                    <div class="recap-table-card">
+                        <div class="recap-table-responsive">
+                            <table class="detection-grid-table recap-grid-table">
+                                <thead>
+                                    <tr>
+                                        <th class="text-start">CCTV / Gerbang</th>
+                                        <th class="text-start">Arah</th>
+                                        <th class="text-end">Kendaraan</th>
+                                        <th class="text-end">Orang</th>
+                                        <th class="text-end">Plat unik</th>
+                                        <th class="text-start">Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="recapCameraTable">
+                                    <tr>
+                                        <td colspan="6" class="text-center text-muted py-4">Memuat data...</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tabel 2: Total per Hari -->
+                <div class="recap-table-section">
+                    <div class="recap-table-header-block">
+                        <h4 class="recap-table-title">Total per hari</h4>
+                        <p class="recap-table-desc">Jumlah kendaraan, plat unik, arah, dan orang pada periode terpilih.
+                        </p>
+                    </div>
+                    <div class="recap-table-card">
+                        <div class="recap-table-responsive">
+                            <table class="detection-grid-table recap-grid-table">
+                                <thead>
+                                    <tr>
+                                        <th class="text-start">Tanggal</th>
+                                        <th class="text-end">Kendaraan</th>
+                                        <th class="text-end">Plat unik</th>
+                                        <th class="text-end">Masuk</th>
+                                        <th class="text-end">Keluar</th>
+                                        <th class="text-end">Orang</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="recapDailyTable">
+                                    <tr>
+                                        <td colspan="6" class="text-center text-muted py-4">Memuat data...</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             {% elif page == 'statistics' %}
-            <div class="statistics-enterprise-container">
-                <section class="panel shadow-sm mb-4">
-                    <div class="panel-header flex-wrap gap-3" style="justify-content: flex-end;">
-                        <div class="flex-grow-1" style="padding-left: 5px;">
-                            <h3 class="mb-1" style="font-size: 18px; font-weight: 700;">
-                                Statistika Deteksi
-                            </h3>
-                            <p class="mb-0" style="font-size: 11px;">
-                                Informasi statistik hasil deteksi kendaraan dan pembacaan plat nomor berdasarkan data yang tercatat.
-                            </p>
-                        </div>
-                        <div class="d-flex gap-2 align-items-center flex-nowrap">
-                            <div class="input-group input-group-sm" style="max-width: 180px;">
-                                <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
-                                <input id="statsSearch" class="form-control" placeholder="Cari...">
-                            </div>
-                            <button type="button" class="btn-action-outline" onclick="exportStatsReport()" title="Ekspor Excel">
-                                <i class="bi bi-file-earmark-spreadsheet"></i>
-                                <span>Ekspor Excel</span>
+            <div class="statistics-page-container" id="statisticsPage">
+                <!-- 1. Toolbar (Pencarian & Ekspor Satu Baris) -->
+                <div class="stats-toolbar">
+                    <div class="stats-search-wrap">
+                        <i class="bi bi-search stats-search-icon" aria-hidden="true"></i>
+                        <input id="statsSearch" type="text" class="stats-search-input"
+                            placeholder="Cari plat nomor atau kamera..." aria-label="Cari plat nomor atau kamera">
+                    </div>
+                    <div class="stats-toolbar-actions">
+                        <div class="dropdown detection-export-dropdown">
+                            <button class="btn-camera-export dropdown-toggle" type="button" data-bs-toggle="dropdown"
+                                aria-expanded="false" title="Ekspor Laporan Statistik">
+                                <i class="bi bi-download"></i>
+                                <span>Ekspor</span>
+                                <i class="bi bi-chevron-down export-chevron"></i>
                             </button>
-                            <button type="button" class="btn-action-outline" onclick="exportStatsPdf()" title="Download Laporan PDF">
-                                <i class="bi bi-file-earmark-pdf"></i>
-                                <span>Ekspor PDF</span>
-                            </button>
+                            <ul class="dropdown-menu dropdown-menu-end shadow-sm">
+                                <li>
+                                    <button type="button" id="statsExportExcelBtn"
+                                        class="dropdown-item d-flex align-items-center gap-2"
+                                        onclick="exportStatsReport()">
+                                        <i class="bi bi-file-earmark-spreadsheet"></i>
+                                        <span>Ekspor Excel</span>
+                                    </button>
+                                </li>
+                                <li>
+                                    <button type="button" id="statsExportPdfBtn"
+                                        class="dropdown-item d-flex align-items-center gap-2"
+                                        onclick="exportStatsPdf()">
+                                        <i class="bi bi-file-earmark-pdf"></i>
+                                        <span>Ekspor PDF</span>
+                                    </button>
+                                </li>
+                            </ul>
                         </div>
                     </div>
+                </div>
 
-                    <div class="filter-toolbar p-3 border-bottom bg-light d-flex gap-2 flex-wrap align-items-center">
-                        <select id="statsCamera" class="form-select form-select-sm" style="max-width: 180px;">
-                            <option value="">Semua Kamera</option>
-                        </select>
-
-                        <select id="statsObjectType" class="form-select form-select-sm" style="max-width: 160px;" title="Filter status deteksi">
-                            <option value="">Semua Status</option>
-                            <option value="1">Terbaca / Jelas</option>
-                            <option value="2">Perlu Cek</option>
-                            <option value="0">Gagal</option>
-                        </select>
-
-                        <div class="date-filter-group d-flex align-items-center gap-2 flex-nowrap">
-                            <select id="statsPeriod" class="form-select form-select-sm" title="Filter periode statistik">
+                <!-- 2. Blok Filter (DUA Baris, Tersusun Rapi) -->
+                <div class="stats-filter-card">
+                    <!-- Baris 1: Dropdown Semua Kamera, Semua Status, Periode Cepat -->
+                    <div class="stats-filter-row">
+                        <div class="filter-col stats-col-cam">
+                            <select id="statsCamera" class="form-select filter-control-select"
+                                aria-label="Pilih kamera">
+                                <option value="">Semua Kamera</option>
+                            </select>
+                        </div>
+                        <div class="filter-col stats-col-status">
+                            <select id="statsObjectType" class="form-select filter-control-select"
+                                title="Filter status deteksi" aria-label="Filter status deteksi">
+                                <option value="">Semua Status</option>
+                                <option value="1">Terbaca / Jelas</option>
+                                <option value="2">Perlu Cek</option>
+                                <option value="0">Gagal</option>
+                            </select>
+                        </div>
+                        <div class="filter-col stats-col-period">
+                            <select id="statsPeriod" class="form-select filter-control-select"
+                                title="Filter periode statistik" aria-label="Filter periode statistik">
                                 <option value="today">Hari ini</option>
                                 <option value="7d">7 hari terakhir</option>
                                 <option value="30d">30 hari terakhir</option>
                                 <option value="all">Semua waktu</option>
                                 <option value="custom">Kustom tanggal</option>
                             </select>
-
-                            <input id="statsStart" type="date" class="form-control form-control-sm" title="Tanggal mulai" aria-label="Tanggal mulai statistik">
-                            <span class="small text-muted text-nowrap">sampai</span>
-                            <input id="statsEnd" type="date" class="form-control form-control-sm" title="Tanggal akhir" aria-label="Tanggal akhir statistik">
-                        </div>
-
-                        <button id="statsApply" type="button" class="btn btn-primary btn-sm text-nowrap" title="Terapkan filter">
-                            <i class="bi bi-funnel"></i> Terapkan
-                        </button>
-                        <button id="statsResetBtn" type="button" class="btn btn-outline-secondary btn-sm text-nowrap" title="Reset semua filter">
-                            <i class="bi bi-arrow-counterclockwise"></i> Reset
-                        </button>
-                    </div>
-                </section>
-
-                
-
-                <div class="row g-3 mb-4">
-                    <div class="col-xl-2 col-md-4 col-sm-6 col-12">
-                        <div class="stat-card p-3 h-100 shadow-sm">
-                            <div class="stat-icon blue"><i class="bi bi-activity"></i></div>
-                            <div class="w-100">
-                                <span class="text-muted small">Total Deteksi</span>
-                                <strong id="kpiTotalDets" class="fs-4 d-block my-1">0</strong>
-                                <small class="text-success"><i class="bi bi-arrow-up-right"></i> Volume aktivitas</small>
-                            </div>
                         </div>
                     </div>
-                    <div class="col-xl-2 col-md-4 col-sm-6 col-12">
-                        <div class="stat-card p-3 h-100 shadow-sm">
-                            <div class="stat-icon green"><i class="bi bi-card-heading"></i></div>
-                            <div class="w-100">
-                                <span class="text-muted small">Deteksi Plat</span>
-                                <strong id="kpiTotalPlates" class="fs-4 d-block my-1">0</strong>
-                                <small class="text-muted">Read Rate: <b id="kpiPlateRate" class="text-success">0%</b></small>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="col-xl-2 col-md-4 col-sm-6 col-12">
-                        <div class="stat-card p-3 h-100 shadow-sm">
-                            <div class="stat-icon purple"><i class="bi bi-people-fill"></i></div>
-                            <div class="w-100">
-                                <span class="text-muted small">Wajah / Pengendara</span>
-                                <strong id="kpiTotalFaces" class="fs-4 d-block my-1">0</strong>
-                                <small class="text-muted">Total orang terpantau</small>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="col-xl-2 col-md-4 col-sm-6 col-12">
-                        <div class="stat-card p-3 h-100 shadow-sm">
-                            <div class="stat-icon green"><i class="bi bi-camera-video-fill"></i></div>
-                            <div class="w-100">
-                                <span class="text-muted small">Ketersediaan CCTV</span>
-                                <strong id="kpiCamStatus" class="fs-4 d-block my-1">0 / 0</strong>
-                                <small class="text-muted">Uptime: <b id="kpiCamUptime">0%</b></small>
-                            </div>
-                        </div>
-                    </div>
-                </div>
 
-                <div class="mb-4">
-                    <div class="row g-3 mb-2">
-                        <div class="col-6">
-                            <h6 class="text-muted text-uppercase small fw-semibold mb-0">Rincian Masuk</h6>
-                        </div>
-                        <div class="col-6">
-                            <h6 class="text-muted text-uppercase small fw-semibold mb-0">Rincian Keluar</h6>
-                        </div>
-                    </div>
-                    <div class="row g-3" id="statsBreakdown"></div>
-                </div>
-
-                <div class="row g-4 mb-4">
-                    <div class="col-xl-7 col-lg-6">
-                        <div class="panel p-4 shadow-sm h-100">
-                            <div class="d-flex justify-content-between align-items-center mb-3">
-                                <div>
-                                    <h4 class="fw-bold mb-1">Beban Lalu Lintas per Titik CCTV</h4>
-                                    <p class="text-muted small mb-0">Intensitas aktivitas kendaraan dan pejalan kaki per kamera.</p>
+                    <!-- Baris 2: Input Tanggal Awal, sampai, Tanggal Akhir, Terapkan, Reset -->
+                    <div class="stats-filter-row">
+                        <div class="filter-col stats-col-dates">
+                            <div class="detection-date-box">
+                                <div class="date-picker-wrap">
+                                    <i class="bi bi-calendar3 date-picker-icon"></i>
+                                    <input id="statsStart" type="date" class="form-control date-picker-input"
+                                        title="Tanggal mulai" aria-label="Tanggal mulai statistik">
+                                </div>
+                                <span class="date-sep-text">sampai</span>
+                                <div class="date-picker-wrap">
+                                    <i class="bi bi-calendar3 date-picker-icon"></i>
+                                    <input id="statsEnd" type="date" class="form-control date-picker-input"
+                                        title="Tanggal akhir" aria-label="Tanggal akhir statistik">
                                 </div>
                             </div>
-                            <div style="position: relative; height: 260px; width: 100%;">
+                        </div>
+                        <div class="filter-col stats-col-actions">
+                            <button id="statsApply" type="button" class="btn-apply-solid" title="Terapkan filter">
+                                <i class="bi bi-funnel"></i>
+                                <span>Terapkan</span>
+                            </button>
+                            <button id="statsResetBtn" type="button" class="btn-reset-outline"
+                                title="Reset semua filter">
+                                <i class="bi bi-arrow-counterclockwise"></i>
+                                <span>Reset</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 3. Empat Kartu Metrik (Gaya Dashboard, 4 Kolom Penuh) -->
+                <div class="stats-metrics-grid">
+                    <!-- Total Deteksi -->
+                    <div class="dashboard-metric-card stats-metric-card">
+                        <div class="metric-card-content">
+                            <span class="metric-card-label">Total deteksi</span>
+                            <strong id="kpiTotalDets" class="metric-card-value">0</strong>
+                            <span class="metric-card-sub"><i class="bi bi-arrow-up-right"></i> Volume aktivitas</span>
+                        </div>
+                        <div class="metric-card-icon-wrap">
+                            <i class="bi bi-activity"></i>
+                        </div>
+                    </div>
+
+                    <!-- Deteksi Plat -->
+                    <div class="dashboard-metric-card stats-metric-card">
+                        <div class="metric-card-content">
+                            <span class="metric-card-label">Deteksi plat</span>
+                            <strong id="kpiTotalPlates" class="metric-card-value">0</strong>
+                            <span class="metric-card-sub">Read rate: <b id="kpiPlateRate">0%</b></span>
+                        </div>
+                        <div class="metric-card-icon-wrap">
+                            <i class="bi bi-card-heading"></i>
+                        </div>
+                    </div>
+
+                    <!-- Wajah / Pengendara -->
+                    <div class="dashboard-metric-card stats-metric-card">
+                        <div class="metric-card-content">
+                            <span class="metric-    card-label">Wajah / pengendara</span>
+                            <strong id="kpiTotalFaces" class="metric-card-value">0</strong>
+                            <span class="metric-card-sub">Total orang terpantau</span>
+                        </div>
+                        <div class="metric-card-icon-wrap">
+                            <i class="bi bi-people"></i>
+                        </div>
+                    </div>
+
+                    <!-- Ketersediaan CCTV -->
+                    <div class="dashboard-metric-card stats-metric-card">
+                        <div class="metric-card-content">
+                            <span class="metric-card-label">Ketersediaan CCTV</span>
+                            <strong id="kpiCamStatus" class="metric-card-value">0 / 0</strong>
+                            <span class="metric-card-sub">Uptime: <b id="kpiCamUptime">0%</b></span>
+                        </div>
+                        <div class="metric-card-icon-wrap">
+                            <i class="bi bi-camera-video"></i>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 4. Dua Grup Rincian: Rincian Masuk & Rincian Keluar (Berdampingan) -->
+                <div class="stats-breakdown-wrapper" id="statsBreakdown">
+                    <!-- Di-render / diperbarui oleh JavaScript (loadEnterpriseStatistics) -->
+                </div>
+
+                <!-- 5. Baris Dua Kolom: Panel Grafik (~63%) & Panel Jam Sibuk (~37%) -->
+                <div class="stats-panels-row">
+                    <!-- Panel Grafik: Beban Lalu Lintas per Titik CCTV -->
+                    <div class="stats-panel-chart-col">
+                        <div class="dashboard-panel stats-panel-card h-100">
+                            <div class="dashboard-panel-header stats-panel-header">
+                                <div class="dashboard-panel-header-title">
+                                    <h4 class="dashboard-panel-title">Beban lalu lintas per titik CCTV</h4>
+                                    <p class="dashboard-panel-desc">Intensitas aktivitas kendaraan dan pejalan kaki per
+                                        kamera.</p>
+                                </div>
+                            </div>
+                            <div class="stats-chart-container">
                                 <canvas id="cameraBarCanvas"></canvas>
                             </div>
                         </div>
                     </div>
-                    <div class="col-xl-5 col-lg-6">
-                        <div class="panel p-4 shadow-sm h-100">
-                            <div class="d-flex justify-content-between align-items-center mb-3">
-                                <div>
-                                    <h4 class="fw-bold mb-1">Analisis Jam Sibuk (Peak Hours)</h4>
-                                    <p class="text-muted small mb-0">Waktu dengan kepadatan lalu lintas tertinggi.</p>
+
+                    <!-- Panel Jam Sibuk: Analisis Jam Sibuk (Peak Hours) -->
+                    <div class="stats-panel-peak-col">
+                        <div class="dashboard-panel stats-panel-card h-100">
+                            <div
+                                class="dashboard-panel-header stats-panel-header d-flex justify-content-between align-items-center">
+                                <div class="dashboard-panel-header-title">
+                                    <h4 class="dashboard-panel-title">Analisis jam sibuk</h4>
+                                    <p class="dashboard-panel-desc">Waktu dengan kepadatan lalu lintas tertinggi.</p>
                                 </div>
-                                <span class="badge bg-danger-subtle text-danger border border-danger-subtle"><i class="bi bi-clock-history"></i> Peak Time</span>
+                                <span class="badge-peak-pill">Peak time</span>
                             </div>
-                            <div id="peakHoursList" class="d-flex flex-column gap-3 mt-3">
-                                <div class="text-muted text-center py-4">Memuat data jam sibuk...</div>
+                            <div class="stats-peak-body" id="peakHoursList">
+                                <div class="stats-peak-empty text-muted">Memuat data jam sibuk...</div>
                             </div>
                         </div>
                     </div>
                 </div>
-                <div class="panel shadow-sm p-4">
-                    <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
-                        <div>
-                            <h4 class="fw-bold mb-1">Top 10 Kendaraan / Plat Paling Sering Terdeteksi</h4>
-                            <p class="text-muted small mb-0">Frekuensi kemunculan kendaraan keluar-masuk area pemantauan.</p>
-                        </div>
+
+                <!-- 6. Tabel Top 10 Kendaraan / Plat Paling Sering Terdeteksi -->
+                <div class="stats-table-section">
+                    <div class="recap-table-header-block">
+                        <h4 class="recap-table-title">Top 10 kendaraan / plat paling sering terdeteksi</h4>
+                        <p class="recap-table-desc">Frekuensi kemunculan kendaraan keluar-masuk area pemantauan.</p>
                     </div>
-                    <div class="table-responsive">
-                        <table class="table align-middle mb-0">
-                            <thead>
-                                <tr>
-                                    <th style="width: 60px;">#</th>
-                                    <th>Nomor Plat</th>
-                                    <th>Frekuensi Melintas</th>
-                                    <th>Kamera Terakhir</th>
-                                    <th>Waktu Terakhir Terlihat</th>
-                                    <th>Akurasi Rata-rata</th>
-                                    <th>Status Terakhir</th>
-                                </tr>
-                            </thead>
-                            <tbody id="topPlatesTable">
-                                <tr>
-                                    <td colspan="7" class="text-center text-muted py-4">Memuat data kendaraan...</td>
-                                </tr>
-                            </tbody>
-                        </table>
+                    <div class="recap-table-card">
+                        <div class="recap-table-responsive">
+                            <table class="detection-grid-table recap-grid-table stats-top-table">
+                                <thead>
+                                    <tr>
+                                        <th class="text-center" style="width: 46px;">#</th>
+                                        <th class="text-start">Nomor Plat</th>
+                                        <th class="text-end">Frekuensi Melintas</th>
+                                        <th class="text-start">Kamera Terakhir</th>
+                                        <th class="text-start">Waktu Terakhir Terlihat</th>
+                                        <th class="text-end">Akurasi Rata-rata</th>
+                                        <th class="text-start">Status Terakhir</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="topPlatesTable">
+                                    <tr>
+                                        <td colspan="7" class="text-center text-muted py-4">Memuat data kendaraan...
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
                 </div>
             </div>
 
             {% elif page == 'zones' %}
-            <section class="panel shadow-sm">
-                <div class="panel-header flex-wrap gap-3">
-                    <div>
-                        <h3><i class="bi bi-bounding-box"></i> Editor Zona Deteksi</h3>
-                        <p>Atur zona deteksi MID (orang + kendaraan) & NEAR (plat + OCR) untuk setiap kamera CCTV.</p>
+            <div class="zone-page-container" id="zonePage">
+                <!-- 1. Judul Seksi & Deskripsi -->
+                <div class="zone-header-block">
+                    <div class="zone-header-title-wrap">
+                        <i class="bi bi-bounding-box zone-header-icon" aria-hidden="true"></i>
+                        <h3 class="zone-header-title">Editor zona deteksi</h3>
                     </div>
-                    <div class="d-flex gap-2 align-items-center flex-wrap">
-                        <select id="zoneCameraSelect" class="form-select form-select-sm" style="width: 220px;"></select>
-                        <button type="button" class="btn-action-outline" onclick="refreshFrame()" title="Muat ulang frame CCTV">
-                            <i class="bi bi-arrow-clockwise"></i> Refresh Frame
+                    <p class="zone-header-desc">Atur zona deteksi MID (orang + kendaraan) & NEAR (plat + OCR) untuk
+                        setiap kamera CCTV.</p>
+                </div>
+
+                <!-- 2. Baris Kontrol -->
+                <div class="zone-controls-row">
+                    <div class="zone-controls-left">
+                        <select id="zoneCameraSelect" class="form-select filter-control-select zone-cam-select"
+                            aria-label="Pilih kamera"></select>
+                    </div>
+                    <div class="zone-controls-right">
+                        <button type="button" class="btn-zone-secondary" onclick="refreshFrame()"
+                            title="Muat ulang frame CCTV">
+                            <i class="bi bi-arrow-clockwise"></i>
+                            <span>Refresh Frame</span>
                         </button>
-                        <button type="button" class="btn-action-outline" onclick="resetZone()" title="Reset zona ke default">
-                            <i class="bi bi-arrow-counterclockwise"></i> Reset
+                        <button type="button" class="btn-zone-secondary" onclick="resetZone()"
+                            title="Reset zona ke default">
+                            <i class="bi bi-arrow-counterclockwise"></i>
+                            <span>Reset</span>
                         </button>
-                        <button type="button" class="btn-action-primary" onclick="saveZone()" title="Simpan zona ke database">
-                            <i class="bi bi-save"></i> Simpan Zona
+                        <button type="button" class="btn-zone-solid" onclick="saveZone()"
+                            title="Simpan zona ke database">
+                            <i class="bi bi-save"></i>
+                            <span>Simpan Zona</span>
                         </button>
                     </div>
                 </div>
 
-                <div class="p-3 border-bottom">
-                    <div class="alert alert-info mb-0">
-                        <h6 class="fw-bold mb-2"><i class="bi bi-info-circle"></i> Panduan Mengatur Zona</h6>
-                        <ol class="mb-0 ps-3 small">
-                            <li><strong>Pilih kamera</strong> dari dropdown di kanan atas.</li>
-                            <li>Tunggu frame CCTV muncul sebagai latar belakang.</li>
-                            <li>Pilih mode edit:
-                                <span class="badge bg-primary ms-1">MID</span> untuk orang + kendaraan,
-                                <span class="badge bg-success ms-1">NEAR</span> untuk plat + OCR.
-                            </li>
-                            <li><strong>Klik 4 titik di gambar</strong> secara berurutan <em>searah jarum jam</em>:
-                                <ul class="mb-1">
-                                    <li>Kiri atas → Kanan atas → Kanan bawah → Kiri bawah</li>
-                                </ul>
-                            </li>
-                            <li>Minimal <strong>3 titik</strong> per zona. Titik ke-1 dan terakhir otomatis terhubung.</li>
-                            <li>Kalau salah: klik <strong>Hapus Titik Terakhir</strong> atau <strong>Kosongkan Zona</strong>.</li>
-                            <li>Klik <strong>Simpan Zona</strong> untuk menerapkan.</li>
-                            <li>Zona langsung dipakai AI tanpa restart server.</li>
-                        </ol>
-                        <hr class="my-2">
-                        <div class="small">
-                            <strong>💡 Tips:</strong>
-                            <ul class="mb-0 ps-3">
-                                <li><strong>Zona MID</strong> harus mencakup area jalan yang ingin dipantau kendaraan & orang.</li>
-                                <li><strong>Zona NEAR</strong> harus mencakup area yang lebih dekat ke kamera, di mana plat masih terbaca jelas.</li>
-                                <li>Biasanya NEAR <em>lebih kecil</em> dan ada di dalam MID, karena plat hanya bisa dibaca saat kendaraan dekat.</li>
+                <!-- 3. Panduan Mengatur Zona -->
+                <div class="zone-guide-panel">
+                    <div class="zone-guide-header">
+                        <i class="bi bi-info-circle zone-guide-icon" aria-hidden="true"></i>
+                        <h4 class="zone-guide-title">Panduan mengatur zona</h4>
+                    </div>
+                    <div class="zone-guide-grid">
+                        <div class="zone-guide-col-steps">
+                            <ol class="zone-steps-list">
+                                <li><strong>Pilih kamera</strong> dari dropdown di kanan atas.</li>
+                                <li>Tunggu frame CCTV muncul sebagai latar belakang.</li>
+                                <li>Pilih mode edit:
+                                    <span class="badge-zone-mid">MID</span> untuk orang + kendaraan,
+                                    <span class="badge-zone-near">NEAR</span> untuk plat + OCR.
+                                </li>
+                                <li><strong>Klik 4 titik di gambar</strong> secara berurutan <em>searah jarum jam</em>:
+                                    <ul class="zone-sub-steps">
+                                        <li>Kiri atas → Kanan atas → Kanan bawah → Kiri bawah</li>
+                                    </ul>
+                                </li>
+                                <li>Minimal <strong>3 titik</strong> per zona. Titik ke-1 dan terakhir otomatis
+                                    terhubung.</li>
+                                <li>Kalau salah: klik <strong>Hapus Titik Terakhir</strong> atau <strong>Kosongkan
+                                        Zona</strong>.</li>
+                                <li>Klik <strong>Simpan Zona</strong> untuk menerapkan.</li>
+                                <li>Zona langsung dipakai AI tanpa restart server.</li>
+                            </ol>
+                        </div>
+                        <div class="zone-guide-col-tips">
+                            <div class="zone-tips-header">
+                                <i class="bi bi-lightbulb zone-tips-icon" aria-hidden="true"></i>
+                                <strong class="zone-tips-title">Tips:</strong>
+                            </div>
+                            <ul class="zone-tips-list">
+                                <li><strong>Zona MID</strong> harus mencakup area jalan yang ingin dipantau kendaraan &
+                                    orang.</li>
+                                <li><strong>Zona NEAR</strong> harus mencakup area yang lebih dekat ke kamera, di mana
+                                    plat masih terbaca jelas.</li>
+                                <li>Biasanya NEAR <em>lebih kecil</em> dan ada di dalam MID, karena plat hanya bisa
+                                    dibaca saat kendaraan dekat.</li>
                                 <li>Jangan menggambar garis menyilang — sistem akan menolak simpan.</li>
                             </ul>
                         </div>
                     </div>
                 </div>
 
-                <div class="p-3">
-                    <div class="d-flex gap-3 mb-3 flex-wrap align-items-center">
-                        <div>
-                            <label class="form-label small fw-semibold mb-1 d-block">Mode Edit</label>
-                            <div class="btn-group btn-group-sm" role="group">
-                                <input type="radio" class="btn-check" name="zoneMode" id="zoneModeMid" value="mid" checked>
-                                <label class="btn btn-outline-primary" for="zoneModeMid">
-                                    <i class="bi bi-square"></i> MID (Person + Vehicle)
-                                </label>
-                                <input type="radio" class="btn-check" name="zoneMode" id="zoneModeNear" value="near">
-                                <label class="btn btn-outline-success" for="zoneModeNear">
-                                    <i class="bi bi-square-fill"></i> NEAR (Plate + OCR)
-                                </label>
-                            </div>
-                        </div>
-                        <div class="ms-auto">
-                            <button type="button" class="btn btn-outline-secondary btn-sm" onclick="undoPoint()">
-                                <i class="bi bi-arrow-counterclockwise"></i> Hapus Titik Terakhir
-                            </button>
-                            <button type="button" class="btn btn-outline-danger btn-sm" onclick="clearCurrentZone()">
-                                <i class="bi bi-trash"></i> Kosongkan Zona
-                            </button>
+                <!-- 4. Mode Edit & Aksi Titik -->
+                <div class="zone-edit-bar">
+                    <div class="zone-mode-group">
+                        <span class="zone-mode-label">Mode edit</span>
+                        <div class="zone-mode-segmented">
+                            <input type="radio" class="zone-mode-check" name="zoneMode" id="zoneModeMid" value="mid"
+                                checked>
+                            <label class="zone-mode-btn" for="zoneModeMid">
+                                <span class="zone-mode-dot dot-mid"></span>
+                                <span>MID (Person + Vehicle)</span>
+                            </label>
+                            <input type="radio" class="zone-mode-check" name="zoneMode" id="zoneModeNear" value="near">
+                            <label class="zone-mode-btn" for="zoneModeNear">
+                                <span class="zone-mode-dot dot-near"></span>
+                                <span>NEAR (Plate + OCR)</span>
+                            </label>
                         </div>
                     </div>
-
-                    <div class="d-flex gap-3 mb-3 flex-wrap align-items-center">
-                        <div class="small text-muted" id="zoneModeHelper"></div>
-                        <div class="ms-auto" id="zoneDirtyIndicator"></div>
+                    <div class="zone-point-actions">
+                        <button type="button" class="btn-zone-point-action" onclick="undoPoint()"
+                            title="Hapus titik terakhir">
+                            <i class="bi bi-arrow-counterclockwise"></i>
+                            <span>Hapus Titik Terakhir</span>
+                        </button>
+                        <button type="button" class="btn-zone-point-danger" onclick="clearCurrentZone()"
+                            title="Kosongkan semua titik zona">
+                            <i class="bi bi-trash"></i>
+                            <span>Kosongkan Zona</span>
+                        </button>
                     </div>
+                </div>
 
-                    <div class="zone-legend mb-3">
-                        <span><span class="dot" style="background: rgba(37,99,235,0.85);"></span> MID (biru) — Person + Vehicle</span>
-                        <span><span class="dot" style="background: rgba(34,197,94,0.85);"></span> NEAR (hijau) — Plate + OCR</span>
-                    </div>
+                <!-- 5. Baris Status -->
+                <div class="zone-status-bar">
+                    <div class="zone-status-helper" id="zoneModeHelper"></div>
+                    <div class="zone-status-indicator" id="zoneDirtyIndicator"></div>
+                </div>
 
-                    <div class="zone-editor-wrap">
-                        <img id="zoneEditorImage" src="" alt="CCTV frame">
-                        <canvas id="zoneEditorCanvas"></canvas>
-                    </div>
+                <!-- 6. Legenda -->
+                <div class="zone-legend-bar">
+                    <span class="zone-legend-item">
+                        <span class="zone-legend-dot dot-mid"></span>
+                        <span>MID (biru) — Person + Vehicle</span>
+                    </span>
+                    <span class="zone-legend-item">
+                        <span class="zone-legend-dot dot-near"></span>
+                        <span>NEAR (hijau) — Plate + OCR</span>
+                    </span>
+                </div>
 
-                    <div class="alert alert-warning small mt-3 mb-0">
-                        <i class="bi bi-exclamation-triangle"></i>
+                <!-- 7. Kanvas (Canvas & Image) -->
+                <div class="zone-editor-wrap">
+                    <img id="zoneEditorImage" src="" alt="CCTV frame">
+                    <canvas id="zoneEditorCanvas"></canvas>
+                </div>
+
+                <!-- 8. Peringatan -->
+                <div class="zone-warning-card">
+                    <i class="bi bi-exclamation-triangle zone-warn-icon" aria-hidden="true"></i>
+                    <div class="zone-warn-text">
                         <strong>Perhatian:</strong> Setelah simpan, zona langsung dipakai AI untuk semua kamera.
                         Kalau hasil deteksi jadi tidak wajar, klik <strong>Reset</strong> untuk kembali ke default.
                     </div>
                 </div>
-            </section>
+            </div>
 
             {% elif page == 'settings' %}
-            <div class="row g-4">
-                <div class="col-xl-4 col-lg-5">
-                    <div class="panel shadow-sm p-4 h-100 text-center">
-                        <div class="avatar profile-avatar mx-auto mb-3">A</div>
-                        <h3 id="profileDisplayName" class="fw-bold mb-1">Administrator</h3>
-                        <p id="profileDisplayRole" class="text-muted mb-4">Operator</p>
-                        <div class="text-start small border-top pt-3">
-                            <div class="d-flex justify-content-between mb-2"><span class="text-muted">Status</span><span class="text-success fw-semibold">Aktif</span></div>
-                            <div class="d-flex justify-content-between"><span class="text-muted">Akses</span><span>Monitoring CCTV</span></div>
+            <div class="profile-page-container">
+                <div class="profile-grid">
+                    <!-- Kartu Kiri: Ringkasan Profil -->
+                    <div class="profile-summary-card">
+                        <div class="profile-avatar-wrap">
+                            <div class="profile-avatar" id="profileCardAvatar">S</div>
+                        </div>
+                        <h3 id="profileDisplayName" class="profile-name">Super Admin CCTV</h3>
+                        <p id="profileDisplayRole" class="profile-role">Kepala Operator</p>
+
+                        <div class="profile-divider"></div>
+
+                        <div class="profile-info-list">
+                            <div class="profile-info-row">
+                                <span class="profile-info-label">Status</span>
+                                <span class="profile-status-pill">Aktif</span>
+                            </div>
+                            <div class="profile-info-divider"></div>
+                            <div class="profile-info-row">
+                                <span class="profile-info-label">Akses</span>
+                                <span class="profile-info-value">Monitoring CCTV</span>
+                            </div>
                         </div>
                     </div>
-                </div>
-                <div class="col-xl-8 col-lg-7">
-                    <div class="panel shadow-sm p-4 h-100">
-                        <h4 class="fw-bold mb-1">Profil Saya</h4>
-                        <p class="text-muted small mb-4">Kelola informasi profil operator yang tampil di aplikasi.</p>
-                        <form id="settingsForm" class="row g-3">
-                            <div class="col-md-6">
-                                <label class="form-label small fw-semibold">Nama Lengkap</label>
-                                <input id="operatorName" class="form-control" placeholder="Administrator">
-                            </div>
-                            <div class="col-md-6">
-                                <label class="form-label small fw-semibold">Email</label>
-                                <input id="profileEmail" class="form-control" type="email" placeholder="operator@perusahaan.com">
-                            </div>
-                            <div class="col-md-6">
-                                <label class="form-label small fw-semibold">Nomor Telepon</label>
-                                <input id="profilePhone" class="form-control" placeholder="08xxxxxxxxxx">
-                            </div>
-                            <div class="col-md-6">
-                                <label class="form-label small fw-semibold">Jabatan</label>
-                                <input id="profileRole" class="form-control" placeholder="Operator">
-                            </div>
-                            <div class="col-12 mt-4 d-flex align-items-center gap-3">
-                                <button type="submit" class="btn btn-primary">
-                                    <i class="bi bi-check2-circle"></i> Simpan Profil
-                                </button>
-                                <span id="settingsMessage" class="small fw-semibold text-success"></span>
-                            </div>
-                        </form>
+
+                    <!-- Kartu Kanan: Form Profil -->
+                    <div class="profile-form-card">
+                        <div class="profile-card-header">
+                            <h4 class="profile-card-title">Profil saya</h4>
+                            <p class="profile-card-subtitle">Kelola informasi profil operator yang tampil di aplikasi
+                            </p>
+                        </div>
+                        <div class="profile-card-body">
+                            <form id="settingsForm" class="profile-form">
+                                <div class="profile-form-grid">
+                                    <div class="profile-form-group">
+                                        <label class="profile-form-label" for="operatorName">Nama lengkap</label>
+                                        <input id="operatorName" class="profile-input" placeholder="Administrator">
+                                    </div>
+                                    <div class="profile-form-group">
+                                        <label class="profile-form-label" for="profileEmail">Email</label>
+                                        <input id="profileEmail" class="profile-input" type="email"
+                                            placeholder="operator@perusahaan.com">
+                                    </div>
+                                    <div class="profile-form-group">
+                                        <label class="profile-form-label" for="profilePhone">Nomor telepon</label>
+                                        <input id="profilePhone" class="profile-input" placeholder="08xxxxxxxxxx">
+                                    </div>
+                                    <div class="profile-form-group">
+                                        <label class="profile-form-label" for="profileRole">Jabatan</label>
+                                        <input id="profileRole" class="profile-input" placeholder="Operator">
+                                    </div>
+                                </div>
+                                <div class="profile-form-actions">
+                                    <button type="submit" class="btn-profile-save">
+                                        <i class="bi bi-check2"></i>
+                                        <span>Simpan profil</span>
+                                    </button>
+                                    <span id="settingsMessage" class="profile-message"></span>
+                                </div>
+                            </form>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1066,7 +1679,8 @@
                 </div>
                 <div class="modal-body detection-image-body">
                     <div class="preview-img-container" role="img" aria-label="Preview capture hasil deteksi CCTV">
-                        <img id="imagePreviewSrc" src="" alt="Capture hasil deteksi CCTV" class="detection-preview-image">
+                        <img id="imagePreviewSrc" src="" alt="Capture hasil deteksi CCTV"
+                            class="detection-preview-image">
                     </div>
                 </div>
                 <div class="modal-footer border-0 pt-0 justify-content-between">
@@ -1082,7 +1696,9 @@
         <div class="modal-dialog modal-dialog-centered modal-sm">
             <div class="modal-content border-0 shadow-lg">
                 <div class="modal-body text-center p-4">
-                    <div id="confirmIcon" class="rounded-circle bg-warning-subtle text-warning d-inline-flex align-items-center justify-content-center mb-3" style="width: 56px; height: 56px;">
+                    <div id="confirmIcon"
+                        class="rounded-circle bg-warning-subtle text-warning d-inline-flex align-items-center justify-content-center mb-3"
+                        style="width: 56px; height: 56px;">
                         <i class="bi bi-exclamation-triangle fs-4"></i>
                     </div>
                     <h5 id="confirmTitle" class="fw-bold mb-2">Konfirmasi</h5>
@@ -1110,7 +1726,7 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/app.js') }}?v=4.7"></script>
     <script src="{{ url_for('static', filename='js/zone_editor.js') }}"></script>
 </body>
 
