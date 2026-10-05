@@ -216,6 +216,53 @@ window.openImageModal = openImageModal;
 // MODUL: MONITORING CCTV
 // ============================================================
 
+function renderCameraRows(camerasList) {
+    const table = document.getElementById('cameraTable');
+    if (!table) return;
+
+    const pagInfo = document.getElementById('cameraPaginationInfo');
+    if (pagInfo) {
+        pagInfo.textContent = `Menampilkan ${camerasList.length} kamera`;
+    }
+
+    if (!camerasList.length) {
+        table.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-5">Belum ada kamera yang sesuai.</td></tr>';
+        return;
+    }
+
+    table.innerHTML = camerasList.map((camera, index) => {
+        let dirBadge = '';
+        if (camera.direction === 'entry') {
+            dirBadge = '<span class="badge bg-success-subtle text-success border border-success-subtle">Masuk</span>';
+        } else if (camera.direction === 'exit') {
+            dirBadge = '<span class="badge bg-danger-subtle text-danger border border-danger-subtle">Keluar</span>';
+        } else {
+            dirBadge = '<span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle">Tidak ditentukan</span>';
+        }
+
+        const isAct = Boolean(camera.active);
+
+        return `
+        <tr>
+            <td class="text-center text-muted fw-semibold">${index + 1}</td>
+            <td><strong>${esc(camera.name)}</strong></td>
+            <td class="camera-url-cell"><span class="camera-url" title="${esc(camera.url)}">${esc(camera.url)}</span></td>
+            <td class="text-center">${dirBadge}</td>
+            <td class="text-center"><span class="status ${isAct ? 'success' : 'warning'}">${isAct ? 'Aktif' : 'Nonaktif'}</span></td>
+            <td class="text-center">
+                <div class="table-actions justify-content-center">
+                    <button class="action-btn action-toggle ${isAct ? 'deactivate' : 'activate'}" data-action="toggle" data-id="${camera.id}" title="${isAct ? 'Nonaktifkan Kamera' : 'Aktifkan Kamera'}">
+                        ${isAct ? 'Nonaktifkan' : 'Aktifkan'}
+                    </button>
+                    <button class="action-btn action-edit" data-action="edit" data-id="${camera.id}" title="Edit Kamera">Edit</button>
+                    <button class="action-btn action-delete" data-action="delete" data-id="${camera.id}" title="Hapus Kamera">Hapus</button>
+                </div>
+            </td>
+        </tr>
+    `;
+    }).join('');
+}
+
 async function loadCameras() {
     try {
         const result = await json('/api/cameras');
@@ -228,38 +275,13 @@ async function loadCameras() {
             select.innerHTML = cameras.map(item => `<option value="${item.id}">${esc(item.name)}</option>`).join('') || '<option value="">Belum ada kamera</option>';
         }
 
-        const table = document.getElementById('cameraTable');
-        if (table) {
-            table.innerHTML = cameras.map(camera => {
-                // Badge arah
-                let dirBadge = '';
-                if (camera.direction === 'entry') {
-                    dirBadge = '<span class="badge bg-success-subtle text-success border border-success-subtle"><i class="bi bi-box-arrow-in-right"></i> Masuk</span>';
-                } else if (camera.direction === 'exit') {
-                    dirBadge = '<span class="badge bg-danger-subtle text-danger border border-danger-subtle"><i class="bi bi-box-arrow-right"></i> Keluar</span>';
-                } else {
-                    dirBadge = '<span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle">Tidak ditentukan</span>';
-                }
+        const searchInput = document.getElementById('cameraSearchInput');
+        const query = searchInput ? searchInput.value.trim().toLowerCase() : '';
+        const displayList = query
+            ? cameras.filter(c => (c.name || '').toLowerCase().includes(query) || (c.url || '').toLowerCase().includes(query))
+            : cameras;
 
-                return `
-                <tr>
-                    <td><strong>${esc(camera.name)}</strong></td>
-                    <td class="camera-url">${esc(camera.url)}</td>
-                    <td>${dirBadge}</td>
-                    <td><span class="status ${camera.active ? 'success' : 'warning'}">${camera.active ? 'Aktif' : 'Nonaktif'}</span></td>
-                    <td>
-                        <div class="table-actions">
-                            <button class="action-toggle ${camera.active ? 'deactivate' : 'activate'}" data-action="toggle" data-id="${camera.id}">
-                                ${camera.active ? 'Nonaktifkan' : 'Aktifkan'}
-                            </button>
-                            <button class="action-edit" data-action="edit" data-id="${camera.id}">Edit</button>
-                            <button class="action-delete" data-action="delete" data-id="${camera.id}">Hapus</button>
-                        </div>
-                    </td>
-                </tr>
-            `;
-            }).join('') || '<tr><td colspan="5" class="text-center text-muted py-5">Belum ada kamera.</td></tr>';
-        }
+        renderCameraRows(displayList);
         return cameras;
     } catch (err) {
         console.error('Error loadCameras:', err);
@@ -328,6 +350,18 @@ window.exportCameras = exportCameras;
 
 async function initMonitoring() {
     let cameras = await loadCameras();
+
+    const searchInput = document.getElementById('cameraSearchInput');
+    if (searchInput) {
+        searchInput.addEventListener('input', () => {
+            const query = searchInput.value.trim().toLowerCase();
+            const filtered = query
+                ? cameras.filter(c => (c.name || '').toLowerCase().includes(query) || (c.url || '').toLowerCase().includes(query))
+                : cameras;
+            renderCameraRows(filtered);
+        });
+    }
+
     document.getElementById('cameraForm')?.addEventListener('submit', async event => {
         event.preventDefault();
         const id = document.getElementById('cameraId').value;
@@ -442,8 +476,7 @@ async function initDashboard() {
     let videoJobPoller = null;
 
     function getStreamUrl(camId) {
-        const showBbox = bboxToggle ? (bboxToggle.checked ? 1 : 0) : 1;
-        return `/api/video_feed/${camId}?bbox=${showBbox}`;
+        return `/api/video_feed/${camId}?bbox=1`;
     }
 
     function startCameraStream(camId) {
@@ -479,6 +512,8 @@ async function initDashboard() {
 
     function updateDetectionMode() {
         const videoMode = detectionMode?.value === 'video';
+        const videoFileCol = document.getElementById('videoFileCol');
+        if (videoFileCol) videoFileCol.style.display = videoMode ? 'block' : 'none';
         if (videoFileLabel) videoFileLabel.style.display = videoMode ? 'inline-flex' : 'none';
         if (streamImg) streamImg.style.display = videoMode ? (videoJobPoller ? 'block' : 'none') : streamImg.src ? 'block' : 'none';
         if (processedVideo && !videoMode) processedVideo.style.display = 'none';
@@ -529,7 +564,7 @@ async function initDashboard() {
                         processedVideo.src = `${job.output_url}?t=${Date.now()}`;
                         processedVideo.style.display = 'block';
                         processedVideo.load();
-                        processedVideo.play().catch(() => {});
+                        processedVideo.play().catch(() => { });
                     }
                     if (placeholder) placeholder.style.display = 'none';
                     if (cameraNameEl) cameraNameEl.textContent = 'Hasil Deteksi Video';
@@ -838,7 +873,7 @@ async function initDetectionsPage() {
                 loadDetections();
             });
         }
-    } catch (e) {}
+    } catch (e) { }
 
     const typeSelect = document.getElementById('detTypeFilter');
     if (typeSelect) {
@@ -941,6 +976,13 @@ async function initDetectionsPage() {
         if (startInput) startInput.value = '';
         const endInput = document.getElementById('detEndDate');
         if (endInput) endInput.value = '';
+
+        const typeGroup = document.getElementById('detTypeButtonGroup');
+        if (typeGroup) {
+            typeGroup.querySelectorAll('button').forEach(b => {
+                b.classList.toggle('active', (b.dataset.type || 'all') === 'all');
+            });
+        }
 
         loadDetections().catch(err => console.error('Error reset detections filter:', err));
     });
@@ -1099,7 +1141,7 @@ async function initHistoryPage() {
                 loadPlateHistory();
             });
         }
-    } catch (e) {}
+    } catch (e) { }
 
     const statusSelect = document.getElementById('plateStatusFilter');
     if (statusSelect) {
@@ -1974,7 +2016,7 @@ function toggleTheme() {
     try {
         localStorage.setItem('platevision_theme', nextTheme);
         localStorage.setItem('theme', nextTheme);
-    } catch (e) {}
+    } catch (e) { }
     updateThemeUI(nextTheme);
 }
 
@@ -1982,7 +2024,7 @@ function initTheme() {
     let savedTheme = null;
     try {
         savedTheme = localStorage.getItem('platevision_theme') || localStorage.getItem('theme');
-    } catch (e) {}
+    } catch (e) { }
 
     if (!savedTheme) {
         savedTheme = 'dark';
