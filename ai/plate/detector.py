@@ -7,7 +7,7 @@ class PlateDetector:
 
     def __init__(
         self,
-        model_path="models/plate/license-plate-finetune-v2n.pt",
+        model_path="models/plate/license-plate-finetune-v3n.pt",
         confidence=0.25,
         imgsz=640,
         device="cpu",

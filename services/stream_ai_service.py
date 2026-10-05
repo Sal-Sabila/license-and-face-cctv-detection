@@ -63,7 +63,7 @@ PLATE_MODEL_PATH = os.path.join(
     BASE_DIR,
     "models",
     "plate",
-    "license-plate-finetune-v2n.pt",
+    "license-plate-finetune-v3n.pt",
 )
 
 CAPTURE_DIR = os.path.join(BASE_DIR, "static", "captures")
