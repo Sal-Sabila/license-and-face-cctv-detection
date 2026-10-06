@@ -10,5 +10,5 @@ def recap():
         "index.html",
         page="recap",
         heading="Rekapitulasi",
-        subtitle="Agregasi aktivitas kendaraan, plat, dan orang dari seluruh CCTV."
+        subtitle="Menampilkan laporan agregat berdasarkan periode dan kamera."
     )

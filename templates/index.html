@@ -39,7 +39,7 @@
         };
     </script>
 
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=4.9">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=5.3">
     <style>
         .detection-image-modal {
             width: 820px;
@@ -230,6 +230,11 @@
                         <i class="bi bi-grid"></i>
                         <span>Dashboard</span>
                     </a>
+                    <a class="nav-link {% if page == 'suspicious_activity' %}active{% endif %}"
+                        href="{{ url_for('dashboard_page.suspicious_activity') }}" title="Aktivitas Mencurigakan">
+                        <i class="bi bi-exclamation-triangle"></i>
+                        <span>Aktivitas Mencurigakan</span>
+                    </a>
                     <a class="nav-link {% if page == 'monitoring' %}active{% endif %}"
                         href="{{ url_for('monitoring_page.monitoring') }}" title="Monitoring CCTV">
                         <i class="bi bi-camera-video"></i>
@@ -402,6 +407,18 @@
                             <i class="bi bi-camera-video"></i>
                         </div>
                     </div>
+
+                    <a id="suspiciousActivityMetric" class="dashboard-metric-card suspicious-metric-card"
+                        href="{{ url_for('dashboard_page.suspicious_activity') }}" title="Lihat kendaraan mencurigakan">
+                        <div class="metric-card-content">
+                            <span class="metric-card-label">Mencurigakan</span>
+                            <strong id="suspiciousActivityTotal" class="metric-card-value">—</strong>
+                            <small id="suspiciousActivitySub" class="metric-card-sub">Memuat kendaraan...</small>
+                        </div>
+                        <div class="metric-card-icon-wrap suspicious-metric-icon" aria-hidden="true">
+                            <i class="bi bi-exclamation-triangle"></i>
+                        </div>
+                    </a>
                 </section>
 
                 <!-- 2. Baris Dua Kolom: Live Monitoring CCTV (~60%) & Deteksi Terbaru (~40%) -->
@@ -1009,8 +1026,7 @@
                 <div class="detection-header-row d-flex justify-content-between align-items-center flex-wrap gap-3">
                     <div class="detection-title-block">
                         <h3 class="detection-heading">Rekapitulasi data</h3>
-                        <p class="detection-subheading">Ringkasan data hasil deteksi kendaraan dan pembacaan plat nomor
-                            dari sistem CCTV</p>
+                        <p class="detection-subheading">Menampilkan laporan agregat berdasarkan periode dan kamera.</p>
                     </div>
                     <div class="detection-top-toolbar d-flex align-items-center gap-2">
                         <!-- Kolom Pencarian -->
@@ -1282,24 +1298,36 @@
                     </div>
                 </div>
 
-                <!-- 3. Empat Kartu Metrik (Gaya Dashboard, 4 Kolom Penuh) -->
+                <!-- 3. Empat Kartu Metrik -->
                 <div class="stats-metrics-grid">
-                    <!-- Total Deteksi -->
+                    <!-- 1. Total Kendaraan -->
                     <div class="dashboard-metric-card stats-metric-card">
                         <div class="metric-card-content">
-                            <span class="metric-card-label">Total deteksi</span>
+                            <span class="metric-card-label">Total Kendaraan</span>
                             <strong id="kpiTotalDets" class="metric-card-value">0</strong>
-                            <span class="metric-card-sub"><i class="bi bi-arrow-up-right"></i> Volume aktivitas</span>
+                            <span class="metric-card-sub"><i class="bi bi-car-front"></i> Total unit kendaraan</span>
                         </div>
                         <div class="metric-card-icon-wrap">
-                            <i class="bi bi-activity"></i>
+                            <i class="bi bi-car-front"></i>
                         </div>
                     </div>
 
-                    <!-- Deteksi Plat -->
+                    <!-- 2. Total Orang -->
                     <div class="dashboard-metric-card stats-metric-card">
                         <div class="metric-card-content">
-                            <span class="metric-card-label">Deteksi plat</span>
+                            <span class="metric-card-label">Total Orang</span>
+                            <strong id="kpiTotalFaces" class="metric-card-value">0</strong>
+                            <span class="metric-card-sub"><i class="bi bi-people"></i> Pejalan kaki terpantau</span>
+                        </div>
+                        <div class="metric-card-icon-wrap">
+                            <i class="bi bi-people"></i>
+                        </div>
+                    </div>
+
+                    <!-- 3. Plat Terbaca -->
+                    <div class="dashboard-metric-card stats-metric-card">
+                        <div class="metric-card-content">
+                            <span class="metric-card-label">Plat Terbaca</span>
                             <strong id="kpiTotalPlates" class="metric-card-value">0</strong>
                             <span class="metric-card-sub">Read rate: <b id="kpiPlateRate">0%</b></span>
                         </div>
@@ -1308,22 +1336,10 @@
                         </div>
                     </div>
 
-                    <!-- Wajah / Pengendara -->
+                    <!-- 4. CCTV Aktif -->
                     <div class="dashboard-metric-card stats-metric-card">
                         <div class="metric-card-content">
-                            <span class="metric-    card-label">Wajah / pengendara</span>
-                            <strong id="kpiTotalFaces" class="metric-card-value">0</strong>
-                            <span class="metric-card-sub">Total orang terpantau</span>
-                        </div>
-                        <div class="metric-card-icon-wrap">
-                            <i class="bi bi-people"></i>
-                        </div>
-                    </div>
-
-                    <!-- Ketersediaan CCTV -->
-                    <div class="dashboard-metric-card stats-metric-card">
-                        <div class="metric-card-content">
-                            <span class="metric-card-label">Ketersediaan CCTV</span>
+                            <span class="metric-card-label">CCTV Aktif</span>
                             <strong id="kpiCamStatus" class="metric-card-value">0 / 0</strong>
                             <span class="metric-card-sub">Uptime: <b id="kpiCamUptime">0%</b></span>
                         </div>
@@ -1340,14 +1356,13 @@
 
                 <!-- 5. Baris Dua Kolom: Panel Grafik (~63%) & Panel Jam Sibuk (~37%) -->
                 <div class="stats-panels-row">
-                    <!-- Panel Grafik: Beban Lalu Lintas per Titik CCTV -->
+                    <!-- Panel Grafik: Aktivitas Kendaraan & Orang per CCTV -->
                     <div class="stats-panel-chart-col">
                         <div class="dashboard-panel stats-panel-card h-100">
                             <div class="dashboard-panel-header stats-panel-header">
                                 <div class="dashboard-panel-header-title">
-                                    <h4 class="dashboard-panel-title">Beban lalu lintas per titik CCTV</h4>
-                                    <p class="dashboard-panel-desc">Intensitas aktivitas kendaraan dan pejalan kaki per
-                                        kamera.</p>
+                                    <h4 class="dashboard-panel-title">Aktivitas Kendaraan &amp; Orang per CCTV</h4>
+                                    <p class="dashboard-panel-desc">Perbandingan volume kendaraan dan pejalan kaki per kamera.</p>
                                 </div>
                             </div>
                             <div class="stats-chart-container">
@@ -1359,13 +1374,12 @@
                     <!-- Panel Jam Sibuk: Analisis Jam Sibuk (Peak Hours) -->
                     <div class="stats-panel-peak-col">
                         <div class="dashboard-panel stats-panel-card h-100">
-                            <div
-                                class="dashboard-panel-header stats-panel-header d-flex justify-content-between align-items-center">
+                            <div class="dashboard-panel-header stats-panel-header d-flex justify-content-between align-items-center">
                                 <div class="dashboard-panel-header-title">
-                                    <h4 class="dashboard-panel-title">Analisis jam sibuk</h4>
-                                    <p class="dashboard-panel-desc">Waktu dengan kepadatan lalu lintas tertinggi.</p>
+                                    <h4 class="dashboard-panel-title">Analisis Jam Sibuk</h4>
+                                    <p class="dashboard-panel-desc">Periode waktu dengan kepadatan lalu lintas tertinggi.</p>
                                 </div>
-                                <span class="badge-peak-pill">Peak time</span>
+                                <span class="badge-peak-pill"><i class="bi bi-clock-history"></i> Peak time</span>
                             </div>
                             <div class="stats-peak-body" id="peakHoursList">
                                 <div class="stats-peak-empty text-muted">Memuat data jam sibuk...</div>
@@ -1374,33 +1388,177 @@
                     </div>
                 </div>
 
-                <!-- 6. Tabel Top 10 Kendaraan / Plat Paling Sering Terdeteksi -->
-                <div class="stats-table-section">
-                    <div class="recap-table-header-block">
-                        <h4 class="recap-table-title">Top 10 kendaraan / plat paling sering terdeteksi</h4>
-                        <p class="recap-table-desc">Frekuensi kemunculan kendaraan keluar-masuk area pemantauan.</p>
+                <!-- 6. Grafik Aktivitas per Jam (00:00 - 23:00) -->
+                <div class="stats-table-section mt-3">
+                    <div class="dashboard-panel stats-panel-card">
+                        <div class="dashboard-panel-header stats-panel-header">
+                            <div class="dashboard-panel-header-title">
+                                <h4 class="dashboard-panel-title">Grafik Aktivitas per Jam</h4>
+                                <p class="dashboard-panel-desc">Distribusi intensitas lalu lintas kendaraan dan orang sepanjang 24 jam.</p>
+                            </div>
+                        </div>
+                        <div class="stats-chart-container" style="height: 220px; min-height: 220px;">
+                            <canvas id="hourlyBarCanvas"></canvas>
+                        </div>
                     </div>
-                    <div class="recap-table-card">
-                        <div class="recap-table-responsive">
-                            <table class="detection-grid-table recap-grid-table stats-top-table">
-                                <thead>
-                                    <tr>
-                                        <th class="text-center" style="width: 46px;">#</th>
-                                        <th class="text-start">Nomor Plat</th>
-                                        <th class="text-end">Frekuensi Melintas</th>
-                                        <th class="text-start">Kamera Terakhir</th>
-                                        <th class="text-start">Waktu Terakhir Terlihat</th>
-                                        <th class="text-end">Akurasi Rata-rata</th>
-                                        <th class="text-start">Status Terakhir</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="topPlatesTable">
-                                    <tr>
-                                        <td colspan="7" class="text-center text-muted py-4">Memuat data kendaraan...
-                                        </td>
-                                    </tr>
-                                </tbody>
-                            </table>
+                </div>
+
+                <!-- 7. Baris Dua Kolom: Distribusi Jenis Kendaraan (Kiri) & Performa Pembacaan Plat (Kanan) -->
+                <div class="stats-panels-row mt-3">
+                    <!-- Panel 3: Distribusi Jenis Kendaraan -->
+                    <div class="stats-panel-chart-col" style="flex: 1 1 50%; max-width: 50%;">
+                        <div class="dashboard-panel stats-panel-card h-100">
+                            <div class="dashboard-panel-header stats-panel-header">
+                                <div class="dashboard-panel-header-title">
+                                    <h4 class="dashboard-panel-title"><i class="bi bi-pie-chart me-1"></i>Distribusi Jenis Kendaraan</h4>
+                                    <p class="dashboard-panel-desc">Klasifikasi kendaraan terdeteksi (Mobil, Motor, Bus, Truck, Lainnya).</p>
+                                </div>
+                            </div>
+                            <div id="statsVehicleTypeBreakdown" class="p-2">
+                                <div class="text-muted small py-3 text-center">Memuat distribusi jenis kendaraan...</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Panel 4: Performa Pembacaan Plat -->
+                    <div class="stats-panel-peak-col" style="flex: 1 1 50%; max-width: 50%;">
+                        <div class="dashboard-panel stats-panel-card h-100">
+                            <div class="dashboard-panel-header stats-panel-header">
+                                <div class="dashboard-panel-header-title">
+                                    <h4 class="dashboard-panel-title"><i class="bi bi-card-checklist me-1"></i>Performa Pembacaan Plat</h4>
+                                    <p class="dashboard-panel-desc">Statistik akurasi dan status pembacaan plat nomor kendaraan.</p>
+                                </div>
+                            </div>
+                            <div id="statsPlatePerformance" class="p-2">
+                                <div class="text-muted small py-3 text-center">Memuat performa pembacaan plat...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            {% elif page == 'suspicious_activity' %}
+            <div class="occurrence-page-container" id="suspiciousActivityPage">
+                <div class="detection-header-row d-flex justify-content-between align-items-center flex-wrap gap-3">
+                    <div class="detection-title-block">
+                        <h3 id="occurrencePageTitle" class="detection-heading">Aktivitas Mencurigakan</h3>
+                        <p class="detection-subheading">Daftar kendaraan dengan frekuensi kemunculan tinggi.</p>
+                    </div>
+                    <div class="detection-top-toolbar">
+                        <div class="detection-search-wrap">
+                            <i class="bi bi-search detection-search-icon" aria-hidden="true"></i>
+                            <input id="occurrenceSearch" type="search" class="detection-search-input"
+                                placeholder="Cari plat atau identitas kendaraan..." aria-label="Cari kendaraan">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="detection-filter-card occurrence-filter-card">
+                    <div class="detection-filter-container">
+                        <div class="detection-filter-row detection-filter-row-primary">
+                            <div class="filter-col">
+                                <label class="form-label" for="occurrenceStatusFilter">Status</label>
+                                <select id="occurrenceStatusFilter" class="form-select filter-control-select">
+                                    <option value="all">Semua</option>
+                                    <option value="SERING_MUNCUL">Sering Muncul</option>
+                                    <option value="MENCURIGAKAN">Mencurigakan</option>
+                                </select>
+                            </div>
+                            <div class="filter-col">
+                                <label class="form-label" for="occurrenceCameraFilter">Kamera</label>
+                                <select id="occurrenceCameraFilter" class="form-select filter-control-select">
+                                    <option value="">Semua Kamera</option>
+                                </select>
+                            </div>
+                            <div class="filter-col">
+                                <label class="form-label" for="occurrencePeriodFilter">Periode</label>
+                                <select id="occurrencePeriodFilter" class="form-select filter-control-select">
+                                    <option value="all">Semua</option>
+                                    <option value="today">Hari ini</option>
+                                    <option value="7d">7 Hari</option>
+                                    <option value="30d">30 Hari</option>
+                                    <option value="custom">Custom</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div id="occurrenceCustomRange" class="detection-filter-row detection-filter-row-secondary occurrence-custom-range" hidden>
+                            <div class="filter-col filter-col-date-range">
+                                <label class="form-label" for="occurrenceStartDate">Rentang tanggal</label>
+                                <div class="detection-date-box">
+                                    <div class="date-picker-wrap">
+                                        <i class="bi bi-calendar3 date-picker-icon" aria-hidden="true"></i>
+                                        <input id="occurrenceStartDate" type="date" class="form-control date-picker-input"
+                                            aria-label="Tanggal mulai">
+                                    </div>
+                                    <span class="date-sep-text">sampai</span>
+                                    <div class="date-picker-wrap">
+                                        <i class="bi bi-calendar3 date-picker-icon" aria-hidden="true"></i>
+                                        <input id="occurrenceEndDate" type="date" class="form-control date-picker-input"
+                                            aria-label="Tanggal akhir">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="filter-col filter-col-actions">
+                                <button id="occurrenceDateApply" type="button" class="btn-apply-solid">
+                                    <i class="bi bi-funnel"></i>
+                                    <span>Terapkan</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="occurrenceErrorState" class="occurrence-error mb-3" role="alert" hidden>
+                    Gagal mengambil data kendaraan.
+                </div>
+                <div id="occurrenceEmptyState" class="empty-state py-5 text-muted text-center" hidden>
+                    Tidak ada kendaraan dengan frekuensi tinggi.
+                </div>
+
+                <div id="occurrenceTableCard" class="detection-table-card">
+                    <div class="detection-table-responsive table-responsive occurrence-table-responsive">
+                        <table class="table align-middle mb-0 detection-grid-table occurrence-grid-table">
+                            <thead>
+                                <tr>
+                                    <th>Foto</th>
+                                    <th>Plat / Identitas Kendaraan</th>
+                                    <th>Jenis Kendaraan</th>
+                                    <th>Kemunculan</th>
+                                    <th>CCTV</th>
+                                    <th>Terakhir Terlihat</th>
+                                    <th>Status</th>
+                                    <th class="text-end pe-3">Aksi</th>
+                                </tr>
+                            </thead>
+                            <tbody id="occurrenceTable">
+                                <tr>
+                                    <td colspan="8" class="text-center text-muted py-5">Memuat data kendaraan...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="detection-table-footer d-flex justify-content-between align-items-center flex-wrap gap-2">
+                        <div class="detection-pagination-info text-muted" id="occurrencePaginationInfo">Menampilkan 0 dari 0 kendaraan</div>
+                        <div class="detection-pagination-nav d-flex gap-2 align-items-center">
+                            <button id="occurrencePrevBtn" class="btn-page-nav" disabled aria-label="Halaman sebelumnya">
+                                <i class="bi bi-chevron-left"></i> Sebelumnya
+                            </button>
+                            <div id="occurrencePageNumber" class="page-indicator occurrence-page-buttons"></div>
+                            <button id="occurrenceNextBtn" class="btn-page-nav" disabled aria-label="Halaman berikutnya">
+                                Berikutnya <i class="bi bi-chevron-right"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="modal fade" id="occurrenceDetailModal" tabindex="-1" aria-hidden="true">
+                    <div class="modal-dialog modal-dialog-centered modal-lg">
+                        <div class="modal-content border-0 shadow-lg">
+                            <div class="modal-header">
+                                <h5 class="modal-title" id="occurrenceDetailTitle">Detail Kendaraan</h5>
+                                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Tutup"></button>
+                            </div>
+                            <div class="modal-body" id="occurrenceDetailBody"></div>
                         </div>
                     </div>
                 </div>
@@ -1726,7 +1884,7 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="{{ url_for('static', filename='js/app.js') }}?v=4.7"></script>
+    <script src="{{ url_for('static', filename='js/app.js') }}?v=5.3"></script>
     <script src="{{ url_for('static', filename='js/zone_editor.js') }}"></script>
 </body>
 

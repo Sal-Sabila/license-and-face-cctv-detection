@@ -433,8 +433,438 @@ async function initMonitoring() {
 
 
 // ============================================================
-// MODUL: DASHBOARD UTAMA
+// MODUL: DASHBOARD UTAMA & AKTIVITAS KENDARAAN MENCURIGAKAN
 // ============================================================
+
+let dashboardSuspiciousVehicleSummary = null;
+
+function normalizeOccurrenceStatus(value) {
+    return String(value || '').trim().toUpperCase().replaceAll('_', ' ');
+}
+
+function getFrequentOccurrenceItems(items) {
+    return (Array.isArray(items) ? items : []).filter(item => {
+        const count = Number(item?.occurrence_count) || 0;
+        const status = normalizeOccurrenceStatus(item?.status);
+        return count >= 2 && (status === 'SERING MUNCUL' || status === 'MENCURIGAKAN');
+    });
+}
+
+function formatVehicleType(type) {
+    const raw = String(type || '').toLowerCase().trim();
+    if (raw === 'car') return 'Mobil';
+    if (raw === 'motorcycle') return 'Sepeda Motor';
+    if (raw === 'truck') return 'Truk';
+    if (raw === 'bus') return 'Bus';
+    if (raw === 'unknown' || !raw) return 'Kendaraan';
+    return raw.charAt(0).toUpperCase() + raw.slice(1);
+}
+
+function vehicleIdentifier(item) {
+    const rawPlate = String(item?.plate || '').trim();
+    if (rawPlate && rawPlate !== '-') {
+        return {
+            text: rawPlate,
+            isPlate: true
+        };
+    }
+    const fallback = String(item?.identity || item?.object_group_id || 'Kendaraan').trim();
+    return {
+        text: fallback,
+        isPlate: false
+    };
+}
+
+function occurrencePhoto(item) {
+    return item?.vehicle_image_path || item?.capture_path || item?.image_url || item?.image_path || item?.photo || '';
+}
+
+function formatOccurrenceTime(value) {
+    if (!value) return 'Waktu tidak tersedia';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return new Intl.DateTimeFormat('id-ID', {
+        dateStyle: 'medium',
+        timeStyle: 'short',
+    }).format(date);
+}
+
+async function initSuspiciousActivityPage() {
+    const tableBody = document.getElementById('occurrenceTable');
+    const pageSize = 20;
+    let currentPage = 1;
+
+    const [vehicleRes, camerasResult] = await Promise.all([
+        json('/api/vehicle/occurrences?limit=200').catch(err => {
+            console.error('Gagal memuat aktivitas kendaraan:', err);
+            return { success: false, data: [] };
+        }),
+        json('/api/cameras').catch(error => {
+            console.error('Gagal memuat daftar kamera:', error);
+            return { success: false, data: [] };
+        }),
+    ]);
+
+    const cameras = Array.isArray(camerasResult.data) ? camerasResult.data : [];
+    const cameraSelect = document.getElementById('occurrenceCameraFilter');
+    const statusFilter = document.getElementById('occurrenceStatusFilter');
+    const periodFilter = document.getElementById('occurrencePeriodFilter');
+    const searchInput = document.getElementById('occurrenceSearch');
+    const customRange = document.getElementById('occurrenceCustomRange');
+    const startDateInput = document.getElementById('occurrenceStartDate');
+    const endDateInput = document.getElementById('occurrenceEndDate');
+    const dateApplyButton = document.getElementById('occurrenceDateApply');
+    const errorState = document.getElementById('occurrenceErrorState');
+    const emptyState = document.getElementById('occurrenceEmptyState');
+    const tableCard = document.getElementById('occurrenceTableCard');
+    const prevButton = document.getElementById('occurrencePrevBtn');
+    const nextButton = document.getElementById('occurrenceNextBtn');
+    const pageNumber = document.getElementById('occurrencePageNumber');
+    const paginationInfo = document.getElementById('occurrencePaginationInfo');
+    let appliedStartDate = '';
+    let appliedEndDate = '';
+
+    if (cameraSelect) {
+        cameraSelect.innerHTML = '<option value="">Semua Kamera</option>' +
+            cameras.map(camera => `<option value="${esc(camera.id)}">${esc(camera.name || `CCTV ${camera.id}`)}</option>`).join('');
+    }
+
+    const hasErrors = vehicleRes.success === false;
+    const rawItems = Array.isArray(vehicleRes.data) ? vehicleRes.data : [];
+    const allItems = getFrequentOccurrenceItems(rawItems);
+
+    function cameraNameFor(item) {
+        if (item.camera_name && String(item.camera_name).trim()) return item.camera_name;
+        const camera = cameras.find(entry => String(entry.id) === String(item.camera_id));
+        return camera?.name || (item.camera_id === null || item.camera_id === undefined || item.camera_id === ''
+            ? 'Kamera tidak diketahui'
+            : `CCTV ${item.camera_id}`);
+    }
+
+    function renderOccurrenceRow(item, index) {
+        const status = normalizeOccurrenceStatus(item.status);
+        const statusClass = status === 'MENCURIGAKAN' ? 'occurrence-status-suspicious' : 'occurrence-status-frequent';
+        const photo = occurrencePhoto(item);
+        const safePhoto = photo ? buildCaptureUrl(photo) : '';
+        const ident = vehicleIdentifier(item);
+        const photoHtml = safePhoto
+            ? `<img src="${esc(safePhoto)}" alt="Capture Kendaraan" class="det-thumb-img" onerror="this.onerror=null;this.parentElement.innerHTML='<div class=\\'det-thumb-placeholder\\'><i class=\\'bi bi-camera-video-off\\'></i></div>';">`
+            : `<div class="det-thumb-placeholder" title="Foto tidak tersedia"><i class="bi bi-camera-video-off"></i></div>`;
+        const lastSeen = formatOccurrenceTime(item.last_seen);
+        const targetHtml = ident.isPlate
+            ? `<span class="target-val-plate">${esc(ident.text)}</span>`
+            : `<span class="text-muted">${esc(ident.text)}</span>`;
+
+        return `
+            <tr class="occurrence-row" data-occurrence-index="${index}" title="Klik untuk melihat detail kendaraan">
+                <td class="col-det-photo">${photoHtml}</td>
+                <td class="col-det-target">${targetHtml}</td>
+                <td><span class="det-type-pill det-type-accent">${esc(formatVehicleType(item.vehicle_type))}</span></td>
+                <td><strong>${Number(item.occurrence_count) || 0}x</strong></td>
+                <td><div class="det-cctv-name" title="${esc(cameraNameFor(item))}">${esc(cameraNameFor(item))}</div></td>
+                <td><div class="det-time-date">${esc(lastSeen)}</div></td>
+                <td><span class="occurrence-status ${statusClass}">${esc(status)}</span></td>
+                <td class="text-end pe-3">
+                    <button type="button" class="btn-action-icon" data-occurrence-index="${index}"
+                        title="Lihat detail kendaraan" aria-label="Lihat detail kendaraan">
+                        <i class="bi bi-eye"></i>
+                    </button>
+                </td>
+            </tr>
+        `;
+    }
+
+    function filteredItems() {
+        const selectedStatus = statusFilter?.value || 'all';
+        const selectedCamera = cameraSelect?.value || '';
+        const selectedPeriod = periodFilter?.value || 'all';
+        const search = (searchInput?.value || '').trim().toLowerCase();
+
+        return allItems.filter(item => {
+            const status = normalizeOccurrenceStatus(item.status).replaceAll(' ', '_');
+            if (Number(item.occurrence_count) < 2 || !['SERING_MUNCUL', 'MENCURIGAKAN'].includes(status)) return false;
+            if (selectedStatus !== 'all' && status !== selectedStatus) return false;
+            if (selectedCamera && String(item.camera_id) !== selectedCamera) return false;
+
+            if (selectedPeriod !== 'all') {
+                const seen = new Date(item.last_seen);
+                if (Number.isNaN(seen.getTime())) return false;
+                const localDate = `${seen.getFullYear()}-${String(seen.getMonth() + 1).padStart(2, '0')}-${String(seen.getDate()).padStart(2, '0')}`;
+                const dateRange = selectedPeriod === 'custom'
+                    ? { start_date: appliedStartDate, end_date: appliedEndDate }
+                    : getDateRange(selectedPeriod);
+                if (!dateRange.start_date || !dateRange.end_date) return false;
+                if (localDate < dateRange.start_date || localDate > dateRange.end_date) return false;
+            }
+
+            if (search) {
+                const ident = vehicleIdentifier(item);
+                const searchValues = [
+                    ident.text,
+                    item.plate,
+                    item.identity,
+                    item.vehicle_type,
+                    formatVehicleType(item.vehicle_type),
+                    cameraNameFor(item),
+                ];
+                if (!searchValues.some(value => String(value || '').toLowerCase().includes(search))) return false;
+            }
+            return true;
+        });
+    }
+
+    function renderTable() {
+        const rows = filteredItems();
+        const total = rows.length;
+        const totalPages = Math.max(1, Math.ceil(total / pageSize));
+        currentPage = Math.min(currentPage, totalPages);
+        const start = (currentPage - 1) * pageSize;
+        const pageRows = rows.slice(start, start + pageSize);
+
+        if (errorState) errorState.hidden = !hasErrors;
+        if (emptyState) emptyState.hidden = total !== 0 || hasErrors;
+        if (tableCard) tableCard.hidden = total === 0;
+        if (tableBody) {
+            tableBody.innerHTML = pageRows.map((item, index) => renderOccurrenceRow(item, start + index)).join('');
+        }
+        if (paginationInfo) {
+            paginationInfo.textContent = total
+                ? `Menampilkan ${start + 1}–${start + pageRows.length} dari ${total} kendaraan`
+                : 'Menampilkan 0 dari 0 kendaraan';
+        }
+        if (pageNumber) {
+            const pages = [];
+            const low = Math.max(1, currentPage - 1);
+            const high = Math.min(totalPages, low + 3);
+            const first = Math.max(1, high - 3);
+            if (first > 1) pages.push('<span class="occurrence-page-ellipsis">…</span>');
+            for (let page = first; page <= high; page += 1) {
+                pages.push(`<button type="button" class="btn-page-nav occurrence-page-number${page === currentPage ? ' active' : ''}" data-page="${page}" aria-label="Halaman ${page}" ${page === currentPage ? 'aria-current="page"' : ''}>${page}</button>`);
+            }
+            if (high < totalPages) pages.push('<span class="occurrence-page-ellipsis">…</span>');
+            pageNumber.innerHTML = pages.join('');
+        }
+        if (prevButton) prevButton.disabled = currentPage <= 1;
+        if (nextButton) nextButton.disabled = currentPage >= totalPages;
+    }
+
+    function showOccurrenceDetail(item) {
+        const modal = document.getElementById('occurrenceDetailModal');
+        const title = document.getElementById('occurrenceDetailTitle');
+        const body = document.getElementById('occurrenceDetailBody');
+        if (!modal || !title || !body) return;
+
+        const ident = vehicleIdentifier(item);
+        const status = normalizeOccurrenceStatus(item.status);
+        const statusClass = status === 'MENCURIGAKAN' ? 'occurrence-status-suspicious' : 'occurrence-status-frequent';
+        const photo = occurrencePhoto(item);
+        const safePhoto = photo ? buildCaptureUrl(photo) : '';
+
+        title.textContent = ident.isPlate ? `Detail Kendaraan · ${ident.text}` : 'Detail Kendaraan';
+
+        const imageHtml = safePhoto
+            ? `<div class="occurrence-detail-photo-wrap mb-3 text-center">
+                   <img src="${esc(safePhoto)}" alt="Capture Kendaraan" class="occurrence-detail-photo img-fluid rounded border" onerror="this.onerror=null;this.parentElement.innerHTML='<div class=\\'occurrence-detail-placeholder mb-3 py-4 text-center rounded border text-muted\\'><i class=\\'bi bi-camera-video-off fs-1 d-block mb-1\\'></i><span>Foto kendaraan tidak tersedia</span></div>';">
+               </div>`
+            : `<div class="occurrence-detail-placeholder mb-3 py-4 text-center rounded border text-muted">
+                   <i class="bi bi-camera-video-off fs-1 d-block mb-1"></i>
+                   <span>Foto kendaraan tidak tersedia</span>
+               </div>`;
+
+        const plateDisplay = ident.isPlate ? ident.text : (item.identity || '-');
+        const vehicleTypeDisplay = formatVehicleType(item.vehicle_type);
+        const occurrenceDisplay = `${Number(item.occurrence_count) || 0}x`;
+        const lastCameraDisplay = cameraNameFor(item);
+        const lastSeenDisplay = formatOccurrenceTime(item.last_seen);
+
+        let historyHtml = '';
+        if (Array.isArray(item.history) && item.history.length > 0) {
+            const historyList = item.history.map((h, i) => {
+                const camName = h.camera_name || (cameras.find(c => String(c.id) === String(h.camera_id))?.name) || `CCTV ${h.camera_id}`;
+                const timeStr = formatOccurrenceTime(h.seen_at);
+                return `<li class="occurrence-history-item"><span class="occurrence-history-index">${i + 1}.</span> <span class="occurrence-history-time">${esc(timeStr)}</span> — <span class="occurrence-history-cctv">${esc(camName)}</span></li>`;
+            }).join('');
+            historyHtml = `
+                <div class="occurrence-detail-history mt-3 pt-3 border-top">
+                    <h6 class="occurrence-history-title mb-2"><i class="bi bi-clock-history me-1"></i>Riwayat Kemunculan Kendaraan</h6>
+                    <ul class="occurrence-history-list list-unstyled mb-0">${historyList}</ul>
+                </div>
+            `;
+        }
+
+        body.innerHTML = `
+            ${imageHtml}
+            <div class="occurrence-detail-info-grid">
+                <div class="occurrence-info-row">
+                    <span class="occurrence-info-label">Plat:</span>
+                    <strong class="occurrence-info-val ${ident.isPlate ? 'target-val-plate' : ''}">${esc(plateDisplay)}</strong>
+                </div>
+                <div class="occurrence-info-row">
+                    <span class="occurrence-info-label">Jenis kendaraan:</span>
+                    <span class="occurrence-info-val">${esc(vehicleTypeDisplay)}</span>
+                </div>
+                <div class="occurrence-info-row">
+                    <span class="occurrence-info-label">Jumlah kemunculan:</span>
+                    <span class="occurrence-info-val"><strong>${esc(occurrenceDisplay)}</strong></span>
+                </div>
+                <div class="occurrence-info-row">
+                    <span class="occurrence-info-label">Status:</span>
+                    <span class="occurrence-info-val"><span class="occurrence-status ${statusClass}">${esc(status)}</span></span>
+                </div>
+                <div class="occurrence-info-row">
+                    <span class="occurrence-info-label">Kamera terakhir:</span>
+                    <span class="occurrence-info-val">${esc(lastCameraDisplay)}</span>
+                </div>
+                <div class="occurrence-info-row">
+                    <span class="occurrence-info-label">Terakhir terlihat:</span>
+                    <span class="occurrence-info-val">${esc(lastSeenDisplay)}</span>
+                </div>
+            </div>
+            ${historyHtml}
+        `;
+
+        bootstrap.Modal.getOrCreateInstance(modal).show();
+    }
+
+    [statusFilter, cameraSelect, periodFilter].forEach(control => {
+        control?.addEventListener('change', () => {
+            currentPage = 1;
+            if (control === periodFilter && customRange) {
+                customRange.hidden = periodFilter.value !== 'custom';
+            }
+            renderTable();
+        });
+    });
+
+    dateApplyButton?.addEventListener('click', () => {
+        const startDate = startDateInput?.value || '';
+        const endDate = endDateInput?.value || '';
+        if (!startDate || !endDate || startDate > endDate) {
+            showNotification('Pilih rentang tanggal yang valid.', 'warning');
+            return;
+        }
+        appliedStartDate = startDate;
+        appliedEndDate = endDate;
+        currentPage = 1;
+        renderTable();
+    });
+
+    searchInput?.addEventListener('input', () => {
+        currentPage = 1;
+        renderTable();
+    });
+
+    prevButton?.addEventListener('click', () => {
+        currentPage -= 1;
+        renderTable();
+    });
+
+    nextButton?.addEventListener('click', () => {
+        currentPage += 1;
+        renderTable();
+    });
+
+    pageNumber?.addEventListener('click', event => {
+        const button = event.target.closest('[data-page]');
+        if (!button) return;
+        currentPage = Number(button.dataset.page) || 1;
+        renderTable();
+    });
+
+    tableBody?.addEventListener('click', event => {
+        const row = event.target.closest('[data-occurrence-index]');
+        if (!row) return;
+        const index = Number(row.dataset.occurrenceIndex);
+        const item = filteredItems()[index];
+        if (item) showOccurrenceDetail(item);
+    });
+
+    renderTable();
+}
+
+async function refreshDashboardSuspiciousSummary() {
+    const total = document.getElementById('suspiciousActivityTotal');
+    const subtitle = document.getElementById('suspiciousActivitySub');
+
+    try {
+        const res = await json('/api/vehicle/occurrences?limit=200');
+        if (res?.success === false || !Array.isArray(res?.data)) {
+            dashboardSuspiciousVehicleSummary = null;
+            if (total) total.textContent = '—';
+            if (subtitle) subtitle.textContent = 'Data tidak tersedia';
+            return;
+        }
+
+        const vehicles = getFrequentOccurrenceItems(res.data);
+        const suspiciousVehicles = vehicles.filter(
+            item => normalizeOccurrenceStatus(item.status) === 'MENCURIGAKAN'
+        );
+
+        let topVehicle = null;
+        if (vehicles.length > 0) {
+            topVehicle = vehicles.reduce((prev, curr) =>
+                (Number(curr.occurrence_count) > Number(prev.occurrence_count)) ? curr : prev
+            );
+        }
+
+        dashboardSuspiciousVehicleSummary = {
+            frequentCount: vehicles.length,
+            suspiciousCount: suspiciousVehicles.length,
+            topVehicle: topVehicle,
+        };
+
+        if (total) total.textContent = String(suspiciousVehicles.length);
+        if (subtitle) subtitle.textContent = 'kendaraan';
+
+        renderDashboardSuspiciousInsight();
+    } catch (e) {
+        console.error('Gagal memuat summary kendaraan mencurigakan:', e);
+        dashboardSuspiciousVehicleSummary = null;
+        if (total) total.textContent = '—';
+        if (subtitle) subtitle.textContent = 'Data tidak tersedia';
+    }
+}
+
+function renderDashboardSuspiciousInsight() {
+    const insight = document.getElementById('dashboardInsights');
+    if (!insight || !dashboardSuspiciousVehicleSummary) return;
+
+    const { frequentCount, topVehicle } = dashboardSuspiciousVehicleSummary;
+    let existingHtml = insight.innerHTML;
+
+    // Build vehicle insight elements
+    const vehicleInsightHtml = frequentCount > 0
+        ? `<li id="suspiciousActivityInsight"><a href="/aktivitas-mencurigakan">${frequentCount} kendaraan dengan frekuensi kemunculan tinggi terdeteksi.</a></li>`
+        : '';
+    const topVehicleHtml = topVehicle
+        ? `<li id="topVehicleInsight">Kendaraan <strong>${esc(vehicleIdentifier(topVehicle).text)}</strong> merupakan kendaraan dengan kemunculan tertinggi.</li>`
+        : '';
+
+    // Replace or insert into dashboard insights
+    const tempDiv = document.createElement('div');
+    tempDiv.innerHTML = existingHtml;
+
+    // Remove old dynamic vehicle/occurrence li tags
+    const oldSuspicious = tempDiv.querySelector('#suspiciousActivityInsight');
+    if (oldSuspicious) oldSuspicious.remove();
+    const oldTop = tempDiv.querySelector('#topVehicleInsight');
+    if (oldTop) oldTop.remove();
+
+    // Filter out any li with person/orang
+    Array.from(tempDiv.querySelectorAll('li')).forEach(li => {
+        const txt = li.textContent.toLowerCase();
+        if (txt.includes('orang') || txt.includes('person') || txt.includes('wajah')) {
+            li.remove();
+        }
+    });
+
+    let newContent = '';
+    if (vehicleInsightHtml) newContent += vehicleInsightHtml;
+    if (topVehicleHtml) newContent += topVehicleHtml;
+    newContent += tempDiv.innerHTML;
+
+    insight.innerHTML = newContent || '<li>Belum ada data cukup untuk insight kendaraan.</li>';
+}
 
 async function initDashboard() {
     async function updateDashboardMetrics() {
@@ -504,7 +934,23 @@ async function initDashboard() {
             const insight = document.getElementById('dashboardInsights');
             if (insight) {
                 const insightData = summaryRes.data?.insights || [];
-                insight.innerHTML = insightData.map(item => `<li>${esc(item)}</li>`).join('') || '<li>Belum ada data cukup untuk insight.</li>';
+                const insightItems = [];
+                if (dashboardSuspiciousVehicleSummary) {
+                    const { frequentCount, topVehicle } = dashboardSuspiciousVehicleSummary;
+                    if (frequentCount > 0) {
+                        insightItems.push(`<li id="suspiciousActivityInsight"><a href="/aktivitas-mencurigakan">${frequentCount} kendaraan dengan frekuensi kemunculan tinggi terdeteksi.</a></li>`);
+                    }
+                    if (topVehicle) {
+                        insightItems.push(`<li id="topVehicleInsight">Kendaraan <strong>${esc(vehicleIdentifier(topVehicle).text)}</strong> merupakan kendaraan dengan kemunculan tertinggi.</li>`);
+                    }
+                }
+                insightData.forEach(item => {
+                    const txt = String(item).toLowerCase();
+                    if (!txt.includes('orang') && !txt.includes('person') && !txt.includes('wajah')) {
+                        insightItems.push(`<li>${esc(item)}</li>`);
+                    }
+                });
+                insight.innerHTML = insightItems.join('') || '<li>Belum ada data cukup untuk insight kendaraan.</li>';
             }
         } catch (e) {
             console.error('Update dashboard metrics error:', e);
@@ -518,6 +964,10 @@ async function initDashboard() {
     if (select) {
         select.innerHTML = cameras.map(item => `<option value="${item.id}" ${item.active ? 'selected' : ''}>${esc(item.name)}</option>`).join('') || '<option value="">Belum ada kamera</option>';
     }
+
+    let lastOccurrenceRefresh = 0;
+    await refreshDashboardSuspiciousSummary();
+    lastOccurrenceRefresh = Date.now();
 
     // Video Stream Control
     const streamImg = document.getElementById('liveStreamImg');
@@ -774,6 +1224,10 @@ async function initDashboard() {
             if (window.location.pathname === '/' || window.location.pathname === '/dashboard') {
                 await updateDashboardMetrics();
                 await refreshRecentList();
+                if (Date.now() - lastOccurrenceRefresh >= 15000) {
+                    await refreshDashboardSuspiciousSummary();
+                    lastOccurrenceRefresh = Date.now();
+                }
             }
         }, 3500);
     }
@@ -1782,81 +2236,194 @@ function renderCameraBarChart(cameras) {
 }
 window.renderCameraBarChart = renderCameraBarChart;
 
-function renderTopPlatesTable() {
-    const topBody = document.getElementById('topPlatesTable');
-    if (!topBody) return;
+// Render chart aktivitas per jam (24 jam)
+function renderHourlyBarChart(hourly) {
+    const canvas = document.getElementById('hourlyBarCanvas');
+    if (!canvas || !window.Chart) return;
+    if (hourly) window._lastHourlyData = hourly;
+    const hList = window._lastHourlyData || [];
 
-    let plates = window._statsTopPlatesData || [];
-    const q = (window._statsSearchQuery || '').trim().toLowerCase();
-    if (q) {
-        plates = plates.filter(p => {
-            const plateStr = (p.plate || p.plate_number || '').toLowerCase();
-            const camStr = (p.camera || p.last_camera || '').toLowerCase();
-            return plateStr.includes(q) || camStr.includes(q);
-        });
+    if (window._hourlyChart) {
+        window._hourlyChart.destroy();
+        window._hourlyChart = null;
     }
 
-    if (!plates.length) {
-        topBody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">Belum ada data kendaraan / plat.</td></tr>';
-        return;
-    }
+    const colors = getThemeChartColors();
+    const labels = hList.map(h => h.label || `${String(h.hour).padStart(2, '0')}:00`);
+    const vehicleData = hList.map(h => h.vehicles || 0);
+    const peopleData = hList.map(h => h.people || 0);
 
-    topBody.innerHTML = plates.slice(0, 10).map((p, i) => {
-        const plateNum = p.plate || p.plate_number || '-';
-        const count = p.count ?? p.total_seen ?? 0;
-        const camera = p.camera || p.last_camera || '-';
-        const lastSeen = p.last_seen || '-';
-        const conf = p.confidence ?? p.avg_confidence_percent ?? 0;
-        let statusCode = 1;
-        let statusText = 'Terbaca';
-
-        if (p.status_code !== undefined && p.status_code !== null) {
-            statusCode = Number(p.status_code);
-            if (statusCode === 1) {
-                statusText = p.status || 'Terbaca';
-            } else if (statusCode === 2) {
-                statusText = p.status || 'Perlu Cek';
-            } else {
-                statusText = p.status || 'Gagal';
-            }
-        } else if (p.status) {
-            const st = String(p.status).toLowerCase();
-            if (st.includes('baca') || st.includes('aktual') || st.includes('sukses') || st.includes('valid')) {
-                statusCode = 1;
-                statusText = p.status;
-            } else if (st.includes('cek') || st.includes('review') || st.includes('ragu')) {
-                statusCode = 2;
-                statusText = p.status;
-            } else {
-                statusCode = 0;
-                statusText = p.status;
+    window._hourlyChart = new Chart(canvas, {
+        type: 'bar',
+        data: {
+            labels: labels,
+            datasets: [
+                {
+                    label: 'Kendaraan',
+                    data: vehicleData,
+                    backgroundColor: colors.primary,
+                    borderRadius: 3,
+                    borderSkipped: false,
+                    maxBarThickness: 20
+                },
+                {
+                    label: 'Orang',
+                    data: peopleData,
+                    backgroundColor: colors.warning,
+                    borderRadius: 3,
+                    borderSkipped: false,
+                    maxBarThickness: 20
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            plugins: {
+                legend: {
+                    position: 'top',
+                    align: 'end',
+                    labels: {
+                        boxWidth: 10,
+                        boxHeight: 10,
+                        borderRadius: 2,
+                        color: colors.muted,
+                        font: { family: '"Segoe UI", Inter, Arial, sans-serif', size: 11, weight: '500' },
+                        padding: 10
+                    }
+                },
+                tooltip: {
+                    backgroundColor: colors.panel,
+                    borderColor: colors.line,
+                    borderWidth: 1,
+                    titleColor: colors.text,
+                    bodyColor: colors.text,
+                    padding: 8,
+                    cornerRadius: 6
+                }
+            },
+            scales: {
+                x: {
+                    grid: { display: false },
+                    ticks: {
+                        color: colors.muted,
+                        font: { family: '"Segoe UI", Inter, Arial, sans-serif', size: 10 },
+                        maxRotation: 0,
+                        autoSkip: true,
+                        maxTicksLimit: 12
+                    }
+                },
+                y: {
+                    beginAtZero: true,
+                    grid: { color: colors.line },
+                    ticks: {
+                        color: colors.muted,
+                        font: { family: '"Segoe UI", Inter, Arial, sans-serif', size: 10 },
+                        precision: 0
+                    }
+                }
             }
         }
+    });
+}
+window.renderHourlyBarChart = renderHourlyBarChart;
 
-        const badgeClass = statusCode === 1
-            ? 'det-status-pill status-terbaca'
-            : (statusCode === 2 ? 'det-status-pill status-perlu-cek' : 'det-status-pill status-gagal');
+// Render analisis distribusi jenis kendaraan
+function renderVehicleTypeBreakdown(vt) {
+    const container = document.getElementById('statsVehicleTypeBreakdown');
+    if (!container) return;
+    const total = vt?.total || 0;
+    const types = [
+        { key: 'car', label: 'Mobil', count: vt?.car || 0, icon: 'bi-car-front', color: '#3b82f6' },
+        { key: 'motorcycle', label: 'Sepeda Motor', count: vt?.motorcycle || 0, icon: 'bi-bicycle', color: '#10b981' },
+        { key: 'bus', label: 'Bus', count: vt?.bus || 0, icon: 'bi-bus-front', color: '#f59e0b' },
+        { key: 'truck', label: 'Truck', count: vt?.truck || 0, icon: 'bi-truck', color: '#ef4444' },
+        { key: 'other', label: 'Lainnya / Unknown', count: vt?.other || 0, icon: 'bi-question-circle', color: '#6b7280' },
+    ];
 
-        let timeHtml = `<span class="time-primary-line">${esc(lastSeen)}</span>`;
-        if (lastSeen.includes(' ') || lastSeen.includes('T')) {
-            const parts = lastSeen.split(/[\sT]+/);
-            if (parts.length >= 2) {
-                timeHtml = `<div class="time-primary-line">${esc(parts[0])}</div><div class="time-sub-line">${esc(parts[1])}</div>`;
-            }
-        }
-
+    const itemsHtml = types.map(t => {
+        const pct = total > 0 ? ((t.count / total) * 100).toFixed(1) : '0.0';
         return `
-            <tr>
-                <td class="text-center text-muted" style="font-size: 0.76rem;">${i + 1}</td>
-                <td><span class="stats-plate-badge">${esc(plateNum)}</span></td>
-                <td class="text-end font-monospace" style="font-variant-numeric: tabular-nums;">${count} kali</td>
-                <td>${esc(camera)}</td>
-                <td>${timeHtml}</td>
-                <td class="text-end font-monospace" style="font-variant-numeric: tabular-nums;">${conf}%</td>
-                <td><span class="${badgeClass}">${esc(statusText)}</span></td>
-            </tr>
+            <div class="mb-3">
+                <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="d-flex align-items-center gap-2 small fw-medium">
+                        <i class="bi ${t.icon}" style="color: ${t.color}"></i>
+                        <span>${t.label}</span>
+                    </span>
+                    <span class="small text-muted"><strong class="text-body">${t.count.toLocaleString('id-ID')}</strong> unit (${pct}%)</span>
+                </div>
+                <div class="progress" style="height: 6px; background: rgba(107, 114, 128, 0.15);">
+                    <div class="progress-bar" role="progressbar" style="width: ${pct}%; background-color: ${t.color};" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"></div>
+                </div>
+            </div>
         `;
     }).join('');
+
+    container.innerHTML = `
+        <div class="p-1">
+            <div class="d-flex justify-content-between align-items-center pb-2 mb-3 border-bottom">
+                <span class="text-muted small">Total Kendaraan Terklasifikasi</span>
+                <strong class="fs-6">${total.toLocaleString('id-ID')} unit</strong>
+            </div>
+            ${itemsHtml}
+        </div>
+    `;
+}
+window.renderVehicleTypeBreakdown = renderVehicleTypeBreakdown;
+
+// Render performa pembacaan plat
+function renderPlatePerformance(pp) {
+    const container = document.getElementById('statsPlatePerformance');
+    if (!container) return;
+    const total = pp?.total_plates || 0;
+    const valid = pp?.valid_plates || 0;
+    const check = pp?.check_plates || 0;
+    const failed = pp?.failed_plates || 0;
+    const readRate = pp?.read_rate !== undefined && pp?.read_rate !== null ? `${pp.read_rate}%` : '0%';
+    const avgConf = pp?.avg_confidence !== undefined && pp?.avg_confidence !== null ? `${pp.avg_confidence}%` : 'Tidak tersedia';
+
+    container.innerHTML = `
+        <div class="p-1">
+            <div class="row g-2 mb-3">
+                <div class="col-6">
+                    <div class="p-3 rounded border text-center" style="background: rgba(59, 130, 246, 0.05);">
+                        <div class="text-muted small mb-1">Total Plat Terdeteksi</div>
+                        <strong class="fs-4 text-primary">${total.toLocaleString('id-ID')}</strong>
+                    </div>
+                </div>
+                <div class="col-6">
+                    <div class="p-3 rounded border text-center" style="background: rgba(16, 185, 129, 0.05);">
+                        <div class="text-muted small mb-1">Read Rate</div>
+                        <strong class="fs-4 text-success">${readRate}</strong>
+                    </div>
+                </div>
+            </div>
+            <div class="list-group list-group-flush small">
+                <div class="list-group-item d-flex justify-content-between align-items-center px-1 py-2 border-bottom">
+                    <span><i class="bi bi-check-circle text-success me-2"></i>Plat Terbaca / Valid</span>
+                    <strong class="text-success">${valid.toLocaleString('id-ID')} unit</strong>
+                </div>
+                <div class="list-group-item d-flex justify-content-between align-items-center px-1 py-2 border-bottom">
+                    <span><i class="bi bi-exclamation-triangle text-warning me-2"></i>Plat Perlu Dicek</span>
+                    <strong class="text-warning">${check.toLocaleString('id-ID')} unit</strong>
+                </div>
+                <div class="list-group-item d-flex justify-content-between align-items-center px-1 py-2 border-bottom">
+                    <span><i class="bi bi-x-circle text-danger me-2"></i>Plat Gagal / Buram</span>
+                    <strong class="text-danger">${failed.toLocaleString('id-ID')} unit</strong>
+                </div>
+                <div class="list-group-item d-flex justify-content-between align-items-center px-1 py-2">
+                    <span><i class="bi bi-speedometer2 text-info me-2"></i>Rata-rata Akurasi (Confidence)</span>
+                    <strong class="text-body">${avgConf}</strong>
+                </div>
+            </div>
+        </div>
+    `;
+}
+window.renderPlatePerformance = renderPlatePerformance;
+
+function renderTopPlatesTable() {
+    // Stub dipertahankan untuk backward-compatibility jika ada panggilan lama
 }
 
 async function loadEnterpriseStatistics(period = 'today') {
@@ -1878,8 +2445,10 @@ async function loadEnterpriseStatistics(period = 'today') {
         if (analyticsRes?.success && analyticsRes.data) {
             const data = analyticsRes.data;
             const s = data.summary || {};
+            const platePerf = data.plate_performance || {};
+            const vt = data.vehicle_types || {};
 
-            // 1. Update 4 KPI Cards
+            // 1. Update 4 KPI Cards (Total Kendaraan, Total Orang, Plat Terbaca, CCTV Aktif)
             const elTotalDets = document.getElementById('kpiTotalDets');
             const elTotalPlates = document.getElementById('kpiTotalPlates');
             const elPlateRate = document.getElementById('kpiPlateRate');
@@ -1887,11 +2456,10 @@ async function loadEnterpriseStatistics(period = 'today') {
             const elCamStatus = document.getElementById('kpiCamStatus');
             const elCamUptime = document.getElementById('kpiCamUptime');
 
-            const totalDets = (s.vehicles || 0) + (s.people || 0);
-            if (elTotalDets) elTotalDets.textContent = totalDets.toLocaleString('id-ID');
-            if (elTotalPlates) elTotalPlates.textContent = (s.plates || 0).toLocaleString('id-ID');
-            if (elPlateRate) elPlateRate.textContent = s.vehicles ? `${Math.round((s.plates / s.vehicles) * 100)}%` : '0%';
+            if (elTotalDets) elTotalDets.textContent = (s.vehicles || 0).toLocaleString('id-ID');
             if (elTotalFaces) elTotalFaces.textContent = (s.people || 0).toLocaleString('id-ID');
+            if (elTotalPlates) elTotalPlates.textContent = (platePerf.valid_plates ?? s.plates ?? 0).toLocaleString('id-ID');
+            if (elPlateRate) elPlateRate.textContent = platePerf.read_rate !== undefined ? `${platePerf.read_rate}%` : (s.vehicles ? `${Math.round((s.plates / s.vehicles) * 100)}%` : '0%');
             if (elCamStatus) elCamStatus.textContent = `${s.active_cameras || 0} / ${s.total_cameras || 0}`;
             if (elCamUptime) elCamUptime.textContent = s.total_cameras ? `${Math.round((s.active_cameras / s.total_cameras) * 100)}%` : '0%';
 
@@ -1932,7 +2500,7 @@ async function loadEnterpriseStatistics(period = 'today') {
                 `;
             }
 
-            // 3. Render Chart.js Beban CCTV
+            // 3. Render Chart.js Aktivitas per CCTV
             renderCameraBarChart(data.cameras || []);
 
             // 4. Render Analisis Jam Sibuk
@@ -1944,8 +2512,8 @@ async function loadEnterpriseStatistics(period = 'today') {
                     const endH = String(((peak.hour ?? 0) + 1) % 24).padStart(2, '0');
                     peakContainer.innerHTML = `
                         <div class="stats-peak-content">
-                            <div class="stats-peak-time">${startH}:00 - ${endH}:00</div>
-                            <div class="stats-peak-desc">${(peak.vehicles || 0).toLocaleString('id-ID')} kendaraan · ${(peak.people || 0).toLocaleString('id-ID')} orang</div>
+                            <div class="stats-peak-time">${startH}:00 - ${endH}:00 WIB</div>
+                            <div class="stats-peak-desc"><strong>${(peak.vehicles || 0).toLocaleString('id-ID')}</strong> kendaraan · <strong>${(peak.people || 0).toLocaleString('id-ID')}</strong> orang</div>
                         </div>
                     `;
                 } else {
@@ -1953,9 +2521,15 @@ async function loadEnterpriseStatistics(period = 'today') {
                 }
             }
 
-            // 5. Render Top 10 Tabel
-            window._statsTopPlatesData = data.top_plates || [];
-            renderTopPlatesTable();
+            // 5. Render Grafik Aktivitas per Jam
+            renderHourlyBarChart(data.hourly || []);
+
+            // 6. Render Distribusi Jenis Kendaraan
+            renderVehicleTypeBreakdown(vt);
+
+            // 7. Render Performa Pembacaan Plat
+            renderPlatePerformance(platePerf);
+
             return;
         }
 
@@ -1965,7 +2539,8 @@ async function loadEnterpriseStatistics(period = 'today') {
         const kpi = stats.kpi || {};
         const camDist = stats.camera_distribution || [];
         const peakHours = stats.peak_hours || [];
-        const topPlates = stats.top_plates || [];
+        const platePerf = stats.plate_performance || {};
+        const vt = stats.vehicle_types || {};
 
         const elTotalDets = document.getElementById('kpiTotalDets');
         const elTotalPlates = document.getElementById('kpiTotalPlates');
@@ -1975,48 +2550,11 @@ async function loadEnterpriseStatistics(period = 'today') {
         const elCamUptime = document.getElementById('kpiCamUptime');
 
         if (elTotalDets) elTotalDets.textContent = (kpi.total_detections || 0).toLocaleString('id-ID');
-        if (elTotalPlates) elTotalPlates.textContent = (kpi.total_plates || 0).toLocaleString('id-ID');
-        if (elPlateRate) elPlateRate.textContent = `${kpi.plate_read_rate || 0}%`;
+        if (elTotalPlates) elTotalPlates.textContent = (platePerf.valid_plates ?? kpi.total_plates ?? 0).toLocaleString('id-ID');
+        if (elPlateRate) elPlateRate.textContent = platePerf.read_rate !== undefined ? `${platePerf.read_rate}%` : `${kpi.plate_read_rate || 0}%`;
         if (elTotalFaces) elTotalFaces.textContent = (kpi.total_faces || 0).toLocaleString('id-ID');
         if (elCamStatus) elCamStatus.textContent = `${kpi.active_cameras || 0} / ${kpi.total_cameras || 0}`;
         if (elCamUptime) elCamUptime.textContent = `${kpi.camera_availability || 0}%`;
-
-        // Breakdown fallback
-        const statsBreakdown = document.getElementById('statsBreakdown');
-        if (statsBreakdown) {
-            statsBreakdown.innerHTML = `
-                <div class="stats-breakdown-group">
-                    <span class="stats-group-label">Rincian masuk</span>
-                    <div class="stats-subgrid-2">
-                        <div class="stats-sub-card">
-                            <span class="metric-card-label">Kendaraan masuk</span>
-                            <strong class="metric-card-value">${(kpi.total_plates || 0).toLocaleString('id-ID')}</strong>
-                            <span class="stats-dir-muted"><i class="bi bi-arrow-up-right"></i> Arah ke dalam</span>
-                        </div>
-                        <div class="stats-sub-card">
-                            <span class="metric-card-label">Orang masuk</span>
-                            <strong class="metric-card-value">${(kpi.total_faces || 0).toLocaleString('id-ID')}</strong>
-                            <span class="stats-dir-muted"><i class="bi bi-arrow-up-right"></i> Arah ke dalam</span>
-                        </div>
-                    </div>
-                </div>
-                <div class="stats-breakdown-group">
-                    <span class="stats-group-label">Rincian keluar</span>
-                    <div class="stats-subgrid-2">
-                        <div class="stats-sub-card">
-                            <span class="metric-card-label">Kendaraan keluar</span>
-                            <strong class="metric-card-value">0</strong>
-                            <span class="stats-dir-muted"><i class="bi bi-arrow-down-right"></i> Arah ke luar</span>
-                        </div>
-                        <div class="stats-sub-card">
-                            <span class="metric-card-label">Orang keluar</span>
-                            <strong class="metric-card-value">0</strong>
-                            <span class="stats-dir-muted"><i class="bi bi-arrow-down-right"></i> Arah ke luar</span>
-                        </div>
-                    </div>
-                </div>
-            `;
-        }
 
         // Camera bar chart fallback
         const camerasAdapted = camDist.map(c => ({
@@ -2034,7 +2572,7 @@ async function loadEnterpriseStatistics(period = 'today') {
                 peakContainer.innerHTML = `
                     <div class="stats-peak-content">
                         <div class="stats-peak-time">${esc(ph.time_range)}</div>
-                        <div class="stats-peak-desc">${(ph.count || 0).toLocaleString('id-ID')} deteksi total</div>
+                        <div class="stats-peak-desc"><strong>${(ph.count || 0).toLocaleString('id-ID')}</strong> kendaraan · <strong>${(ph.people || 0).toLocaleString('id-ID')}</strong> orang</div>
                     </div>
                 `;
             } else {
@@ -2042,9 +2580,8 @@ async function loadEnterpriseStatistics(period = 'today') {
             }
         }
 
-        // Top 10 fallback
-        window._statsTopPlatesData = topPlates;
-        renderTopPlatesTable();
+        renderVehicleTypeBreakdown(vt);
+        renderPlatePerformance(platePerf);
     } catch (e) {
         console.error('Error loadEnterpriseStatistics:', e);
     } finally {
@@ -2145,11 +2682,14 @@ async function initStatistics() {
         window._statsThemeObserverBound = true;
         try {
             const obs = new MutationObserver(() => {
-                if (document.getElementById('cameraBarCanvas') && window._lastStatsCameras) {
-                    setTimeout(() => {
+                setTimeout(() => {
+                    if (document.getElementById('cameraBarCanvas') && window._lastStatsCameras) {
                         if (typeof renderCameraBarChart === 'function') renderCameraBarChart();
-                    }, 50);
-                }
+                    }
+                    if (document.getElementById('hourlyBarCanvas') && window._lastHourlyData) {
+                        if (typeof renderHourlyBarChart === 'function') renderHourlyBarChart(window._lastHourlyData);
+                    }
+                }, 50);
             });
             obs.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-bs-theme', 'data-theme'] });
         } catch (e) { }
@@ -2469,6 +3009,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (document.getElementById('totalVehicle') || document.getElementById('liveStreamImg')) {
         initDashboard();
+    }
+    if (document.getElementById('suspiciousActivityPage')) {
+        initSuspiciousActivityPage();
     }
     if (document.getElementById('detectionTable')) {
         initDetectionsPage();

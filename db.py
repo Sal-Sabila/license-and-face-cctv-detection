@@ -380,6 +380,332 @@ def compute_face_status(face_conf: float) -> int:
         return 0
 
 
+def compute_vehicle_occurrence_status(occurrence_count: int, has_valid_plate: bool = True) -> str:
+    if not has_valid_plate:
+        return "NORMAL"
+    count = max(0, int(occurrence_count or 0))
+    if count <= 1:
+        return "NORMAL"
+    if 2 <= count <= 5:
+        return "SERING_MUNCUL"
+    return "MENCURIGAKAN"
+
+
+def compute_person_occurrence_status(occurrence_count: int) -> str:
+    count = max(0, int(occurrence_count or 0))
+    if count == 1:
+        return "NORMAL"
+    if 2 <= count <= 5:
+        return "SERING_MUNCUL"
+    return "MENCURIGAKAN"
+
+
+def _extract_person_identity(event_key: str, track_id=None):
+    raw = str(event_key or "").strip()
+    if not raw:
+        if track_id is not None:
+            return f"track:{track_id}"
+        return None
+
+    parts = [p for p in raw.split(":") if p not in ("", " ")]
+    if len(parts) >= 3 and parts[0].lower() == "person":
+        return parts[2]
+    if track_id is not None:
+        return f"track:{track_id}"
+    return raw
+
+
+def is_valid_vehicle_plate(plate_text: str) -> bool:
+    if not plate_text:
+        return False
+    text = str(plate_text).strip().upper()
+    cleaned = re.sub(r"[^A-Z0-9]", "", text)
+    # Reject strings shorter than 3 chars or purely numeric or purely alphabetic
+    if len(cleaned) < 3 or cleaned.isdigit() or cleaned.isalpha():
+        return False
+    return is_valid_indonesian_plate(text)
+
+
+def extract_vehicle_identity(raw_plate: str, event_key: str = None, track_id=None, camera_id=None):
+    # 1. Plat valid sebagai identitas utama untuk menentukan kendaraan yang sama pada kemunculan berbeda
+    if raw_plate and is_valid_vehicle_plate(raw_plate):
+        normalized = normalize_plate_number(raw_plate)
+        if normalized and is_valid_vehicle_plate(normalized):
+            return normalized, normalized
+
+    # 2. Jika plat tidak tersedia / tidak valid:
+    # JANGAN gunakan vehicle_group_id sebagai identitas recurrence lintas kemunculan.
+    # event_key / track_id hanya digunakan untuk continuity dalam SATU sesi kemunculan.
+    raw_key = str(event_key or "").strip()
+    if raw_key:
+        session_event = re.sub(r":(?:gen|g)\d+", "", raw_key)
+        cam_prefix = f"cam{camera_id}_" if camera_id is not None else ""
+        return f"{cam_prefix}{session_event}", None
+
+    if track_id is not None:
+        cam_prefix = f"cam{camera_id}_" if camera_id is not None else ""
+        return f"track:{cam_prefix}{track_id}", None
+
+    return None, None
+
+
+def compute_appearance_sessions(detections, max_gap_seconds: float = 90.0):
+    if not detections:
+        return []
+
+    sorted_dets = sorted(detections, key=lambda d: d.get("created_at") or datetime.min)
+    sessions = []
+    current_session = None
+
+    for det in sorted_dets:
+        ts = det.get("created_at")
+        if not ts:
+            continue
+
+        det_cam_id = det.get("camera_id")
+        det_img = det.get("vehicle_image_path") or det.get("plate_image_path")
+
+        if current_session is None:
+            current_session = {
+                "start_time": ts,
+                "end_time": ts,
+                "camera_id": det_cam_id,
+                "camera_name": det.get("camera_name"),
+                "detection_count": 1,
+                "best_image": det_img,
+            }
+        else:
+            gap = (ts - current_session["end_time"]).total_seconds()
+            if gap <= max_gap_seconds and det_cam_id == current_session["camera_id"]:
+                current_session["end_time"] = ts
+                current_session["detection_count"] += 1
+                if det_img and not current_session["best_image"]:
+                    current_session["best_image"] = det_img
+            else:
+                sessions.append(current_session)
+                current_session = {
+                    "start_time": ts,
+                    "end_time": ts,
+                    "camera_id": det_cam_id,
+                    "camera_name": det.get("camera_name"),
+                    "detection_count": 1,
+                    "best_image": det_img,
+                }
+
+    if current_session is not None:
+        sessions.append(current_session)
+
+    return sessions
+
+
+def get_vehicle_occurrence_summary(camera_id=None, limit: int = 50):
+    limit = max(1, min(int(limit or 50), 200))
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            where_clauses = ["fd.object_type = 'vehicle'"]
+            params = []
+            if camera_id is not None and str(camera_id).strip() not in ("", "all"):
+                where_clauses.append("fd.camera_id = %s")
+                params.append(int(camera_id))
+
+            cur.execute(
+                f"""
+                    SELECT fd.detection_id, fd.camera_id, fd.track_id, fd.event_key,
+                           fd.vehicle_type, fd.created_at, fd.vehicle_image_path,
+                           fd.detection_confidence,
+                           p.normalized_plate_number, p.plate_number, p.plate_image_path,
+                           COALESCE(c.location, CONCAT('CCTV ', fd.camera_id)) AS camera_name
+                    FROM full_detection fd
+                    LEFT JOIN plate p ON p.plate_id = fd.plate_id
+                    LEFT JOIN cameras c ON c.camera_id = fd.camera_id
+                    WHERE {" AND ".join(where_clauses)}
+                    ORDER BY fd.created_at ASC
+                """,
+                params,
+            )
+            rows = cur.fetchall()
+
+            buckets = {}
+            for row in rows:
+                raw_plate = row.get("normalized_plate_number") or row.get("plate_number")
+                identity, valid_plate = extract_vehicle_identity(
+                    raw_plate=raw_plate,
+                    event_key=row.get("event_key"),
+                    track_id=row.get("track_id"),
+                    camera_id=row.get("camera_id"),
+                )
+                if not identity:
+                    continue
+
+                if valid_plate:
+                    key = f"plate:{valid_plate}"
+                else:
+                    # Tanpa plat valid: isolasi per sesi/kamera agar continuity dalam satu sesi terjaga,
+                    # tetapi TIDAK digabung dengan kemunculan kendaraan lain di waktu berbeda.
+                    key = f"nonplate:{row.get('camera_id')}:{identity}"
+
+                bucket = buckets.setdefault(
+                    key,
+                    {
+                        "identity": identity,
+                        "plate": valid_plate,
+                        "has_valid_plate": bool(valid_plate),
+                        "vehicle_type": row.get("vehicle_type") or "unknown",
+                        "camera_id": row.get("camera_id"),
+                        "camera_name": row.get("camera_name"),
+                        "detections": [],
+                        "vehicle_image_path": None,
+                        "_img_exists": False,
+                    },
+                )
+                bucket["detections"].append(row)
+                if row.get("camera_id"):
+                    bucket["camera_id"] = row.get("camera_id")
+                    bucket["camera_name"] = row.get("camera_name")
+                if row.get("vehicle_type") and row.get("vehicle_type") != "unknown":
+                    bucket["vehicle_type"] = row.get("vehicle_type")
+
+                candidate_img = row.get("vehicle_image_path") or row.get("plate_image_path")
+                if candidate_img:
+                    if not bucket["vehicle_image_path"]:
+                        bucket["vehicle_image_path"] = candidate_img
+                        bucket["_img_exists"] = _capture_file_exists(candidate_img)
+                    elif not bucket["_img_exists"] and _capture_file_exists(candidate_img):
+                        bucket["vehicle_image_path"] = candidate_img
+                        bucket["_img_exists"] = True
+
+            result = []
+            for bucket in buckets.values():
+                sessions = compute_appearance_sessions(bucket["detections"], max_gap_seconds=90.0)
+                has_valid_plate = bucket.get("has_valid_plate", False)
+                if has_valid_plate:
+                    occ_count = len(sessions)
+                    status = compute_vehicle_occurrence_status(occ_count, has_valid_plate=True)
+                else:
+                    # Tanpa plat valid: tidak dihitung recurrence lintas appearance,
+                    # hanya 1 kemunculan per sesi, status selalu NORMAL
+                    occ_count = 1
+                    status = "NORMAL"
+
+                det_count = len(bucket["detections"])
+                if occ_count < 2 or status not in ("SERING_MUNCUL", "MENCURIGAKAN"):
+                    continue
+
+                history = []
+                for s in reversed(sessions):
+                    history.append({
+                        "seen_at": s["end_time"],
+                        "camera_id": s["camera_id"],
+                        "camera_name": s["camera_name"],
+                        "detection_count": s["detection_count"],
+                    })
+
+                last_seen = sessions[-1]["end_time"] if sessions else None
+                latest_camera_id = sessions[-1]["camera_id"] if sessions else bucket["camera_id"]
+                latest_camera_name = sessions[-1]["camera_name"] if sessions else bucket["camera_name"]
+
+                best_img = bucket["vehicle_image_path"]
+                if not best_img:
+                    for s in reversed(sessions):
+                        if s.get("best_image"):
+                            best_img = s["best_image"]
+                            break
+
+                result.append({
+                    "identity": bucket["identity"],
+                    "plate": bucket["plate"],
+                    "vehicle_type": bucket["vehicle_type"],
+                    "occurrence_count": occ_count,
+                    "detection_count": det_count,
+                    "status": status,
+                    "last_seen": last_seen,
+                    "camera_id": latest_camera_id,
+                    "camera_name": latest_camera_name,
+                    "vehicle_image_path": best_img,
+                    "capture_path": best_img,
+                    "image_url": best_img,
+                    "history": history[:20],
+                })
+
+            result.sort(
+                key=lambda item: (int(item["occurrence_count"]), item.get("last_seen") or datetime.min),
+                reverse=True,
+            )
+            return result[:limit]
+
+
+def get_person_occurrence_summary(camera_id=None, limit: int = 50):
+    limit = max(1, min(int(limit or 50), 200))
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            where_clauses = ["fd.object_type = 'person'"]
+            params = []
+            if camera_id is not None and str(camera_id).strip() not in ("", "all"):
+                where_clauses.append("fd.camera_id = %s")
+                params.append(int(camera_id))
+
+            dedup_ids = _dedup_event_ids(cur, " AND ".join(where_clauses), params)
+            if not dedup_ids:
+                return []
+
+            placeholders = ",".join(["%s"] * len(dedup_ids))
+            cur.execute(
+                f"""
+                    SELECT fd.detection_id, fd.camera_id, fd.track_id, fd.event_key, fd.created_at
+                    FROM full_detection fd
+                    WHERE fd.detection_id IN ({placeholders})
+                    ORDER BY fd.created_at DESC
+                """,
+                dedup_ids,
+            )
+            rows = cur.fetchall()
+
+            buckets = {}
+            for row in rows:
+                identity = _extract_person_identity(row.get("event_key"), row.get("track_id"))
+                if not identity:
+                    continue
+
+                camera_value = row.get("camera_id")
+                key = (camera_value, identity)
+                bucket = buckets.setdefault(
+                    key,
+                    {
+                        "identity": identity,
+                        "object_group_id": identity if str(identity).startswith("person_group_") else None,
+                        "camera_id": camera_value,
+                        "occurrence_count": 0,
+                        "last_seen": row.get("created_at"),
+                    },
+                )
+                bucket["occurrence_count"] += 1
+                if row.get("created_at") and (
+                    bucket["last_seen"] is None or row["created_at"] > bucket["last_seen"]
+                ):
+                    bucket["last_seen"] = row["created_at"]
+
+            result = []
+            for bucket in buckets.values():
+                count = int(bucket["occurrence_count"] or 0)
+                status = compute_person_occurrence_status(count)
+                if count < 2 or status not in ("SERING_MUNCUL", "MENCURIGAKAN"):
+                    continue
+
+                result.append({
+                    "identity": bucket["identity"],
+                    "object_group_id": bucket["object_group_id"],
+                    "occurrence_count": count,
+                    "status": status,
+                    "last_seen": bucket["last_seen"],
+                    "camera_id": bucket["camera_id"],
+                })
+
+            result.sort(key=lambda item: (-int(item["occurrence_count"]), item.get("last_seen") or datetime.min), reverse=True)
+            if limit is not None:
+                result = result[:limit]
+            return result
+
+
 def save_crop_locally(image, folder_path, prefix="cap", camera_id=1, track_id=None) -> str:
     if image is None or image.size == 0:
         return None
@@ -1150,9 +1476,17 @@ def _dedup_event_ids(cur, where_sql, params):
         event_key = str(r.get("event_key") or "").strip()
 
         if event_key:
-            key = (cam, f"event:{event_key}")
+            norm_event = re.sub(r":(?:gen|g)\d+", "", event_key)
+            key = (cam, f"event:{norm_event}")
         else:
-            key = (cam, f"det:{r['detection_id']}")
+            raw_plate = r.get("plate_number")
+            if raw_plate and is_valid_vehicle_plate(raw_plate):
+                norm_p = normalize_plate_number(raw_plate)
+                key = (cam, f"plate:{norm_p}")
+            elif r.get("track_id") is not None:
+                key = (cam, f"track:{r['track_id']}")
+            else:
+                key = (cam, f"det:{r['detection_id']}")
 
         conf = float(r.get("detection_confidence") or 0.0)
         ts = r.get("created_at")
@@ -1309,7 +1643,7 @@ def _analytics_filters(args=None):
 def _get_dedup_subquery(where_sql):
     return f"""
         SELECT
-            fd.detection_id, fd.camera_id, fd.object_type, fd.has_plate,
+            fd.detection_id, fd.camera_id, fd.object_type, fd.vehicle_type, fd.has_plate,
             fd.plate_id, fd.detection_confidence, fd.created_at, fd.track_id,
             fd.event_key, fd.direction, fd.detection_status,
             fd.vehicle_hash, fd.face_hash,
@@ -1440,6 +1774,58 @@ def get_analytics(args=None):
                        "people_entry": int(hourly_map.get(h, {}).get("people_entry") or 0),
                        "people_exit": int(hourly_map.get(h, {}).get("people_exit") or 0)} for h in range(24)]
 
+            # Distribusi jenis kendaraan (existing data)
+            v_type_rows = query_rows(f"""
+                SELECT
+                    SUM(d.object_type = 'vehicle') AS total,
+                    SUM(d.object_type = 'vehicle' AND d.vehicle_type = 'car') AS car,
+                    SUM(d.object_type = 'vehicle' AND d.vehicle_type = 'motorcycle') AS motorcycle,
+                    SUM(d.object_type = 'vehicle' AND d.vehicle_type = 'truck') AS truck,
+                    SUM(d.object_type = 'vehicle' AND d.vehicle_type = 'bus') AS bus,
+                    SUM(d.object_type = 'vehicle' AND (d.vehicle_type = 'unknown' OR d.vehicle_type IS NULL)) AS other
+                FROM ({dedup_subquery}) d
+                WHERE d.rn = 1
+            """)
+            vt = v_type_rows[0] if v_type_rows else {}
+            vehicle_types = {
+                "total": int(vt.get("total") or 0),
+                "car": int(vt.get("car") or 0),
+                "motorcycle": int(vt.get("motorcycle") or 0),
+                "truck": int(vt.get("truck") or 0),
+                "bus": int(vt.get("bus") or 0),
+                "other": int(vt.get("other") or 0),
+            }
+
+            # Performa pembacaan plat (existing data)
+            plate_perf_rows = query_rows(f"""
+                SELECT
+                    COUNT(p.plate_id) AS total_plates,
+                    SUM(p.detection_status = 1) AS valid_plates,
+                    SUM(p.detection_status = 2) AS check_plates,
+                    SUM(p.detection_status = 0 OR p.detection_status IS NULL) AS failed_plates,
+                    AVG(CASE WHEN p.detection_status IN (1, 2) THEN p.ocr_confidence END) AS avg_confidence
+                FROM ({dedup_subquery}) d
+                JOIN plate p ON p.plate_id = d.plate_id
+                WHERE d.rn = 1 AND d.object_type = 'vehicle'
+            """)
+            pp = plate_perf_rows[0] if plate_perf_rows else {}
+            total_detected_plates = int(pp.get("total_plates") or 0)
+            valid_plates = int(pp.get("valid_plates") or 0)
+            check_plates = int(pp.get("check_plates") or 0)
+            failed_plates = int(pp.get("failed_plates") or 0)
+            avg_conf_raw = pp.get("avg_confidence")
+            avg_conf = round(float(avg_conf_raw) * 100, 1) if avg_conf_raw is not None else None
+            read_rate = round((valid_plates / total_detected_plates) * 100, 1) if total_detected_plates > 0 else 0.0
+
+            plate_performance = {
+                "total_plates": total_detected_plates,
+                "valid_plates": valid_plates,
+                "check_plates": check_plates,
+                "failed_plates": failed_plates,
+                "read_rate": read_rate,
+                "avg_confidence": avg_conf,
+            }
+
             top_rows = query_rows(f"""
                 SELECT p.plate_number, COUNT(*) AS total_seen, AVG(p.ocr_confidence) AS avg_confidence,
                     MAX(d.created_at) AS last_seen, COALESCE(MAX(c.location), 'CCTV') AS last_camera,
@@ -1484,8 +1870,9 @@ def get_analytics(args=None):
                         f"{top_plate} merupakan plat yang paling sering terdeteksi.",
                         f"Jam {peak['label']} merupakan periode kendaraan tersibuk ({peak['vehicles']} kendaraan)."]
             return {"period": period, "start_date": start_date, "end_date": end_date, "summary": summary,
-                    "cameras": cameras, "daily": daily, "hourly": hourly, "top_plates": top_plates,
-                    "recent": recent, "insights": insights}
+                    "cameras": cameras, "daily": daily, "hourly": hourly,
+                    "vehicle_types": vehicle_types, "plate_performance": plate_performance,
+                    "top_plates": top_plates, "recent": recent, "insights": insights}
 
 
 def ensure_tables_exist():

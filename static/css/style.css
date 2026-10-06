@@ -2970,10 +2970,10 @@ html.dark .recap-status-dot.dot-offline {
     width: 100%;
 }
 
-/* 1. Baris 4 Kartu Metrik */
+/* 1. Ringkasan metrik dashboard */
 .dashboard-metrics-grid {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 12px;
     width: 100%;
 }
@@ -2989,6 +2989,25 @@ html.dark .recap-status-dot.dot-offline {
     gap: 12px;
     box-shadow: none;
     transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.suspicious-metric-card {
+    color: inherit;
+    text-decoration: none;
+    border-color: color-mix(in srgb, var(--danger) 28%, var(--line));
+}
+
+.suspicious-metric-card:hover,
+.suspicious-metric-card:focus-visible {
+    color: inherit;
+    text-decoration: none;
+    border-color: var(--danger);
+    outline: none;
+}
+
+.suspicious-metric-icon {
+    color: var(--danger);
+    background: var(--danger-soft);
 }
 
 .metric-card-content {
@@ -3080,6 +3099,394 @@ html.dark .recap-status-dot.dot-offline {
     color: var(--muted);
     font-weight: 400;
     line-height: 1.2;
+}
+
+.occurrence-panel-header {
+    align-items: flex-start;
+}
+
+.occurrence-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.occurrence-summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.occurrence-summary-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 9px;
+    border-radius: 999px;
+    font-size: 0.7rem;
+    white-space: nowrap;
+}
+
+.occurrence-summary-item strong {
+    font-size: 0.75rem;
+}
+
+.occurrence-summary-frequent {
+    color: var(--warning);
+    background: var(--warning-soft);
+}
+
+.occurrence-summary-suspicious {
+    color: var(--danger);
+    background: var(--danger-soft);
+}
+
+.occurrence-status-filter {
+    width: auto;
+    min-width: 145px;
+    min-height: 32px;
+    padding-top: 4px;
+    padding-bottom: 4px;
+    border-color: var(--line);
+    background-color: var(--panel);
+    color: var(--text);
+    font-size: 0.74rem;
+}
+
+.occurrence-panel-body {
+    padding: 14px 16px;
+}
+
+.occurrence-filter-card {
+    margin-bottom: 14px;
+}
+
+.occurrence-filter-card .detection-filter-row-primary > .filter-col {
+    flex: 1 1 calc(25% - 8px);
+    min-width: 145px;
+}
+
+.occurrence-filter-card .form-label {
+    margin-bottom: 5px;
+    color: var(--muted);
+    font-size: 0.72rem;
+}
+
+.occurrence-table-responsive {
+    max-height: 580px;
+}
+
+.occurrence-grid-table {
+    min-width: 1040px;
+}
+
+.occurrence-grid-table th:first-child,
+.occurrence-grid-table td:first-child {
+    width: 72px;
+}
+
+.occurrence-grid-table th:nth-child(2) {
+    min-width: 180px;
+}
+
+.occurrence-page-buttons {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.occurrence-page-number {
+    min-width: 32px;
+    justify-content: center;
+}
+
+.occurrence-page-number.active {
+    border-color: var(--primary);
+    color: var(--primary);
+    background: var(--primary-soft);
+}
+
+.occurrence-page-ellipsis {
+    padding: 0 3px;
+    color: var(--muted);
+}
+
+.occurrence-detail-list {
+    display: grid;
+    grid-template-columns: minmax(130px, 0.8fr) minmax(0, 1.2fr);
+    gap: 10px 16px;
+    margin-bottom: 16px;
+}
+
+.occurrence-detail-list div {
+    display: contents;
+}
+
+.occurrence-detail-list dt {
+    color: var(--muted);
+    font-size: 0.78rem;
+    font-weight: 500;
+}
+
+.occurrence-detail-list dd {
+    margin: 0;
+    color: var(--text);
+    font-size: 0.8rem;
+    overflow-wrap: anywhere;
+}
+
+.occurrence-row {
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+}
+
+.occurrence-row:hover {
+    background-color: var(--panel-hover, rgba(255, 255, 255, 0.04)) !important;
+}
+
+.occurrence-detail-photo-wrap {
+    width: 100%;
+    max-height: 320px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background: #0f172a;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.occurrence-detail-photo {
+    max-height: 320px;
+    width: 100%;
+    object-fit: contain;
+}
+
+.occurrence-detail-placeholder {
+    background: rgba(255, 255, 255, 0.02);
+    border-color: var(--line) !important;
+    color: var(--muted);
+    font-size: 0.85rem;
+}
+
+.occurrence-detail-info-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px 20px;
+    background: var(--panel, #1e293b);
+    padding: 16px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+}
+
+.occurrence-info-row {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.occurrence-info-label {
+    font-size: 0.75rem;
+    color: var(--muted);
+    font-weight: 500;
+}
+
+.occurrence-info-val {
+    font-size: 0.88rem;
+    color: var(--text);
+    overflow-wrap: anywhere;
+}
+
+.occurrence-detail-history {
+    border-color: var(--line) !important;
+}
+
+.occurrence-history-title {
+    font-size: 0.82rem;
+    color: var(--text);
+    font-weight: 600;
+}
+
+.occurrence-history-list {
+    max-height: 180px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.occurrence-history-item {
+    font-size: 0.78rem;
+    color: var(--text);
+    padding: 4px 8px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.occurrence-history-index {
+    color: var(--muted);
+    font-weight: 600;
+    margin-right: 4px;
+}
+
+.occurrence-history-time {
+    font-weight: 500;
+}
+
+.occurrence-history-cctv {
+    color: var(--primary, #38bdf8);
+}
+
+@media (max-width: 680px) {
+    .occurrence-filter-card .detection-filter-row-primary > .filter-col {
+        flex-basis: calc(50% - 8px);
+    }
+}
+
+@media (max-width: 576px) {
+    .occurrence-detail-info-grid {
+        grid-template-columns: 1fr;
+        gap: 10px;
+    }
+}
+
+@media (max-width: 420px) {
+    .occurrence-filter-card .detection-filter-row-primary > .filter-col {
+        flex-basis: 100%;
+    }
+}
+
+.occurrence-columns {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+}
+
+.occurrence-category {
+    min-width: 0;
+}
+
+.occurrence-category-title {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin: 0 0 9px;
+    color: var(--text);
+    font-size: 0.78rem;
+    font-weight: 600;
+}
+
+.occurrence-category-title i {
+    color: var(--primary);
+}
+
+.occurrence-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.occurrence-card {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    min-width: 0;
+    padding: 11px 12px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: var(--panel);
+}
+
+.occurrence-card-icon {
+    display: grid;
+    place-items: center;
+    flex: 0 0 30px;
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    background: var(--primary-soft);
+    color: var(--primary);
+}
+
+.occurrence-card-content {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+}
+
+.occurrence-card-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.occurrence-card-title {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    color: var(--text);
+    font-size: 0.78rem;
+    font-weight: 600;
+}
+
+.occurrence-card-subtitle,
+.occurrence-card-meta {
+    color: var(--muted);
+    font-size: 0.68rem;
+    line-height: 1.45;
+}
+
+.occurrence-card-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px 12px;
+    margin-top: 3px;
+}
+
+.occurrence-status {
+    flex: 0 0 auto;
+    padding: 3px 7px;
+    border-radius: 999px;
+    font-size: 0.61rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+}
+
+.occurrence-status-frequent {
+    color: var(--warning);
+    background: var(--warning-soft);
+}
+
+.occurrence-status-suspicious {
+    color: var(--danger);
+    background: var(--danger-soft);
+}
+
+.occurrence-list-message {
+    margin: 0;
+    padding: 14px 8px;
+    color: var(--muted);
+    font-size: 0.74rem;
+    text-align: center;
+}
+
+.occurrence-error,
+.occurrence-error-text {
+    color: var(--danger);
+}
+
+.occurrence-error {
+    margin-bottom: 10px;
+    padding: 8px 10px;
+    border: 1px solid var(--danger-soft);
+    border-radius: 8px;
+    background: var(--danger-soft);
+    font-size: 0.74rem;
 }
 
 /* 3. Baris Dua Kolom Utama (Live Monitoring ~60% & Deteksi Terbaru ~40%) */
@@ -3588,6 +3995,10 @@ html.dark .flow-proportion-bar {
         grid-template-columns: repeat(2, 1fr);
     }
 
+    .occurrence-columns {
+        grid-template-columns: 1fr;
+    }
+
     .dashboard-main-grid {
         grid-template-columns: 1fr;
     }
@@ -3602,6 +4013,19 @@ html.dark .flow-proportion-bar {
 }
 
 @media (max-width: 680px) {
+    .occurrence-panel-header {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .occurrence-toolbar {
+        justify-content: space-between;
+    }
+
+    .occurrence-summary {
+        flex-wrap: wrap;
+    }
+
     .dashboard-stream-toolbar {
         flex-direction: column;
         align-items: stretch;
@@ -3628,6 +4052,24 @@ html.dark .flow-proportion-bar {
 @media (max-width: 599.98px) {
     .dashboard-metrics-grid {
         grid-template-columns: 1fr;
+    }
+
+    .occurrence-panel-body {
+        padding: 12px;
+    }
+
+    .occurrence-toolbar {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .occurrence-status-filter {
+        width: 100%;
+    }
+
+    .occurrence-card-heading {
+        flex-direction: column;
+        align-items: flex-start;
     }
 }
 

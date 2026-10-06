@@ -592,6 +592,108 @@ def latest_face():
     return jsonify({"success": True, "data": items[0] if items else None})
 
 
+def _frequent_occurrence_rows(rows):
+    frequent_statuses = {"SERING_MUNCUL", "MENCURIGAKAN"}
+    return [
+        row for row in rows
+        if int(row.get("occurrence_count") or 0) >= 2
+        and row.get("status") in frequent_statuses
+    ]
+
+
+# ============================================================
+# ENDPOINT OCCURRENCE KENDARAAN (PHASE 2)
+# ============================================================
+
+@plate_bp.route("/vehicle/occurrences", methods=["GET"])
+@plate_bp.route("/vehicles/occurrences", methods=["GET"])
+@plate_bp.route("/suspicious/vehicles", methods=["GET"])
+def vehicle_occurrences():
+    """Mengembalikan ringkasan kendaraan berdasarkan occurrence yang sudah dideduplicate."""
+    try:
+        camera_id = request.args.get("camera_id")
+        limit = request.args.get("limit", default=50, type=int)
+
+        rows = db.get_vehicle_occurrence_summary(
+            camera_id=camera_id,
+            limit=limit,
+        )
+
+        payload = []
+        for row in _frequent_occurrence_rows(rows):
+            last_seen = row.get("last_seen")
+            if isinstance(last_seen, datetime):
+                last_seen = last_seen.isoformat()
+
+            raw_history = row.get("history") or []
+            history = []
+            for h in raw_history:
+                sat = h.get("seen_at")
+                if isinstance(sat, datetime):
+                    sat = sat.isoformat()
+                history.append({
+                    "seen_at": sat,
+                    "camera_id": h.get("camera_id"),
+                    "camera_name": h.get("camera_name"),
+                })
+
+            payload.append({
+                "identity": row.get("identity"),
+                "plate": row.get("plate"),
+                "vehicle_type": row.get("vehicle_type"),
+                "occurrence_count": row.get("occurrence_count"),
+                "detection_count": row.get("detection_count"),
+                "status": row.get("status"),
+                "last_seen": last_seen,
+                "camera_id": row.get("camera_id"),
+                "camera_name": row.get("camera_name"),
+                "vehicle_image_path": row.get("vehicle_image_path"),
+                "capture_path": row.get("capture_path") or row.get("vehicle_image_path"),
+                "image_url": row.get("image_url") or row.get("vehicle_image_path"),
+                "history": history,
+            })
+
+        return jsonify({"success": True, "data": payload})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e), "data": []}), 500
+
+
+@plate_bp.route("/person/occurrences", methods=["GET"])
+@plate_bp.route("/persons/occurrences", methods=["GET"])
+@plate_bp.route("/suspicious/persons", methods=["GET"])
+def person_occurrences():
+    """Mengembalikan ringkasan orang berdasarkan occurrence yang sudah dideduplicate."""
+    try:
+        camera_id = request.args.get("camera_id")
+        limit = request.args.get("limit", default=50, type=int)
+
+        rows = db.get_person_occurrence_summary(
+            camera_id=camera_id,
+            limit=limit,
+        )
+
+        payload = []
+        for row in _frequent_occurrence_rows(rows):
+            last_seen = row.get("last_seen")
+            if isinstance(last_seen, datetime):
+                last_seen = last_seen.isoformat()
+
+            entry = {
+                "identity": row.get("identity"),
+                "occurrence_count": row.get("occurrence_count"),
+                "status": row.get("status"),
+                "last_seen": last_seen,
+                "camera_id": row.get("camera_id"),
+            }
+            if row.get("object_group_id"):
+                entry["object_group_id"] = row.get("object_group_id")
+            payload.append(entry)
+
+        return jsonify({"success": True, "data": payload})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e), "data": []}), 500
+
+
 # ============================================================
 # ENDPOINT STATISTIK DASHBOARD & ENTERPRISE
 # ============================================================
@@ -640,8 +742,10 @@ def stats_enterprise():
             },
             "trend": {"labels": [item["date"] for item in daily], "plates": [item["vehicles"] for item in daily], "faces": [item["people"] for item in daily], "totals": [item["vehicles"] + item["people"] for item in daily]},
             "camera_distribution": [{"camera_name": item["camera"], "total_count": item["vehicles"] + item["people"], "plate_count": item["unique_plates"], "face_count": item["people"], "percentage": 0} for item in analytics["cameras"]],
-            "status_breakdown": {"valid": 0, "warning": 0, "failed": 0},
-            "peak_hours": [{"time_range": f"{item['label']} - {(item['hour'] + 1) % 24:02d}:00 WIB", "count": item["vehicles"], "percentage": 0} for item in sorted(hourly, key=lambda value: value["vehicles"], reverse=True)[:3]],
+            "status_breakdown": analytics.get("plate_performance", {"valid": 0, "warning": 0, "failed": 0}),
+            "vehicle_types": analytics.get("vehicle_types", {}),
+            "plate_performance": analytics.get("plate_performance", {}),
+            "peak_hours": [{"time_range": f"{item['label']} - {(item['hour'] + 1) % 24:02d}:00 WIB", "count": item["vehicles"], "people": item["people"], "percentage": 0} for item in sorted(hourly, key=lambda value: value["vehicles"], reverse=True)[:3]],
             "top_plates": [{"plate_number": item["plate"], "total_seen": item["count"], "last_camera": item["camera"], "last_seen": item["last_seen"], "status": "Aktual", "status_code": 1, "avg_confidence_percent": item["confidence"]} for item in analytics["top_plates"]]
         }})
     except Exception as e:
