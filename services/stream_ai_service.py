@@ -78,18 +78,22 @@ VEHICLE_IMGSZ = 480
 # DISTANCE / DETECTION ZONES
 ENABLE_DISTANCE_ZONE = True
 
-ZONE_OVERLAP_FALLBACK_RATIO = 0.45
+# Ambang batas deteksi zona berbasis persentase body kendaraan (>= 50%)
+ZONE_BBOX_OVERLAP_MIN = 0.50       # Minimal 50% body kendaraan berada di dalam zona
+ZONE_AREA_COVERAGE_MIN = 0.40      # Proteksi kendaraan besar (truk/bus) yang menutupi >= 40% area zona
+ZONE_CENTER_OVERLAP_MIN = 0.35     # Jika titik tengah di dalam zona, butuh minimal 35% body di dalam zona
+ZONE_OVERLAP_FALLBACK_RATIO = 0.50  # Fallback kompatibilitas
 
 DEFAULT_MID_ZONE = [
-    (0.05, 0.05),
-    (0.95, 0.05),
-    (0.95, 0.62),
-    (0.05, 0.62),
+    (0.05, 0.10),
+    (0.95, 0.10),
+    (0.99, 1.00),
+    (0.01, 1.00),
 ]
 
 DEFAULT_NEAR_ZONE = [
-    (0.05, 0.55),
-    (0.95, 0.55),
+    (0.05, 0.20),
+    (0.95, 0.20),
     (0.99, 1.00),
     (0.01, 1.00),
 ]
@@ -169,6 +173,7 @@ PLATE_VEHICLE_MIN_WIDTH = 30
 PLATE_VEHICLE_MIN_HEIGHT = 20
 
 FAKE_VEHICLE_ASPECT_MIN = 0.9
+FAKE_MOTORCYCLE_ASPECT_MIN = 0.20
 
 # AI INTERVAL
 BASE_AI_INTERVAL = 0.60
@@ -691,17 +696,61 @@ def _point_in_zone(box, zone_points, width, height):
     if not zone_points or len(zone_points) < 3:
         return True
     polygon = _normalized_polygon_to_pixels(zone_points, width, height)
-    point = _bottom_center(box)
-    point_inside = cv2.pointPolygonTest(
+    polygon = np.asarray(polygon, dtype=np.int32)
+    if polygon.ndim != 2 or polygon.shape[0] < 3 or polygon.shape[1] != 2:
+        return True
+
+    x1, y1, x2, y2 = [int(v) for v in box]
+    x1 = max(0, min(x1, width - 1))
+    y1 = max(0, min(y1, height - 1))
+    x2 = max(0, min(x2, width))
+    y2 = max(0, min(y2, height))
+    if x2 <= x1 or y2 <= y1:
+        return False
+
+    bw = x2 - x1
+    bh = y2 - y1
+    box_area = float(bw * bh)
+    if box_area <= 0:
+        return False
+
+    # Hitung irisan piksel antara bounding box objek dan polygon zona
+    mask = np.zeros((bh, bw), dtype=np.uint8)
+    shifted = polygon.copy()
+    shifted[:, 0] = shifted[:, 0] - x1
+    shifted[:, 1] = shifted[:, 1] - y1
+    cv2.fillPoly(mask, [shifted.reshape((-1, 1, 2))], 255)
+    inside = float(cv2.countNonZero(mask))
+
+    # 1. Rasio irisan terhadap luas bounding box (persentase body di dalam zona)
+    box_ratio = inside / box_area
+
+    # 2. Rasio irisan terhadap luas polygon zona (proteksi kendaraan besar yang memenuhi zona)
+    poly_area = float(cv2.contourArea(polygon))
+    zone_ratio = (inside / poly_area) if poly_area > 0 else 0.0
+
+    # 3. Posisi titik tengah (centroid) objek
+    cx = (x1 + x2) / 2.0
+    cy = (y1 + y2) / 2.0
+    center_inside = cv2.pointPolygonTest(
         polygon.reshape((-1, 1, 2)),
-        (float(point[0]), float(point[1])),
+        (float(cx), float(cy)),
         False,
     ) >= 0
-    if point_inside:
+
+    # Evaluasi:
+    # A. Minimal 50% body objek berada di dalam zona (menghentikan kendaraan luar yg menyenggol batas)
+    if box_ratio >= ZONE_BBOX_OVERLAP_MIN:
         return True
-    overlap = _bbox_polygon_overlap_ratio(box, polygon, width, height)
-    if overlap >= ZONE_OVERLAP_FALLBACK_RATIO:
+
+    # B. Proteksi kendaraan besar (truk/bus): objek menutupi >= 40% area zona
+    if zone_ratio >= ZONE_AREA_COVERAGE_MIN:
         return True
+
+    # C. Objek berpusat di zona: titik tengah di dalam zona DAN minimal 35% body di dalam zona
+    if center_inside and box_ratio >= ZONE_CENTER_OVERLAP_MIN:
+        return True
+
     return False
 
 
@@ -1144,7 +1193,8 @@ class StreamAIService:
                         if bw < MIN_VEHICLE_WIDTH or bh < MIN_VEHICLE_HEIGHT:
                             continue
                         aspect = bw / max(1, bh)
-                        if aspect < FAKE_VEHICLE_ASPECT_MIN:
+                        min_aspect = FAKE_MOTORCYCLE_ASPECT_MIN if cls_id == 3 else FAKE_VEHICLE_ASPECT_MIN
+                        if aspect < min_aspect:
                             continue
                     else:
                         continue
@@ -1502,7 +1552,12 @@ class StreamAIService:
             bh = max(1, by2 - by1)
             aspect = bw / bh
 
-            if plate is None and aspect < FAKE_VEHICLE_ASPECT_MIN:
+            is_motorcycle = (
+                vehicle.get("cls") == 3
+                or vehicle.get("vehicle_type") == "motorcycle"
+            )
+            min_aspect = FAKE_MOTORCYCLE_ASPECT_MIN if is_motorcycle else FAKE_VEHICLE_ASPECT_MIN
+            if plate is None and aspect < min_aspect:
                 continue
 
             driver = None
