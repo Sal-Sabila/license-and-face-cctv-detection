@@ -1,7 +1,5 @@
-# ============================================================
 # report_export.py
 # Export Excel & PDF untuk Sistem Monitoring CCTV
-# ============================================================
 
 import io
 import os
@@ -37,9 +35,7 @@ from reportlab.platypus import (
 from reportlab.lib.utils import ImageReader
 
 
-# ============================================================
 # KONFIGURASI
-# ============================================================
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -50,9 +46,7 @@ EXCEL_MIMETYPE = (
 PDF_MIMETYPE = "application/pdf"
 
 
-# ============================================================
 # WARNA EXCEL
-# ============================================================
 
 DARK = "1F2937"
 HEADER = "2563EB"
@@ -66,9 +60,7 @@ TEXT = "111827"
 BORDER_COLOR = "D1D5DB"
 
 
-# ============================================================
 # HELPER UMUM
-# ============================================================
 
 def _value(data, *keys, default=""):
     """
@@ -254,7 +246,6 @@ def _resolve_image_path(path):
     return None
 
 
-# ============================================================
 # HELPER DATA WEBSITE  (PATCH: data export = data website)
 #
 # Semua nama field di bawah DIAMBIL dari kode render website
@@ -264,7 +255,6 @@ def _resolve_image_path(path):
 #   loadRecap()        -> GET /api/analytics  (summary, cameras, daily)
 #   loadEnterpriseStatistics() -> GET /api/analytics
 #                                 (summary, cameras, hourly, top_plates)
-# ============================================================
 
 def _text(value, default="-"):
     """Teks apa adanya dari data. '-' hanya jika data memang kosong."""
@@ -782,9 +772,7 @@ def _pdf_photo(path, cell_style, max_w, max_h, missing_text):
         return _p(missing_text, cell_style)
 
 
-# ============================================================
 # EXCEL HELPER
-# ============================================================
 
 def _apply_excel_header(ws, row, start_col, end_col):
     fill = PatternFill("solid", fgColor=HEADER)
@@ -962,13 +950,11 @@ def _finalize_excel(wb):
     return buffer
 
 
-# ============================================================
 # 1. HASIL DETEKSI - EXCEL
 #    Kolom: No | Target / Nilai | Jenis Deteksi | Area CCTV |
 #           Confidence | Waktu Deteksi | Status
 #    Tanpa Keterangan, tanpa Foto, tanpa Aksi.
 #    Sumber field: lihat _detection_fields() (= loadDetections()).
-# ============================================================
 
 def build_detections_excel(items, period_label=None, filter_info=None):
     wb = Workbook()
@@ -1029,11 +1015,9 @@ def build_detections_excel(items, period_label=None, filter_info=None):
     return _finalize_excel(wb)
 
 
-# ============================================================
 # 2. HASIL DETEKSI - PDF
 #    Kolom: No | Foto | Target / Nilai | Jenis Deteksi | Area CCTV |
 #           Confidence | Waktu Deteksi | Status   (tanpa Keterangan)
-# ============================================================
 
 def build_detections_pdf(items, period_label=None, filter_info=None):
     buffer = io.BytesIO()
@@ -1158,12 +1142,10 @@ def build_detections_pdf(items, period_label=None, filter_info=None):
     return buffer
 
 
-# ============================================================
 # 3. RIWAYAT PLAT - EXCEL
 #    Kolom: No | Nomor Plat | Area CCTV | Confidence |
 #           Waktu Deteksi | Status   (tanpa Keterangan, tanpa crop)
 #    Sumber field: lihat _plate_fields() (= loadPlateHistory()).
-# ============================================================
 
 def build_plates_excel(items, period_label=None, filter_info=None):
     wb = Workbook()
@@ -1222,11 +1204,9 @@ def build_plates_excel(items, period_label=None, filter_info=None):
     return _finalize_excel(wb)
 
 
-# ============================================================
 # 4. RIWAYAT PLAT - PDF
 #    Kolom: No | Crop / Foto Plat | Nomor Plat | Area CCTV |
 #           Confidence | Waktu Deteksi | Status  (tanpa Keterangan)
-# ============================================================
 
 def build_plates_pdf(items, period_label=None, filter_info=None):
     buffer = io.BytesIO()
@@ -1348,7 +1328,6 @@ def build_plates_pdf(items, period_label=None, filter_info=None):
     return buffer
 
 
-# ============================================================
 # 5. REKAPITULASI - EXCEL   (1 file, 3 sheet)
 #    Sheet 1 Ringkasan    : Kendaraan/Orang Masuk, Keluar, Total
 #    Sheet 2 Rekap CCTV   : CCTV / Gerbang | Arah | Kendaraan |
@@ -1356,7 +1335,6 @@ def build_plates_pdf(items, period_label=None, filter_info=None):
 #    Sheet 3 Total Harian : Tanggal | Kendaraan | Plat Unik |
 #                           Masuk | Keluar | Orang
 #    Sumber field: loadRecap() -> /api/analytics
-# ============================================================
 
 def _recap_summary_rows(summary):
     return [
@@ -1510,10 +1488,8 @@ def build_recap_excel(analytics, period=None, filter_info=None):
     return _finalize_excel(wb)
 
 
-# ============================================================
 # 6. REKAPITULASI - PDF
 #    Sumber data identik dengan build_recap_excel().
-# ============================================================
 
 def build_recap_pdf(analytics, period=None, filter_info=None):
     buffer = io.BytesIO()
@@ -1673,12 +1649,10 @@ def build_recap_pdf(analytics, period=None, filter_info=None):
     return buffer
 
 
-# ============================================================
 # 7. STATISTIK - EXCEL   (1 file, 2 sheet: Statistik & Top 10)
 #    Sumber field: loadEnterpriseStatistics() -> /api/analytics
 #    (summary, cameras, hourly, top_plates). TIDAK memakai
 #    struktur / fungsi Rekapitulasi.
-# ============================================================
 
 def _stats_summary_rows(summary):
     """Kartu KPI halaman Statistik."""
@@ -1889,11 +1863,9 @@ def build_statistics_excel(analytics, period="today", filter_info=None):
     return _finalize_excel(wb)
 
 
-# ============================================================
 # 8. STATISTIK - PDF   (backend reportlab + send_file, tanpa print)
 #    Urutan: Judul, Periode, Tanggal cetak, Ringkasan Statistik,
 #            Beban Lalu Lintas per CCTV, Analisis Jam Sibuk, Top 10
-# ============================================================
 
 def build_statistics_pdf(analytics, period="today", filter_info=None):
     buffer = io.BytesIO()
@@ -2087,12 +2059,10 @@ def build_statistics_pdf(analytics, period="today", filter_info=None):
     return buffer
 
 
-# ============================================================
 # 9. MONITORING CCTV - EXCEL
 #    Data berasal dari db.get_all_cameras() -- fungsi yang sama
 #    dipakai endpoint GET /cameras -- supaya data website, Excel,
 #    dan PDF selalu konsisten. Tidak ada foto/preview kamera.
-# ============================================================
 
 def _camera_status(value):
     """Ambil label status kamera dari data backend, jangan bikin status baru."""
@@ -2208,9 +2178,7 @@ def build_cameras_excel(cameras_db):
     return _finalize_excel(wb)
 
 
-# ============================================================
 # 10. MONITORING CCTV - PDF
-# ============================================================
 
 def build_cameras_pdf(cameras_db):
     buffer = io.BytesIO()

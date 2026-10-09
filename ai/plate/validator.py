@@ -12,9 +12,7 @@ Contoh:
 
 import re
 
-# ============================================================
 # KODE WILAYAH RESMI INDONESIA
-# ============================================================
 # Sumber: Peraturan Kapolri & data Samsat
 # Format: 1-2 huruf
 VALID_REGION_CODES = {
@@ -44,9 +42,7 @@ VALID_SINGLE_LETTER_REGIONS = {c for c in VALID_REGION_CODES if len(c) == 1}
 VALID_DOUBLE_LETTER_REGIONS = {c for c in VALID_REGION_CODES if len(c) == 2}
 
 
-# ============================================================
 # KOREKSI KARAKTER OCR YANG UMUM
-# ============================================================
 # Huruf yang sering salah baca menjadi angka, dan sebaliknya
 DIGIT_TO_LETTER = {
     "0": "O", "1": "I", "2": "Z", "5": "S",
@@ -71,9 +67,7 @@ def _correct_digit_to_letter(ch: str) -> str:
     return DIGIT_TO_LETTER.get(ch, ch)
 
 
-# ============================================================
 # NORMALISASI DASAR
-# ============================================================
 def normalize_plate_text(text: str) -> str:
     """Hilangkan semua karakter non-alphanumeric, uppercase."""
     if not text:
@@ -81,9 +75,7 @@ def normalize_plate_text(text: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", str(text).upper().strip())
 
 
-# ============================================================
 # PARSING: PISAHKAN PREFIX / ANGKA / SUFFIX
-# ============================================================
 _PATTERN = re.compile(r"^([A-Z]{1,2})([0-9]{1,4})([A-Z]{0,3})$")
 
 
@@ -99,9 +91,7 @@ def parse_plate(text: str):
     return m.group(1), m.group(2), m.group(3)
 
 
-# ============================================================
 # KOREKSI PREFIX (KODE WILAYAH)
-# ============================================================
 def _try_correct_prefix(prefix: str) -> list:
     """
     Coba koreksi prefix supaya jadi kode wilayah valid.
@@ -145,9 +135,7 @@ def _try_correct_prefix(prefix: str) -> list:
     return result
 
 
-# ============================================================
 # KOREKSI ANGKA
-# ============================================================
 def _try_correct_numbers(numbers: str) -> list:
     """
     Coba koreksi angka. Angka tidak boleh leading zero (>1 digit).
@@ -170,9 +158,7 @@ def _try_correct_numbers(numbers: str) -> list:
     return cleaned
 
 
-# ============================================================
 # KOREKSI SUFFIX (SERI)
-# ============================================================
 def _try_correct_suffix(suffix: str) -> list:
     """
     Coba koreksi suffix. Suffix harus huruf murni.
@@ -195,9 +181,7 @@ def _try_correct_suffix(suffix: str) -> list:
     return result or [suffix]
 
 
-# ============================================================
 # MAIN: VALIDASI & KOREKSI
-# ============================================================
 def correct_and_validate_plate(raw_text: str, ocr_confidence: float = 0.0):
     """
     Koreksi & validasi plat nomor Indonesia.
@@ -303,9 +287,7 @@ def is_valid_plate(text: str) -> bool:
     return result["valid"]
 
 
-# ============================================================
 # FORMAT UNTUK DISPLAY
-# ============================================================
 def format_plate_for_display(text: str) -> str:
     """
     Format plat untuk display: "AB1234CD" -> "AB 1234 CD"

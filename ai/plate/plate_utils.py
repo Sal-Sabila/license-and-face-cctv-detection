@@ -1,8 +1,6 @@
 import re
 
-# ============================================================
 # DAFTAR KODE WILAYAH PLAT NOMOR INDONESIA (TNKB)
-# ============================================================
 KODE_WILAYAH_INDONESIA = {
     # Sumatra
     "BA", "BB", "BD", "BE", "BG", "BH", "BK", "BL", "BM", "BN", "BP",
@@ -32,9 +30,7 @@ PREFIX_CORRECTIONS = {
     "AL": "AB",
 }
 
-# ============================================================
 # MAPPING AMBIGUITAS KARAKTER (CONFUSION MATRIX)
-# ============================================================
 
 # Huruf yang sering salah terbaca padahal seharusnya ANGKA
 CHAR_TO_DIGIT = {

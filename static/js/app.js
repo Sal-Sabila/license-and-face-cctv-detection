@@ -162,9 +162,7 @@ function askConfirmation(message, title = 'Konfirmasi') {
 }
 window.askConfirmation = askConfirmation;
 
-// ============================================================
 // MODAL GLOBAL: PRATINJAU GAMBAR & DETAIL DETEKSI
-// ============================================================
 
 function openImageModal(imgSrc, title = 'Detail Foto Tangkapan CCTV', meta = '', details = '', objType = null) {
     const modalEl = document.getElementById('imagePreviewModal');
@@ -212,9 +210,7 @@ function openImageModal(imgSrc, title = 'Detail Foto Tangkapan CCTV', meta = '',
 window.openImageModal = openImageModal;
 
 
-// ============================================================
 // MODUL: MONITORING CCTV
-// ============================================================
 
 function updateCameraSummary(camerasList) {
     const totalEl = document.getElementById('summaryTotalCameras');
@@ -432,9 +428,7 @@ async function initMonitoring() {
 }
 
 
-// ============================================================
 // MODUL: DASHBOARD UTAMA & AKTIVITAS KENDARAAN MENCURIGAKAN
-// ============================================================
 
 let dashboardSuspiciousVehicleSummary = null;
 
@@ -1234,9 +1228,7 @@ async function initDashboard() {
 }
 
 
-// ============================================================
 // MODUL: HASIL DETEKSI TERPADU (/detections)
-// ============================================================
 
 let detState = {
     page: 1,
@@ -1547,9 +1539,7 @@ function exportDetectionsPdf() {
 window.exportDetectionsPdf = exportDetectionsPdf;
 
 
-// ============================================================
 // MODUL: RIWAYAT PLAT NOMOR (/history)
-// ============================================================
 
 let plateState = {
     page: 1,
@@ -1791,9 +1781,7 @@ function exportPlatesPdf() {
 window.exportPlatesPdf = exportPlatesPdf;
 
 
-// ============================================================
 // MODUL: STATISTIK STANDAR PERUSAHAAN (ENTERPRISE ANALYTICS)
-// ============================================================
 
 
 function analyticsParams(prefix, periodOverride = '') {
@@ -2699,9 +2687,7 @@ async function initStatistics() {
 }
 
 
-// ============================================================
 // MODUL: PENGATURAN SISTEM (/settings)
-// ============================================================
 
 async function loadSettingsFromDb() {
     try {
@@ -2817,9 +2803,7 @@ function initSettings() {
 }
 
 
-// ============================================================
 // MODUL: SIDEBAR & JAM SISTEM
-// ============================================================
 
 function updateClock() {
     const clock = document.getElementById('clock');
@@ -2877,9 +2861,7 @@ function initSidebarToggle() {
 }
 
 
-// ============================================================
 // THEME MANAGER (DARK / LIGHT MODE)
-// ============================================================
 
 function getActiveTheme() {
     return document.documentElement.classList.contains('dark') ? 'dark' : 'light';
@@ -2993,9 +2975,7 @@ window.toggleTheme = toggleTheme;
 window.initTheme = initTheme;
 
 
-// ============================================================
 // MODUL: EKSPOR FLEKSIBEL (PERIODIK, PER HARI, KESELURUHAN)
-// ============================================================
 
 let currentExportModule = 'detections';
 
@@ -3221,9 +3201,8 @@ function initExportModal() {
 window.initExportModal = initExportModal;
 
 
-// ============================================================
+
 // INISIALISASI HALAMAN (ROUTING CLIENT-SIDE)
-// ============================================================
 
 document.addEventListener('DOMContentLoaded', () => {
     initTheme();
