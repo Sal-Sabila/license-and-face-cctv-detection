@@ -6,9 +6,7 @@ from collections import Counter
 
 from paddleocr import PaddleOCR
 
-# ============================================================
 # ✅ IMPORT VALIDATOR BARU
-# ============================================================
 try:
     from ai.plate.validator import (
         correct_and_validate_plate,
@@ -514,9 +512,7 @@ class PlateOCR:
                 "region_code": None,
             }
 
-        # ============================================
         # PRIORITAS 1: Pakai validator baru
-        # ============================================
         if HAS_PLATE_VALIDATOR:
             result = correct_and_validate_plate(raw, confidence)
 
@@ -538,9 +534,7 @@ class PlateOCR:
                     "region_code": None,
                 }
 
-        # ============================================
         # FALLBACK: Pakai helper project
-        # ============================================
         external = self._apply_external_correction(raw)
         if external and self.is_valid_indonesian_plate(external):
             return {
@@ -551,9 +545,7 @@ class PlateOCR:
                 "region_code": None,
             }
 
-        # ============================================
         # FALLBACK: Koreksi manual per segmen
-        # ============================================
         candidates = []
         n = len(raw)
 

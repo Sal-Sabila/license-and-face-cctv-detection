@@ -11,9 +11,7 @@
  *  - Reset ke default via POST /api/zones/<id>/reset
  */
 
-// ============================================================
 // STATE
-// ============================================================
 
 const zoneState = {
     cameraId: null,
@@ -43,9 +41,7 @@ const ZONE_COLORS = {
     },
 };
 
-// ============================================================
 // INIT
-// ============================================================
 
 function initZoneEditor() {
     const canvas = document.getElementById('zoneEditorCanvas');
@@ -104,9 +100,7 @@ function bindEvents() {
     });
 }
 
-// ============================================================
 // LOAD CAMERA LIST
-// ============================================================
 
 async function loadCameraOptionsForZone() {
     const select = document.getElementById('zoneCameraSelect');
@@ -141,9 +135,7 @@ async function loadCameraOptionsForZone() {
     }
 }
 
-// ============================================================
 // LOAD ZONE
-// ============================================================
 
 async function loadZone(cameraId) {
     if (!cameraId) return;
@@ -232,9 +224,7 @@ function normalizePolygon(poly) {
         .filter(p => !isNaN(p[0]) && !isNaN(p[1]));
 }
 
-// ============================================================
 // UI HELPERS
-// ============================================================
 
 function updateModeHelper() {
     const mode = zoneState.editing;
@@ -264,9 +254,7 @@ function markDirty() {
     updateDirtyIndicator();
 }
 
-// ============================================================
 // CANVAS SIZE & DRAW
-// ============================================================
 
 function resizeCanvas() {
     const img = document.getElementById('zoneEditorImage');
@@ -345,9 +333,7 @@ function drawPolygon(ctx, points, w, h, colors) {
     });
 }
 
-// ============================================================
 // CANVAS CLICK
-// ============================================================
 
 function handleCanvasClick(event) {
     const canvas = document.getElementById('zoneEditorCanvas');
@@ -370,9 +356,7 @@ function handleCanvasClick(event) {
     );
 }
 
-// ============================================================
 // UNDO / CLEAR
-// ============================================================
 
 function undoPoint() {
     const target = zoneState[zoneState.editing];
@@ -405,9 +389,7 @@ function clearCurrentZone() {
     });
 }
 
-// ============================================================
 // VALIDASI POLYGON
-// ============================================================
 
 function polygonArea(points) {
     if (!points || points.length < 3) return 0;
@@ -489,9 +471,7 @@ function validateZones() {
     return errors;
 }
 
-// ============================================================
 // SAVE ZONE
-// ============================================================
 
 async function saveZone() {
     if (!zoneState.cameraId) {
@@ -555,9 +535,7 @@ async function saveZone() {
     }
 }
 
-// ============================================================
 // RESET ZONE
-// ============================================================
 
 async function resetZone() {
     if (!zoneState.cameraId) {
@@ -609,9 +587,7 @@ async function resetZone() {
     }
 }
 
-// ============================================================
 // REFRESH FRAME
-// ============================================================
 
 function refreshFrame() {
     if (!zoneState.cameraId) return;
@@ -622,9 +598,7 @@ function refreshFrame() {
     }
 }
 
-// ============================================================
 // EXPORT
-// ============================================================
 
 window.saveZone = saveZone;
 window.resetZone = resetZone;
@@ -632,9 +606,7 @@ window.undoPoint = undoPoint;
 window.clearCurrentZone = clearCurrentZone;
 window.refreshFrame = refreshFrame;
 
-// ============================================================
 // AUTO-INIT
-// ============================================================
 
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initZoneEditor);

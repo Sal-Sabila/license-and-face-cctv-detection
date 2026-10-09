@@ -1,8 +1,6 @@
 import time
 
-# ============================================================
 # KONFIGURASI COUNTING LINE PER KAMERA (NORMALIZED 0.0 - 1.0)
-# ============================================================
 # Setiap entri: ((x1, y1), (x2, y2)) - dua titik ujung garis.
 #
 # Diturunkan dari sisi ATAS polygon "mid" di tabel camera_zones

@@ -18,9 +18,7 @@ from ai.plate.ocr import PlateOCR
 from tracker import PlateTracker
 import db
 
-# ============================================================
 # ✅ IMPORT VALIDATOR PLAT INDONESIA
-# ============================================================
 try:
     from ai.plate.validator import (
         correct_and_validate_plate,
@@ -36,9 +34,7 @@ except ImportError:
     print("[AI STREAM WARNING] ai.plate.validator tidak tersedia, pakai fallback regex")
 
 
-# ============================================================
 # PATH PROJECT
-# ============================================================
 
 def _find_project_root():
     current = os.path.abspath(os.path.dirname(__file__))
@@ -73,17 +69,13 @@ os.makedirs(CAPTURE_DIR, exist_ok=True)
 os.makedirs(PLATE_CAPTURE_DIR, exist_ok=True)
 
 
-# ============================================================
 # CONFIGURATION
-# ============================================================
 
 VEHICLE_CLASSES = [0, 2, 3, 5, 7]
 VEHICLE_CONFIDENCE = 0.45
 VEHICLE_IMGSZ = 480
 
-# ============================================================
 # DISTANCE / DETECTION ZONES
-# ============================================================
 ENABLE_DISTANCE_ZONE = True
 
 ZONE_OVERLAP_FALLBACK_RATIO = 0.45
@@ -167,9 +159,7 @@ def load_all_zones_from_db():
         print(f"[ZONES] Gagal memuat zona dari DB: {exc}")
 
 
-# ============================================================
 # THRESHOLD DETEKSI
-# ============================================================
 MIN_PERSON_WIDTH = 15
 MIN_PERSON_HEIGHT = 35
 MIN_VEHICLE_WIDTH = 30
@@ -180,9 +170,7 @@ PLATE_VEHICLE_MIN_HEIGHT = 20
 
 FAKE_VEHICLE_ASPECT_MIN = 0.9
 
-# ============================================================
 # AI INTERVAL
-# ============================================================
 BASE_AI_INTERVAL = 0.60
 MIN_AI_INTERVAL = 0.40
 MAX_AI_INTERVAL = 1.20
@@ -198,9 +186,7 @@ VEHICLE_TYPES = {
     7: "truck",
 }
 
-# ============================================================
 # PLATE DETECTION
-# ============================================================
 PLATE_CONFIDENCE = 0.25
 PLATE_IMGSZ = 512
 PLATE_MAX_DET = 5
@@ -224,9 +210,7 @@ PLATE_TRACKER_MIN_CONFIDENCE = 0.35
 PLATE_TRACKER_MAX_HISTORY = 5
 PLATE_PADDING = 0.08
 
-# ============================================================
 # ANTI-DUPLIKAT
-# ============================================================
 PLATE_REVIEW_CONFIDENCE = 0.50
 PLATE_COOLDOWN = 45.0
 PERSON_COOLDOWN = 45.0
@@ -248,9 +232,7 @@ PERSON_DEDUP_COOLDOWN = 120.0
 PERSON_HAMMING_THRESHOLD = 8
 PERSON_TRACK_DEDUP_COOLDOWN = 300.0
 
-# ============================================================
 # Object Grouping Configurations
-# ============================================================
 OBJECT_GROUP_MAX_GAP = 8.0
 OBJECT_GROUP_MAX_CENTROID_DISTANCE = 120.0
 OBJECT_GROUP_PERSON_MAX_DIST = 130.0
@@ -288,9 +270,7 @@ DEBUG_LOG_SAMPLE_EVERY = 30
 CONFIDENCE_IMPROVEMENT_THRESHOLD = 0.05
 
 
-# ============================================================
 # HELPERS
-# ============================================================
 
 def _safe_float(value, default=0.0):
     try:
@@ -813,9 +793,7 @@ class AdaptiveAIController:
         return {"cpu": round(self.last_cpu, 1), "ai_time_ms": round(self.last_ai_time * 1000, 1), "interval": round(self.current_interval, 2)}
 
 
-# ============================================================
 # SERVICE
-# ============================================================
 
 class StreamAIService:
     _instance = None
@@ -957,9 +935,7 @@ class StreamAIService:
             self.camera_states[camera_id] = state
         return state
 
-    # ============================================================
     # OBJECT GROUPING
-    # ============================================================
     def _assign_object_groups(self, detections, camera_id, current_time=None, frame=None):
         """Object Grouping: hubungkan track_id temporer dengan object_group_id stabil."""
         camera_id = _normalize_camera_id(camera_id)
@@ -1137,9 +1113,7 @@ class StreamAIService:
             d["conf"] = conf
             d["v_hash"] = v_hash
 
-    # ============================================================
     # DETECTION
-    # ============================================================
     def _detect_vehicles(self, frame, camera_id=1):
         camera_id = _normalize_camera_id(camera_id)
         detections = []
@@ -1441,9 +1415,7 @@ class StreamAIService:
 
         return processed
 
-    # ============================================================
     # SAVE EVENTS (ANTI-DUPLIKAT UTAMA)
-    # ============================================================
     @staticmethod
     def _intersection_ratio(inner_box, outer_box):
         ix1 = max(inner_box[0], outer_box[0])
@@ -1464,9 +1436,7 @@ class StreamAIService:
 
         associated_people = set()
 
-        # ========================================================
         # VEHICLE EVENTS
-        # ========================================================
         for vehicle in vehicles:
             vehicle_box = vehicle.get("box", [0, 0, 0, 0])
 
@@ -1685,9 +1655,7 @@ class StreamAIService:
             except Exception as exc:
                 print(f"[AI STREAM ERROR] Save vehicle event failed: {exc}")
 
-        # ========================================================
         # PERSON EVENTS
-        # ========================================================
         for index, person in enumerate(people):
             if index in associated_people:
                 continue
@@ -1796,9 +1764,7 @@ class StreamAIService:
 
                 continue
 
-            # ========================================================
             # PERSON BARU -> SAVE
-            # ========================================================
             print(
                 f"[PERSON NEW]\n"
                 f"camera={camera_id}\n"
@@ -1881,9 +1847,7 @@ class StreamAIService:
             frame, person_dets, plate_dets, camera_id, current_time,
         )
 
-    # ============================================================
     # PERSON DEDUPLICATION & CANDIDATE EVALUATION
-    # ============================================================
     def _register_visual_hash(self, camera_id, object_type, v_hash, current_time):
         if not v_hash:
             return
@@ -1972,9 +1936,7 @@ class StreamAIService:
             if now - last_ts <= max_cooldown:
                 candidates.append((key, meta, now - last_ts))
 
-        # ========================================================
         # A. object_group_id sama -> anggap object yang sama
-        # ========================================================
         if object_group_id:
             for key, meta, age in candidates:
                 if meta.get("object_group_id") == object_group_id:
@@ -1991,9 +1953,7 @@ class StreamAIService:
                             "matched_meta": meta,
                         }
 
-        # ========================================================
         # B. track_id sama dan belum melewati timeout -> anggap object yang sama
-        # ========================================================
         if track_id >= 0:
             for key, meta, age in candidates:
                 tracks_seen = meta.get("tracks_seen", set())
@@ -2024,9 +1984,7 @@ class StreamAIService:
                     "matched_meta": None,
                 }
 
-        # ========================================================
         # C. track_id berbeda tetapi posisi + ukuran bbox sangat mirip -> cek visual hash
-        # ========================================================
         best_candidate = None
         best_dist = 9999.0
         best_area_ratio = 1.0
@@ -2086,9 +2044,7 @@ class StreamAIService:
                 "matched_meta": meta,
             }
 
-        # ========================================================
         # D. visual hash mirip dalam cooldown -> kemungkinan object yang sama
-        # ========================================================
         if v_hash:
             for key, meta, age in candidates:
                 if age > PERSON_DEDUP_COOLDOWN:
@@ -2133,14 +2089,10 @@ class StreamAIService:
                     "matched_meta": None,
                 }
 
-        # ========================================================
         # E. jika semua indikator berbeda -> anggap person baru
-        # ========================================================
         return False, None
 
-    # ============================================================
     # TRACK GENERATION & EVENT KEY
-    # ============================================================
     def _get_track_generation(self, camera_id, track_id, current_time):
         camera_id = _normalize_camera_id(camera_id)
         try:
@@ -2187,9 +2139,7 @@ class StreamAIService:
             f"gen{generation}:sess_{self.event_session_id}"
         )
 
-    # ============================================================
     # CLEANUP
-    # ============================================================
     def _cleanup_runtime_state(self, current_time):
         now = float(current_time)
         lifecycle_ttl = max(600.0, TRACK_REUSE_GAP * 4.0)
@@ -2273,9 +2223,7 @@ class StreamAIService:
             if now - last_seen > OBJECT_GROUP_MAX_GAP * 30:
                 self.object_groups.pop(gid, None)
 
-    # ============================================================
     # DEDUP VISUAL
-    # ============================================================
     def _visual_hash(self, crop):
         if crop is None or not hasattr(crop, "size") or crop.size == 0:
             return None
@@ -2400,9 +2348,7 @@ class StreamAIService:
         self._vehicle_centroids[camera_id] = cache
         return False
 
-    # ============================================================
     # DYNAMIC FOCUS
-    # ============================================================
     def _select_dynamic_focus(self, frame, vehicle_dets, plate_raw, now):
         h, w = frame.shape[:2]
         vehicles = [
@@ -2489,9 +2435,7 @@ class StreamAIService:
         text = f"LIGHT {m.get('status', '-')} | Score {m.get('score', 0):.0f}% | Bright {m.get('brightness', 0):.0f}"
         cv2.putText(frame, text, (10, 22), cv2.FONT_HERSHEY_SIMPLEX, .52, color, 2, cv2.LINE_AA)
 
-    # ============================================================
     # AI PIPELINE
-    # ============================================================
     def _run_ai_pipeline(self, frame, camera_id):
         camera_id = _normalize_camera_id(camera_id)
         camera_state = self._camera_state(camera_id)
@@ -2607,9 +2551,7 @@ class StreamAIService:
             self._run_ai_pipeline(frame, camera_id)
         print("[AI THREAD] Background AI worker stopped")
 
-    # ============================================================
     # PUBLIC API
-    # ============================================================
     def process_frame(self, frame, draw_bbox=True, camera_id=1):
         if frame is None or not hasattr(frame, "size") or frame.size == 0:
             return frame
@@ -2655,9 +2597,7 @@ class StreamAIService:
         self.last_display_time[camera_id] = time.time()
         return frame
 
-    # ============================================================
     # DRAWING
-    # ============================================================
     def _draw_detection_zones(self, frame, camera_id):
         if not ENABLE_DISTANCE_ZONE:
             return

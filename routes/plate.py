@@ -184,9 +184,7 @@ def video_job_feed(job_id):
     )
 
 
-# ============================================================
 # ENDPOINT KAMERA (TERHUBUNG KE MYSQL REAL_CCTV)
-# ============================================================
 
 @plate_bp.route("/cameras", methods=["GET"])
 def list_cameras():
@@ -267,9 +265,7 @@ def delete_camera(camera_id):
         return jsonify({"success": False, "message": str(e)}), 500
 
 
-# ============================================================
 # ENDPOINT HASIL DETEKSI GABUNGAN (TERHUBUNG KE MYSQL REAL_CCTV)
-# ============================================================
 
 def _get_terbaca_detections_paginated(
     page: int = 1, limit: int = 20, type_filter: str = "all",
@@ -474,9 +470,7 @@ def delete_detection(detection_id):
         return jsonify({"success": False, "message": str(e)}), 500
 
 
-# ============================================================
 # ENDPOINT RIWAYAT DETEKSI PLAT & WAJAH
-# ============================================================
 
 @plate_bp.route("/plate/history", methods=["GET"])
 def plate_history():
@@ -601,9 +595,7 @@ def _frequent_occurrence_rows(rows):
     ]
 
 
-# ============================================================
 # ENDPOINT OCCURRENCE KENDARAAN (PHASE 2)
-# ============================================================
 
 @plate_bp.route("/vehicle/occurrences", methods=["GET"])
 @plate_bp.route("/vehicles/occurrences", methods=["GET"])
@@ -694,9 +686,7 @@ def person_occurrences():
         return jsonify({"success": False, "message": str(e), "data": []}), 500
 
 
-# ============================================================
 # ENDPOINT STATISTIK DASHBOARD & ENTERPRISE
-# ============================================================
 
 @plate_bp.route("/statistics/summary", methods=["GET"])
 def stats_summary():
@@ -752,9 +742,7 @@ def stats_enterprise():
         return jsonify({"success": False, "message": str(e)}), 500
 
 
-# ============================================================
 # ENDPOINT PENGATURAN SISTEM
-# ============================================================
 
 @plate_bp.route("/settings", methods=["GET"])
 def get_settings():
@@ -801,10 +789,8 @@ def seed_demo():
         return jsonify({"success": False, "message": str(e)}), 500
 
 
-# ============================================================
-# ============================================================
-# ENDPOINT EKSPOR FLEKSIBEL (PERIODIK & KESELURUHAN)
-# ============================================================
+
+# ENDPOINT EKSPOR
 
 EXCEL_MIMETYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -1210,9 +1196,7 @@ def export_statistics_pdf():
         return jsonify({"success": False, "message": str(e)}), 500
 
 
-# ============================================================
 # ENDPOINT EKSPOR MONITORING CCTV
-# ============================================================
 
 @plate_bp.route("/export/cameras", methods=["GET"])
 def export_cameras_excel():
@@ -1248,9 +1232,7 @@ def export_cameras_pdf():
         return jsonify({"success": False, "message": str(e)}), 500
 
 
-# ============================================================
 # ENDPOINT LIVE CCTV STREAM (MJPEG UNTUK BROWSER)
-# ============================================================
 
 def generate_mjpeg_stream(camera_id, draw_bbox=True):
     """Stream frame cache worker kamera tanpa membaca atau memproses ulang CCTV."""
@@ -1317,9 +1299,7 @@ def video_feed(camera_id=None):
     )
 
 
-# ============================================================
 # ENDPOINT SNAPSHOT (1 FRAME) — untuk Editor Zona
-# ============================================================
 
 def _grab_single_frame(camera_id, draw_bbox=False, timeout=3.0):
     """Ambil salinan frame terbaru dari worker kamera yang sudah aktif."""

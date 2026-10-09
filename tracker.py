@@ -20,9 +20,7 @@ except ImportError:
     VALID_REGION_CODES = set()
 
 
-# ============================================================
 # FUNGSI IoU
-# ============================================================
 
 def hitung_iou(bbox_a, bbox_b):
     ax1, ay1, ax2, ay2 = bbox_a
@@ -50,9 +48,7 @@ def hitung_iou(bbox_a, bbox_b):
     return inter_area / union_area
 
 
-# ============================================================
 # NORMALISASI TEKS — DENGAN KOREKSI OCR
-# ============================================================
 
 def normalisasi_plat(text):
     """
@@ -82,9 +78,7 @@ def normalisasi_plat(text):
     return text
 
 
-# ============================================================
 # VALIDASI FORMAT PLAT INDONESIA — DIPERKETAT
-# ============================================================
 
 def validasi_format_plat(text):
     """
@@ -104,9 +98,7 @@ def validasi_format_plat(text):
         result = correct_and_validate_plate(text)
         return result["valid"]
 
-    # ============================================
     # Fallback regex (kalau validator tidak ada)
-    # ============================================
     text = normalisasi_plat(text)
     if not text:
         return False
@@ -144,9 +136,7 @@ def koreksi_plat(text):
     return normalized, validasi_format_plat(normalized), 0.0
 
 
-# ============================================================
 # KELAS TRACK
-# ============================================================
 
 class Track:
     def __init__(
@@ -174,9 +164,7 @@ class Track:
         self.finalized = False
         self.is_stable = False
 
-    # ========================================================
     # TAMBAH OCR
-    # ========================================================
 
     def tambah_bacaan_ocr(
         self,
@@ -230,9 +218,7 @@ class Track:
             if bbox is not None:
                 self.best_bbox = tuple(int(v) for v in bbox)
 
-    # ========================================================
     # VOTING — PRIORITASKAN YANG VALID
-    # ========================================================
 
     def hasil_voting(self):
         """
@@ -244,9 +230,7 @@ class Track:
         if not self.ocr_readings:
             return None
 
-        # ==============================================
         # PILIH KANDIDAT TERBAIK
-        # ==============================================
 
         # Filter: hanya readings yang valid
         valid_readings = [r for r in self.ocr_readings if r.get("is_valid")]
@@ -265,9 +249,7 @@ class Track:
 
             readings_menang = [r for r in self.ocr_readings if r["text"] == teks_terbanyak]
 
-        # ==============================================
         # HITUNG CONFIDENCE
-        # ==============================================
 
         confidence_rata2 = (
             sum(r["confidence"] for r in readings_menang)
@@ -291,9 +273,7 @@ class Track:
         }
 
 
-# ============================================================
 # PLATE TRACKER V2
-# ============================================================
 
 class PlateTracker:
     def __init__(
@@ -347,9 +327,7 @@ class PlateTracker:
         self.latest_finished_capture = None
         return result
 
-    # ========================================================
     # VALIDASI KELAYAKAN
-    # ========================================================
 
     def _hasil_layak_ditampilkan(self, hasil, track):
         if hasil is None:
@@ -403,9 +381,7 @@ class PlateTracker:
         )
         return False
 
-    # ========================================================
     # FINALIZE
-    # ========================================================
 
     def _finalize_track(self, track):
         hasil = track.hasil_voting()
@@ -461,9 +437,7 @@ class PlateTracker:
 
         return capture
 
-    # ========================================================
     # UPDATE
-    # ========================================================
 
     def update(self, detections, frame, ocr_reader):
         self.frame_number += 1
