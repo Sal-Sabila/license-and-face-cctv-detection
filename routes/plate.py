@@ -4,7 +4,7 @@ import os
 import threading
 import uuid
 from flask import Blueprint, jsonify, request, Response, send_from_directory, send_file
-from datetime import datetime
+from datetime import datetime, timedelta
 import db
 from report_export import (
     build_detections_excel,
@@ -290,7 +290,7 @@ def _get_terbaca_detections_paginated(
         return {"items": [], "total": 0, "page": page, "limit": limit, "total_pages": 1}
 
     page = max(1, int(page))
-    limit = max(1, min(5000, int(limit)))
+    limit = max(1, min(50000, int(limit)))
     offset = (page - 1) * limit
 
     where_clauses = [
@@ -802,29 +802,114 @@ def seed_demo():
 
 
 # ============================================================
-# ENDPOINT EKSPOR
+# ============================================================
+# ENDPOINT EKSPOR FLEKSIBEL (PERIODIK & KESELURUHAN)
 # ============================================================
 
 EXCEL_MIMETYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
+def _resolve_export_period_and_dates(args):
+    """
+    Mengurai parameter periode dan tanggal dari query params:
+    Mendukung:
+    - period: 'all', 'today', 'yesterday', '2d', '7d', '30d', 'custom'
+    - date: 'YYYY-MM-DD' (untuk ekspor per hari spesifik)
+    - start_date & end_date: 'YYYY-MM-DD'
+    Mengembalikan: (start_date, end_date, period_label)
+    """
+    period = str(args.get("period") or "").lower().strip()
+    single_date = str(args.get("date") or "").strip()
+    start_date = str(args.get("start_date") or "").strip()
+    end_date = str(args.get("end_date") or "").strip()
+
+    today_str = datetime.now().strftime("%Y-%m-%d")
+
+    # 1. Jika memilih tanggal tunggal spesifik (misal ekspor per hari tertentu)
+    if single_date:
+        return single_date, single_date, f"Harian ({single_date})"
+
+    # 2. Pilihan periode predefined
+    if period == "today":
+        return today_str, today_str, f"Hari Ini ({today_str})"
+    elif period == "yesterday":
+        yest = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        return yest, yest, f"Kemarin ({yest})"
+    elif period == "2d":
+        start_2d = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        return start_2d, today_str, f"2 Hari Terakhir ({start_2d} s/d {today_str})"
+    elif period == "7d":
+        start_7d = (datetime.now() - timedelta(days=6)).strftime("%Y-%m-%d")
+        return start_7d, today_str, f"7 Hari Terakhir ({start_7d} s/d {today_str})"
+    elif period == "30d":
+        start_30d = (datetime.now() - timedelta(days=29)).strftime("%Y-%m-%d")
+        return start_30d, today_str, f"30 Hari Terakhir ({start_30d} s/d {today_str})"
+    elif period == "all":
+        return None, None, "Keseluruhan (Semua Waktu)"
+
+    # 3. Rentang tanggal manual jika ada
+    if start_date and end_date:
+        if start_date == end_date:
+            return start_date, end_date, f"Harian ({start_date})"
+        return start_date, end_date, f"{start_date} s/d {end_date}"
+    elif start_date:
+        return start_date, None, f"Mulai {start_date}"
+    elif end_date:
+        return None, end_date, f"Sampai {end_date}"
+
+    # Default jika tidak ditentukan: Keseluruhan
+    return None, None, "Keseluruhan (Semua Waktu)"
+
+
+def _export_clean_filename(prefix, period_label, ext):
+    safe_period = (
+        str(period_label)
+        .replace(" ", "_")
+        .replace("(", "")
+        .replace(")", "")
+        .replace("/", "-")
+        .replace(":", "-")
+    )
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"{prefix}_{safe_period}_{timestamp}.{ext}"
+
+
 @plate_bp.route("/export/detections", methods=["GET"])
 def export_detections_excel():
-    """Mengekspor data Hasil Deteksi sesuai filter aktif ke file Excel (.xlsx)."""
+    """Mengekspor data Hasil Deteksi sesuai filter aktif atau periode pilihan ke Excel (.xlsx)."""
     try:
+        start_date, end_date, period_label = _resolve_export_period_and_dates(request.args)
+        type_filter = request.args.get("type", "all")
+        status_filter = request.args.get("status", "all")
+        camera_id = request.args.get("camera_id", type=int) if str(request.args.get("camera_id", "")).isdigit() else None
+        search = request.args.get("search", type=str)
+        if search:
+            search = search.strip() or None
+
         res = _get_terbaca_detections_paginated(
             page=1,
-            limit=5000,
-            type_filter=request.args.get("type", "all"),
-            status_filter=request.args.get("status", "all"),
-            camera_id=request.args.get("camera_id", type=int),
-            search=request.args.get("search", type=str),
-            start_date=request.args.get("start_date", type=str),
-            end_date=request.args.get("end_date", type=str)
+            limit=50000,
+            type_filter=type_filter,
+            status_filter=status_filter,
+            camera_id=camera_id,
+            search=search,
+            start_date=start_date,
+            end_date=end_date
         )
         items = res.get("items", [])
-        buffer = build_detections_excel(items)
-        filename = f"laporan_deteksi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+
+        filter_parts = []
+        if type_filter and type_filter != "all":
+            t_map = {"plate": "Plat Nomor", "face": "Wajah/Orang", "vehicle": "Kendaraan"}
+            filter_parts.append(f"Tipe: {t_map.get(type_filter, type_filter)}")
+        if camera_id:
+            filter_parts.append(f"CCTV #{camera_id}")
+        if search:
+            filter_parts.append(f"Cari: '{search}'")
+        filter_info = " | ".join(filter_parts) if filter_parts else None
+
+        buffer = build_detections_excel(items, period_label=period_label, filter_info=filter_info)
+        filename = _export_clean_filename("laporan_deteksi", period_label, "xlsx")
         return send_file(
             buffer,
             mimetype=EXCEL_MIMETYPE,
@@ -837,21 +922,40 @@ def export_detections_excel():
 
 @plate_bp.route("/export/detections/pdf", methods=["GET"])
 def export_detections_pdf():
-    """Mengekspor data Hasil Deteksi sesuai filter aktif ke file PDF (dengan foto)."""
+    """Mengekspor data Hasil Deteksi sesuai filter aktif atau periode pilihan ke PDF (dengan foto)."""
     try:
+        start_date, end_date, period_label = _resolve_export_period_and_dates(request.args)
+        type_filter = request.args.get("type", "all")
+        status_filter = request.args.get("status", "all")
+        camera_id = request.args.get("camera_id", type=int) if str(request.args.get("camera_id", "")).isdigit() else None
+        search = request.args.get("search", type=str)
+        if search:
+            search = search.strip() or None
+
         res = _get_terbaca_detections_paginated(
             page=1,
-            limit=5000,
-            type_filter=request.args.get("type", "all"),
-            status_filter=request.args.get("status", "all"),
-            camera_id=request.args.get("camera_id", type=int),
-            search=request.args.get("search", type=str),
-            start_date=request.args.get("start_date", type=str),
-            end_date=request.args.get("end_date", type=str)
+            limit=50000,
+            type_filter=type_filter,
+            status_filter=status_filter,
+            camera_id=camera_id,
+            search=search,
+            start_date=start_date,
+            end_date=end_date
         )
         items = res.get("items", [])
-        buffer = build_detections_pdf(items)
-        filename = f"laporan_deteksi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+
+        filter_parts = []
+        if type_filter and type_filter != "all":
+            t_map = {"plate": "Plat Nomor", "face": "Wajah/Orang", "vehicle": "Kendaraan"}
+            filter_parts.append(f"Tipe: {t_map.get(type_filter, type_filter)}")
+        if camera_id:
+            filter_parts.append(f"CCTV #{camera_id}")
+        if search:
+            filter_parts.append(f"Cari: '{search}'")
+        filter_info = " | ".join(filter_parts) if filter_parts else None
+
+        buffer = build_detections_pdf(items, period_label=period_label, filter_info=filter_info)
+        filename = _export_clean_filename("laporan_deteksi", period_label, "pdf")
         return send_file(
             buffer,
             mimetype="application/pdf",
@@ -864,20 +968,38 @@ def export_detections_pdf():
 
 @plate_bp.route("/export/plates", methods=["GET"])
 def export_plates_excel():
-    """Mengekspor riwayat plat nomor sesuai filter aktif ke file Excel (.xlsx)."""
+    """Mengekspor riwayat plat nomor sesuai filter aktif atau periode pilihan ke Excel (.xlsx)."""
     try:
+        start_date, end_date, period_label = _resolve_export_period_and_dates(request.args)
+        search = request.args.get("search", type=str)
+        if search:
+            search = search.strip() or None
+        camera_id = request.args.get("camera_id", type=int) if str(request.args.get("camera_id", "")).isdigit() else None
+        status_filter = request.args.get("status", "all")
+
         res = db.get_plate_history_paginated(
             page=1,
-            limit=5000,
-            search=request.args.get("search", type=str),
-            camera_id=request.args.get("camera_id", type=int),
-            status_filter=request.args.get("status", "all"),
-            start_date=request.args.get("start_date", type=str),
-            end_date=request.args.get("end_date", type=str)
+            limit=50000,
+            search=search,
+            camera_id=camera_id,
+            status_filter=status_filter,
+            start_date=start_date,
+            end_date=end_date
         )
         items = res.get("items", [])
-        buffer = build_plates_excel(items)
-        filename = f"riwayat_plat_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+
+        filter_parts = []
+        if camera_id:
+            filter_parts.append(f"CCTV #{camera_id}")
+        if status_filter and status_filter != "all":
+            st_map = {"1": "Terbaca", "2": "Perlu Cek", "0": "Gagal"}
+            filter_parts.append(f"Status: {st_map.get(status_filter, status_filter)}")
+        if search:
+            filter_parts.append(f"Cari: '{search}'")
+        filter_info = " | ".join(filter_parts) if filter_parts else None
+
+        buffer = build_plates_excel(items, period_label=period_label, filter_info=filter_info)
+        filename = _export_clean_filename("riwayat_plat", period_label, "xlsx")
         return send_file(
             buffer,
             mimetype=EXCEL_MIMETYPE,
@@ -890,20 +1012,38 @@ def export_plates_excel():
 
 @plate_bp.route("/export/plates/pdf", methods=["GET"])
 def export_plates_pdf():
-    """Mengekspor riwayat plat nomor sesuai filter aktif ke file PDF (dengan crop plat)."""
+    """Mengekspor riwayat plat nomor sesuai filter aktif atau periode pilihan ke PDF (dengan crop plat)."""
     try:
+        start_date, end_date, period_label = _resolve_export_period_and_dates(request.args)
+        search = request.args.get("search", type=str)
+        if search:
+            search = search.strip() or None
+        camera_id = request.args.get("camera_id", type=int) if str(request.args.get("camera_id", "")).isdigit() else None
+        status_filter = request.args.get("status", "all")
+
         res = db.get_plate_history_paginated(
             page=1,
-            limit=5000,
-            search=request.args.get("search", type=str),
-            camera_id=request.args.get("camera_id", type=int),
-            status_filter=request.args.get("status", "all"),
-            start_date=request.args.get("start_date", type=str),
-            end_date=request.args.get("end_date", type=str)
+            limit=50000,
+            search=search,
+            camera_id=camera_id,
+            status_filter=status_filter,
+            start_date=start_date,
+            end_date=end_date
         )
         items = res.get("items", [])
-        buffer = build_plates_pdf(items)
-        filename = f"riwayat_plat_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+
+        filter_parts = []
+        if camera_id:
+            filter_parts.append(f"CCTV #{camera_id}")
+        if status_filter and status_filter != "all":
+            st_map = {"1": "Terbaca", "2": "Perlu Cek", "0": "Gagal"}
+            filter_parts.append(f"Status: {st_map.get(status_filter, status_filter)}")
+        if search:
+            filter_parts.append(f"Cari: '{search}'")
+        filter_info = " | ".join(filter_parts) if filter_parts else None
+
+        buffer = build_plates_pdf(items, period_label=period_label, filter_info=filter_info)
+        filename = _export_clean_filename("riwayat_plat", period_label, "pdf")
         return send_file(
             buffer,
             mimetype="application/pdf",
@@ -918,9 +1058,31 @@ def export_plates_pdf():
 def export_recap_excel():
     """Mengekspor Rekapitulasi ke Excel (.xlsx)."""
     try:
-        analytics = db.get_analytics(request.args.to_dict())
-        buffer = build_recap_excel(analytics)
-        filename = f"rekapitulasi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        start_date, end_date, period_label = _resolve_export_period_and_dates(request.args)
+        args_dict = request.args.to_dict()
+        if start_date:
+            args_dict["start_date"] = start_date
+        else:
+            args_dict.pop("start_date", None)
+        if end_date:
+            args_dict["end_date"] = end_date
+        else:
+            args_dict.pop("end_date", None)
+
+        if not start_date and not end_date:
+            args_dict["period"] = "all"
+        else:
+            args_dict["period"] = "custom"
+
+        camera_id = args_dict.get("camera_id")
+        filter_parts = []
+        if camera_id and str(camera_id).isdigit():
+            filter_parts.append(f"CCTV #{camera_id}")
+        filter_info = " | ".join(filter_parts) if filter_parts else None
+
+        analytics = db.get_analytics(args_dict)
+        buffer = build_recap_excel(analytics, period=period_label, filter_info=filter_info)
+        filename = _export_clean_filename("rekapitulasi", period_label, "xlsx")
         return send_file(
             buffer,
             mimetype=EXCEL_MIMETYPE,
@@ -935,9 +1097,31 @@ def export_recap_excel():
 def export_recap_pdf():
     """Mengekspor Rekapitulasi ke PDF."""
     try:
-        analytics = db.get_analytics(request.args.to_dict())
-        buffer = build_recap_pdf(analytics)
-        filename = f"rekapitulasi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        start_date, end_date, period_label = _resolve_export_period_and_dates(request.args)
+        args_dict = request.args.to_dict()
+        if start_date:
+            args_dict["start_date"] = start_date
+        else:
+            args_dict.pop("start_date", None)
+        if end_date:
+            args_dict["end_date"] = end_date
+        else:
+            args_dict.pop("end_date", None)
+
+        if not start_date and not end_date:
+            args_dict["period"] = "all"
+        else:
+            args_dict["period"] = "custom"
+
+        camera_id = args_dict.get("camera_id")
+        filter_parts = []
+        if camera_id and str(camera_id).isdigit():
+            filter_parts.append(f"CCTV #{camera_id}")
+        filter_info = " | ".join(filter_parts) if filter_parts else None
+
+        analytics = db.get_analytics(args_dict)
+        buffer = build_recap_pdf(analytics, period=period_label, filter_info=filter_info)
+        filename = _export_clean_filename("rekapitulasi", period_label, "pdf")
         return send_file(
             buffer,
             mimetype="application/pdf",
@@ -951,11 +1135,32 @@ def export_recap_pdf():
 @plate_bp.route("/export/statistics", methods=["GET"])
 def export_statistics_excel():
     """Mengekspor Statistik ke Excel (.xlsx)."""
-    period = request.args.get("period", "today")
     try:
-        analytics = db.get_analytics(request.args.to_dict())
-        buffer = build_statistics_excel(analytics, period=analytics.get("period", period))
-        filename = f"laporan_statistik_{period}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        start_date, end_date, period_label = _resolve_export_period_and_dates(request.args)
+        args_dict = request.args.to_dict()
+        if start_date:
+            args_dict["start_date"] = start_date
+        else:
+            args_dict.pop("start_date", None)
+        if end_date:
+            args_dict["end_date"] = end_date
+        else:
+            args_dict.pop("end_date", None)
+
+        if not start_date and not end_date:
+            args_dict["period"] = "all"
+        else:
+            args_dict["period"] = "custom"
+
+        camera_id = args_dict.get("camera_id")
+        filter_parts = []
+        if camera_id and str(camera_id).isdigit():
+            filter_parts.append(f"CCTV #{camera_id}")
+        filter_info = " | ".join(filter_parts) if filter_parts else None
+
+        analytics = db.get_analytics(args_dict)
+        buffer = build_statistics_excel(analytics, period=period_label, filter_info=filter_info)
+        filename = _export_clean_filename("laporan_statistik", period_label, "xlsx")
         return send_file(
             buffer,
             mimetype=EXCEL_MIMETYPE,
@@ -969,11 +1174,32 @@ def export_statistics_excel():
 @plate_bp.route("/export/statistics/pdf", methods=["GET"])
 def export_statistics_pdf():
     """Mengekspor Statistik ke PDF."""
-    period = request.args.get("period", "today")
     try:
-        analytics = db.get_analytics(request.args.to_dict())
-        buffer = build_statistics_pdf(analytics, period=analytics.get("period", period))
-        filename = f"laporan_statistik_{period}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        start_date, end_date, period_label = _resolve_export_period_and_dates(request.args)
+        args_dict = request.args.to_dict()
+        if start_date:
+            args_dict["start_date"] = start_date
+        else:
+            args_dict.pop("start_date", None)
+        if end_date:
+            args_dict["end_date"] = end_date
+        else:
+            args_dict.pop("end_date", None)
+
+        if not start_date and not end_date:
+            args_dict["period"] = "all"
+        else:
+            args_dict["period"] = "custom"
+
+        camera_id = args_dict.get("camera_id")
+        filter_parts = []
+        if camera_id and str(camera_id).isdigit():
+            filter_parts.append(f"CCTV #{camera_id}")
+        filter_info = " | ".join(filter_parts) if filter_parts else None
+
+        analytics = db.get_analytics(args_dict)
+        buffer = build_statistics_pdf(analytics, period=period_label, filter_info=filter_info)
+        filename = _export_clean_filename("laporan_statistik", period_label, "pdf")
         return send_file(
             buffer,
             mimetype="application/pdf",

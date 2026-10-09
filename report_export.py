@@ -401,7 +401,7 @@ def _detection_fields(item):
         target = "Orang"
 
     if is_plate:
-        kind = "Kendaraan / Plat Nomor"
+        kind = "Plat Nomor"
     elif is_vehicle:
         kind = "Kendaraan"
     else:
@@ -457,10 +457,11 @@ def _plate_fields(item):
 
 PERIOD_LABELS = {
     "today": "Hari Ini",
+    "yesterday": "Kemarin",
     "2d": "2 Hari Terakhir",
     "7d": "7 Hari Terakhir",
     "30d": "30 Hari Terakhir",
-    "all": "Semua Waktu",
+    "all": "Keseluruhan (Semua Waktu)",
 }
 
 
@@ -468,7 +469,8 @@ def _period_label(period):
     if not period:
         return ""
 
-    return PERIOD_LABELS.get(str(period), str(period))
+    p_str = str(period).strip()
+    return PERIOD_LABELS.get(p_str.lower(), p_str)
 
 
 def _now_text():
@@ -968,7 +970,7 @@ def _finalize_excel(wb):
 #    Sumber field: lihat _detection_fields() (= loadDetections()).
 # ============================================================
 
-def build_detections_excel(items):
+def build_detections_excel(items, period_label=None, filter_info=None):
     wb = Workbook()
 
     ws = wb.active
@@ -999,11 +1001,17 @@ def build_detections_excel(items):
         for index, f in enumerate(fields, start=1)
     ]
 
+    subtitle_parts = ["Laporan hasil deteksi wajah dan plat nomor kendaraan"]
+    if period_label:
+        subtitle_parts.append(f"Periode: {_period_label(period_label)}")
+    if filter_info:
+        subtitle_parts.append(f"Filter: {filter_info}")
+    subtitle_parts.append(f"Diekspor: {_now_text()} — Jumlah data: {len(rows)}")
+
     _excel_table_sheet(
         ws,
         "HASIL DETEKSI CCTV",
-        "Laporan hasil deteksi wajah dan plat nomor kendaraan "
-        f"— Diekspor: {_now_text()} — Jumlah data: {len(rows)}",
+        " — ".join(subtitle_parts),
         headers,
         rows,
         [8, 24, 26, 28, 15, 22, 16],
@@ -1027,7 +1035,7 @@ def build_detections_excel(items):
 #           Confidence | Waktu Deteksi | Status   (tanpa Keterangan)
 # ============================================================
 
-def build_detections_pdf(items):
+def build_detections_pdf(items, period_label=None, filter_info=None):
     buffer = io.BytesIO()
 
     doc = SimpleDocTemplate(
@@ -1043,13 +1051,16 @@ def build_detections_pdf(items):
 
     fields = [_detection_fields(item) for item in (items or [])]
 
+    sub_lines = ["Laporan hasil deteksi wajah dan plat nomor kendaraan"]
+    if period_label:
+        sub_lines.append(f"Periode: {escape(_period_label(period_label))}")
+    if filter_info:
+        sub_lines.append(f"Filter: {escape(filter_info)}")
+    sub_lines.append(f"Dicetak: {_now_text()} — Jumlah data: {len(fields)}")
+
     story = [
         Paragraph("HASIL DETEKSI CCTV", s["title"]),
-        Paragraph(
-            "Laporan hasil deteksi wajah dan plat nomor kendaraan"
-            f"<br/>Dicetak: {_now_text()} — Jumlah data: {len(fields)}",
-            s["subtitle"],
-        ),
+        Paragraph("<br/>".join(sub_lines), s["subtitle"]),
     ]
 
     if not fields:
@@ -1154,7 +1165,7 @@ def build_detections_pdf(items):
 #    Sumber field: lihat _plate_fields() (= loadPlateHistory()).
 # ============================================================
 
-def build_plates_excel(items):
+def build_plates_excel(items, period_label=None, filter_info=None):
     wb = Workbook()
 
     ws = wb.active
@@ -1183,11 +1194,17 @@ def build_plates_excel(items):
         for index, f in enumerate(fields, start=1)
     ]
 
+    subtitle_parts = ["Riwayat hasil pembacaan plat kendaraan dari CCTV"]
+    if period_label:
+        subtitle_parts.append(f"Periode: {_period_label(period_label)}")
+    if filter_info:
+        subtitle_parts.append(f"Filter: {filter_info}")
+    subtitle_parts.append(f"Diekspor: {_now_text()} — Jumlah data: {len(rows)}")
+
     _excel_table_sheet(
         ws,
         "RIWAYAT PLAT NOMOR",
-        "Riwayat hasil pembacaan plat kendaraan dari CCTV "
-        f"— Diekspor: {_now_text()} — Jumlah data: {len(rows)}",
+        " — ".join(subtitle_parts),
         headers,
         rows,
         [8, 22, 32, 16, 23, 16],
@@ -1211,7 +1228,7 @@ def build_plates_excel(items):
 #           Confidence | Waktu Deteksi | Status  (tanpa Keterangan)
 # ============================================================
 
-def build_plates_pdf(items):
+def build_plates_pdf(items, period_label=None, filter_info=None):
     buffer = io.BytesIO()
 
     doc = SimpleDocTemplate(
@@ -1227,13 +1244,16 @@ def build_plates_pdf(items):
 
     fields = [_plate_fields(item) for item in (items or [])]
 
+    sub_lines = ["Riwayat hasil pembacaan plat kendaraan dari CCTV"]
+    if period_label:
+        sub_lines.append(f"Periode: {escape(_period_label(period_label))}")
+    if filter_info:
+        sub_lines.append(f"Filter: {escape(filter_info)}")
+    sub_lines.append(f"Dicetak: {_now_text()} — Jumlah data: {len(fields)}")
+
     story = [
         Paragraph("RIWAYAT PLAT NOMOR", s["title"]),
-        Paragraph(
-            "Riwayat hasil pembacaan plat kendaraan dari CCTV"
-            f"<br/>Dicetak: {_now_text()} — Jumlah data: {len(fields)}",
-            s["subtitle"],
-        ),
+        Paragraph("<br/>".join(sub_lines), s["subtitle"]),
     ]
 
     if not fields:
@@ -1377,7 +1397,7 @@ def _recap_daily_rows(daily):
     ]
 
 
-def _recap_subtitle(analytics, period, text):
+def _recap_subtitle(analytics, period, text, filter_info=None):
     label = _period_label(
         period
         or (analytics.get("period") if isinstance(analytics, dict) else "")
@@ -1388,12 +1408,15 @@ def _recap_subtitle(analytics, period, text):
     if label:
         parts.append(f"Periode: {label}")
 
+    if filter_info:
+        parts.append(f"Filter: {filter_info}")
+
     parts.append(f"Diekspor: {_now_text()}")
 
     return " — ".join(parts)
 
 
-def build_recap_excel(analytics, period=None):
+def build_recap_excel(analytics, period=None, filter_info=None):
     wb = Workbook()
 
     summary, cameras, daily, _hourly, _top = _analytics_parts(analytics)
@@ -1409,7 +1432,7 @@ def build_recap_excel(analytics, period=None):
         ws,
         "REKAPITULASI MONITORING CCTV",
         _recap_subtitle(
-            analytics, period, "Ringkasan aktivitas kendaraan dan orang"
+            analytics, period, "Ringkasan aktivitas kendaraan dan orang", filter_info=filter_info
         ),
         ["Indikator", "Jumlah"],
         _recap_summary_rows(summary),
@@ -1492,7 +1515,7 @@ def build_recap_excel(analytics, period=None):
 #    Sumber data identik dengan build_recap_excel().
 # ============================================================
 
-def build_recap_pdf(analytics, period=None):
+def build_recap_pdf(analytics, period=None, filter_info=None):
     buffer = io.BytesIO()
 
     doc = SimpleDocTemplate(
@@ -1513,16 +1536,19 @@ def build_recap_pdf(analytics, period=None):
         or (analytics.get("period") if isinstance(analytics, dict) else "")
     )
 
-    subtitle = "Ringkasan hasil pemantauan dan deteksi CCTV"
+    subtitle_parts = ["Ringkasan hasil pemantauan dan deteksi CCTV"]
 
     if label:
-        subtitle += f"<br/>Periode: {escape(label)}"
+        subtitle_parts.append(f"Periode: {escape(label)}")
 
-    subtitle += f"<br/>Dicetak: {_now_text()}"
+    if filter_info:
+        subtitle_parts.append(f"Filter: {escape(filter_info)}")
+
+    subtitle_parts.append(f"Dicetak: {_now_text()}")
 
     story = [
         Paragraph("REKAPITULASI MONITORING CCTV", s["title"]),
-        Paragraph(subtitle, s["subtitle"]),
+        Paragraph("<br/>".join(subtitle_parts), s["subtitle"]),
     ]
 
     # ---- 1. Ringkasan ----
@@ -1726,13 +1752,19 @@ def _stats_top_rows(top_plates):
     return rows
 
 
-def _stats_subtitle(period):
+def _stats_subtitle(period, filter_info=None):
     label = _period_label(period)
+    parts = []
+    if label:
+        parts.append(f"Periode: {label}")
+    else:
+        parts.append("Periode statistik")
+    if filter_info:
+        parts.append(f"Filter: {filter_info}")
+    return " — ".join(parts)
 
-    return f"Periode: {label}" if label else "Periode statistik"
 
-
-def build_statistics_excel(analytics, period="today"):
+def build_statistics_excel(analytics, period="today", filter_info=None):
     wb = Workbook()
 
     summary, cameras, _daily, hourly, top_plates = _analytics_parts(analytics)
@@ -1747,7 +1779,7 @@ def build_statistics_excel(analytics, period="today"):
     _add_excel_title(
         ws,
         "STATISTIK MONITORING CCTV",
-        f"{_stats_subtitle(period)} — Diekspor: {_now_text()}",
+        f"{_stats_subtitle(period, filter_info=filter_info)} — Diekspor: {_now_text()}",
         4,
     )
 
@@ -1863,7 +1895,7 @@ def build_statistics_excel(analytics, period="today"):
 #            Beban Lalu Lintas per CCTV, Analisis Jam Sibuk, Top 10
 # ============================================================
 
-def build_statistics_pdf(analytics, period="today"):
+def build_statistics_pdf(analytics, period="today", filter_info=None):
     buffer = io.BytesIO()
 
     doc = SimpleDocTemplate(
@@ -1882,7 +1914,7 @@ def build_statistics_pdf(analytics, period="today"):
     story = [
         Paragraph("STATISTIK MONITORING CCTV", s["title"]),
         Paragraph(
-            f"{escape(_stats_subtitle(period))}"
+            f"{escape(_stats_subtitle(period, filter_info=filter_info))}"
             f"<br/>Tanggal cetak: {_now_text()}",
             s["subtitle"],
         ),

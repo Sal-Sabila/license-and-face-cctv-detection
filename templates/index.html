@@ -717,19 +717,27 @@
                             </button>
                             <ul class="dropdown-menu dropdown-menu-end shadow-sm">
                                 <li>
+                                    <button type="button" class="dropdown-item d-flex align-items-center gap-2"
+                                        onclick="openExportModal('detections')">
+                                        <i class="bi bi-sliders text-primary"></i>
+                                        <span class="fw-medium">Pilih Periode Ekspor...</span>
+                                    </button>
+                                </li>
+                                <li><hr class="dropdown-divider my-1"></li>
+                                <li>
                                     <button type="button" id="exportDetectionsExcelBtn"
                                         class="dropdown-item d-flex align-items-center gap-2"
                                         onclick="exportDetections()">
-                                        <i class="bi bi-file-earmark-spreadsheet"></i>
-                                        <span>Ekspor Excel</span>
+                                        <i class="bi bi-file-earmark-spreadsheet text-success"></i>
+                                        <span>Ekspor Excel (Filter Aktif)</span>
                                     </button>
                                 </li>
                                 <li>
                                     <button type="button" id="exportDetectionsPdfBtn"
                                         class="dropdown-item d-flex align-items-center gap-2"
                                         onclick="exportDetectionsPdf()">
-                                        <i class="bi bi-file-earmark-pdf"></i>
-                                        <span>Ekspor PDF</span>
+                                        <i class="bi bi-file-earmark-pdf text-danger"></i>
+                                        <span>Ekspor PDF (Filter Aktif)</span>
                                     </button>
                                 </li>
                             </ul>
@@ -892,18 +900,26 @@
                             </button>
                             <ul class="dropdown-menu dropdown-menu-end shadow-sm">
                                 <li>
+                                    <button type="button" class="dropdown-item d-flex align-items-center gap-2"
+                                        onclick="openExportModal('plates')">
+                                        <i class="bi bi-sliders text-primary"></i>
+                                        <span class="fw-medium">Pilih Periode Ekspor...</span>
+                                    </button>
+                                </li>
+                                <li><hr class="dropdown-divider my-1"></li>
+                                <li>
                                     <button type="button" id="exportPlatesExcelBtn"
                                         class="dropdown-item d-flex align-items-center gap-2" onclick="exportPlates()">
-                                        <i class="bi bi-file-earmark-spreadsheet"></i>
-                                        <span>Ekspor Excel</span>
+                                        <i class="bi bi-file-earmark-spreadsheet text-success"></i>
+                                        <span>Ekspor Excel (Filter Aktif)</span>
                                     </button>
                                 </li>
                                 <li>
                                     <button type="button" id="exportPlatesPdfBtn"
                                         class="dropdown-item d-flex align-items-center gap-2"
                                         onclick="exportPlatesPdf()">
-                                        <i class="bi bi-file-earmark-pdf"></i>
-                                        <span>Ekspor PDF</span>
+                                        <i class="bi bi-file-earmark-pdf text-danger"></i>
+                                        <span>Ekspor PDF (Filter Aktif)</span>
                                     </button>
                                 </li>
                             </ul>
@@ -1046,18 +1062,26 @@
                             </button>
                             <ul class="dropdown-menu dropdown-menu-end shadow-sm">
                                 <li>
+                                    <button type="button" class="dropdown-item d-flex align-items-center gap-2"
+                                        onclick="openExportModal('recap')">
+                                        <i class="bi bi-sliders text-primary"></i>
+                                        <span class="fw-medium">Pilih Periode Ekspor...</span>
+                                    </button>
+                                </li>
+                                <li><hr class="dropdown-divider my-1"></li>
+                                <li>
                                     <button type="button" id="recapExport"
                                         class="dropdown-item d-flex align-items-center gap-2" onclick="exportRecap()">
-                                        <i class="bi bi-file-earmark-spreadsheet"></i>
-                                        <span>Ekspor Excel</span>
+                                        <i class="bi bi-file-earmark-spreadsheet text-success"></i>
+                                        <span>Ekspor Excel (Filter Aktif)</span>
                                     </button>
                                 </li>
                                 <li>
                                     <button type="button" id="recapExportPdf"
                                         class="dropdown-item d-flex align-items-center gap-2"
                                         onclick="exportRecapPdf()">
-                                        <i class="bi bi-file-earmark-pdf"></i>
-                                        <span>Ekspor PDF</span>
+                                        <i class="bi bi-file-earmark-pdf text-danger"></i>
+                                        <span>Ekspor PDF (Filter Aktif)</span>
                                     </button>
                                 </li>
                             </ul>
@@ -1216,19 +1240,27 @@
                             </button>
                             <ul class="dropdown-menu dropdown-menu-end shadow-sm">
                                 <li>
+                                    <button type="button" class="dropdown-item d-flex align-items-center gap-2"
+                                        onclick="openExportModal('statistics')">
+                                        <i class="bi bi-sliders text-primary"></i>
+                                        <span class="fw-medium">Pilih Periode Ekspor...</span>
+                                    </button>
+                                </li>
+                                <li><hr class="dropdown-divider my-1"></li>
+                                <li>
                                     <button type="button" id="statsExportExcelBtn"
                                         class="dropdown-item d-flex align-items-center gap-2"
                                         onclick="exportStatsReport()">
-                                        <i class="bi bi-file-earmark-spreadsheet"></i>
-                                        <span>Ekspor Excel</span>
+                                        <i class="bi bi-file-earmark-spreadsheet text-success"></i>
+                                        <span>Ekspor Excel (Filter Aktif)</span>
                                     </button>
                                 </li>
                                 <li>
                                     <button type="button" id="statsExportPdfBtn"
                                         class="dropdown-item d-flex align-items-center gap-2"
                                         onclick="exportStatsPdf()">
-                                        <i class="bi bi-file-earmark-pdf"></i>
-                                        <span>Ekspor PDF</span>
+                                        <i class="bi bi-file-earmark-pdf text-danger"></i>
+                                        <span>Ekspor PDF (Filter Aktif)</span>
                                     </button>
                                 </li>
                             </ul>
@@ -1864,6 +1896,136 @@
                     <div class="d-flex justify-content-center gap-2">
                         <button type="button" class="btn btn-light px-3" data-bs-dismiss="modal">Batal</button>
                         <button type="button" id="confirmAccept" class="btn btn-danger px-3">Ya, lanjutkan</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal Ekspor Fleksibel Terpadu -->
+    <div class="modal fade" id="exportModal" tabindex="-1" aria-labelledby="exportModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content border-0 shadow-lg">
+                <div class="modal-header border-bottom py-3">
+                    <div class="d-flex align-items-center gap-2">
+                        <div class="rounded-circle bg-primary-subtle text-primary d-flex align-items-center justify-content-center" style="width: 38px; height: 38px;">
+                            <i class="bi bi-cloud-arrow-down fs-5"></i>
+                        </div>
+                        <div>
+                            <h5 class="modal-title fs-6 fw-bold mb-0" id="exportModalLabel">Ekspor Laporan &amp; Data CCTV</h5>
+                            <small class="text-muted" id="exportModalModuleSubtitle">Pilih periode dan format laporan yang diinginkan</small>
+                        </div>
+                    </div>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Tutup"></button>
+                </div>
+                <div class="modal-body p-4">
+                    <!-- Ringkasan Target Ekspor -->
+                    <div class="mb-3 p-3 bg-light rounded-3 border">
+                        <div class="d-flex justify-content-between align-items-center mb-1">
+                            <span class="text-muted small fw-medium">Modul Laporan:</span>
+                            <span class="badge bg-primary-subtle text-primary fw-semibold px-2 py-1" id="exportTargetBadge">Hasil Deteksi</span>
+                        </div>
+                        <div class="d-flex justify-content-between align-items-center">
+                            <span class="text-muted small fw-medium">Status Filter Tabel:</span>
+                            <span class="text-dark small text-end" id="exportActiveFilterSummary">Semua kamera, semua status</span>
+                        </div>
+                    </div>
+
+                    <!-- Pilihan Periode Waktu -->
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold text-dark small mb-2">
+                            <i class="bi bi-calendar3 me-1 text-primary"></i> Pilihan Periode Waktu Ekspor
+                        </label>
+                        <div class="d-flex flex-column gap-2" id="exportPeriodRadioGroup">
+                            <label class="export-period-option p-2 border rounded-3 d-flex align-items-center gap-2 cursor-pointer">
+                                <input type="radio" name="exportPeriodRadio" value="current" checked class="form-check-input mt-0">
+                                <div>
+                                    <div class="fw-medium small text-dark">Sesuai Filter Tabel Saat Ini</div>
+                                    <div class="text-muted" style="font-size: 0.75rem;">Mengekspor data persis sesuai pencarian dan filter yang sedang aktif di layar</div>
+                                </div>
+                            </label>
+
+                            <label class="export-period-option p-2 border rounded-3 d-flex align-items-center gap-2 cursor-pointer">
+                                <input type="radio" name="exportPeriodRadio" value="all" class="form-check-input mt-0">
+                                <div>
+                                    <div class="fw-medium small text-dark">Keseluruhan (Semua Waktu)</div>
+                                    <div class="text-muted" style="font-size: 0.75rem;">Mengekspor seluruh arsip data tanpa batasan tanggal</div>
+                                </div>
+                            </label>
+
+                            <label class="export-period-option p-2 border rounded-3 d-flex align-items-center gap-2 cursor-pointer">
+                                <input type="radio" name="exportPeriodRadio" value="specific_day" class="form-check-input mt-0">
+                                <div>
+                                    <div class="fw-medium small text-dark">Laporan Per Hari (Pilih Tanggal Tertentu)</div>
+                                    <div class="text-muted" style="font-size: 0.75rem;">Mengekspor seluruh deteksi untuk satu hari yang Anda tentukan</div>
+                                </div>
+                            </label>
+
+                            <!-- Input Tanggal Spesifik (Muncul jika specific_day dipilih) -->
+                            <div id="exportSpecificDayWrap" class="ms-4 p-2 bg-light border rounded-3 d-none">
+                                <label for="exportSpecificDateInput" class="form-label small text-muted mb-1">Pilih Tanggal Laporan:</label>
+                                <input type="date" id="exportSpecificDateInput" class="form-control form-control-sm">
+                            </div>
+
+                            <label class="export-period-option p-2 border rounded-3 d-flex align-items-center gap-2 cursor-pointer">
+                                <input type="radio" name="exportPeriodRadio" value="today" class="form-check-input mt-0">
+                                <div>
+                                    <div class="fw-medium small text-dark">Hari Ini</div>
+                                    <div class="text-muted" style="font-size: 0.75rem;">Hanya data hari ini yang tercatat</div>
+                                </div>
+                            </label>
+
+                            <label class="export-period-option p-2 border rounded-3 d-flex align-items-center gap-2 cursor-pointer">
+                                <input type="radio" name="exportPeriodRadio" value="7d" class="form-check-input mt-0">
+                                <div>
+                                    <div class="fw-medium small text-dark">7 Hari Terakhir</div>
+                                    <div class="text-muted" style="font-size: 0.75rem;">Rentang 1 minggu terakhir</div>
+                                </div>
+                            </label>
+
+                            <label class="export-period-option p-2 border rounded-3 d-flex align-items-center gap-2 cursor-pointer">
+                                <input type="radio" name="exportPeriodRadio" value="30d" class="form-check-input mt-0">
+                                <div>
+                                    <div class="fw-medium small text-dark">30 Hari Terakhir (1 Bulan)</div>
+                                    <div class="text-muted" style="font-size: 0.75rem;">Rentang 1 bulan terakhir</div>
+                                </div>
+                            </label>
+
+                            <label class="export-period-option p-2 border rounded-3 d-flex align-items-center gap-2 cursor-pointer">
+                                <input type="radio" name="exportPeriodRadio" value="custom" class="form-check-input mt-0">
+                                <div>
+                                    <div class="fw-medium small text-dark">Rentang Tanggal Kustom</div>
+                                    <div class="text-muted" style="font-size: 0.75rem;">Tentukan tanggal mulai dan tanggal akhir secara bebas</div>
+                                </div>
+                            </label>
+
+                            <!-- Input Rentang Tanggal Kustom (Muncul jika custom dipilih) -->
+                            <div id="exportCustomRangeWrap" class="ms-4 p-2 bg-light border rounded-3 d-none">
+                                <div class="row g-2">
+                                    <div class="col-6">
+                                        <label for="exportCustomStartInput" class="form-label small text-muted mb-1">Tanggal Mulai:</label>
+                                        <input type="date" id="exportCustomStartInput" class="form-control form-control-sm">
+                                    </div>
+                                    <div class="col-6">
+                                        <label for="exportCustomEndInput" class="form-label small text-muted mb-1">Tanggal Akhir:</label>
+                                        <input type="date" id="exportCustomEndInput" class="form-control form-control-sm">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer bg-light border-top py-2 px-4 d-flex justify-content-between">
+                    <button type="button" class="btn btn-light btn-sm px-3" data-bs-dismiss="modal">Batal</button>
+                    <div class="d-flex gap-2">
+                        <button type="button" class="btn btn-success btn-sm d-flex align-items-center gap-2 px-3" onclick="triggerModalExport('excel')">
+                            <i class="bi bi-file-earmark-spreadsheet"></i>
+                            <span>Unduh Excel</span>
+                        </button>
+                        <button type="button" class="btn btn-danger btn-sm d-flex align-items-center gap-2 px-3" onclick="triggerModalExport('pdf')">
+                            <i class="bi bi-file-earmark-pdf"></i>
+                            <span>Unduh PDF</span>
+                        </button>
                     </div>
                 </div>
             </div>

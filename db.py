@@ -2092,7 +2092,7 @@ def get_plate_history_paginated(
       'Terbaca' (detection_status = 1).
     - Jika status_filter = '0'/'1'/'2', tampilkan sesuai filter yang dipilih.
     """
-    page = max(1, int(page)); limit = max(1, min(100, int(limit)))
+    page = max(1, int(page)); limit = max(1, min(50000, int(limit)))
     offset = (page - 1) * limit
 
     where_clauses = ["p.plate_number IS NOT NULL"]; params = []

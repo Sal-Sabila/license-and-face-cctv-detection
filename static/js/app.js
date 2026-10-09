@@ -44,9 +44,9 @@ function getDateRange(period) {
 
 function getStateDateRange(state) {
     if (state.start_date || state.end_date) {
-        return { start_date: state.start_date, end_date: state.end_date };
+        return { start_date: state.start_date, end_date: state.end_date, period: state.period || 'custom' };
     }
-    return getDateRange(state.period);
+    return { ...getDateRange(state.period), period: state.period || 'today' };
 }
 
 function applyCustomDateRange(state, startInputId, endInputId) {
@@ -2994,12 +2994,241 @@ window.initTheme = initTheme;
 
 
 // ============================================================
+// MODUL: EKSPOR FLEKSIBEL (PERIODIK, PER HARI, KESELURUHAN)
+// ============================================================
+
+let currentExportModule = 'detections';
+
+function openExportModal(moduleName = 'detections') {
+    currentExportModule = moduleName;
+    const modalEl = document.getElementById('exportModal');
+    if (!modalEl || !window.bootstrap) return;
+
+    // Reset pilihan periode ke "current"
+    const currentRadio = document.querySelector('input[name="exportPeriodRadio"][value="current"]');
+    if (currentRadio) currentRadio.checked = true;
+
+    // Sembunyikan input kustom
+    document.getElementById('exportSpecificDayWrap')?.classList.add('d-none');
+    document.getElementById('exportCustomRangeWrap')?.classList.add('d-none');
+
+    // Set default tanggal hari ini
+    const today = new Date();
+    const todayValue = [
+        today.getFullYear(),
+        String(today.getMonth() + 1).padStart(2, '0'),
+        String(today.getDate()).padStart(2, '0')
+    ].join('-');
+
+    const singleInput = document.getElementById('exportSpecificDateInput');
+    if (singleInput) {
+        singleInput.value = todayValue;
+        singleInput.max = todayValue;
+    }
+
+    const startInput = document.getElementById('exportCustomStartInput');
+    const endInput = document.getElementById('exportCustomEndInput');
+    if (startInput) {
+        startInput.value = todayValue;
+        startInput.max = todayValue;
+    }
+    if (endInput) {
+        endInput.value = todayValue;
+        endInput.max = todayValue;
+    }
+
+    // Set judul modul dan ringkasan filter aktif
+    const targetBadge = document.getElementById('exportTargetBadge');
+    const filterSummary = document.getElementById('exportActiveFilterSummary');
+
+    let modTitle = 'Hasil Deteksi';
+    let summaryText = 'Semua data aktif';
+
+    if (moduleName === 'detections') {
+        modTitle = 'Hasil Deteksi Terpadu';
+        const parts = [];
+        if (detState.type && detState.type !== 'all') {
+            const tMap = { plate: 'Plat Nomor', face: 'Wajah/Orang', vehicle: 'Kendaraan' };
+            parts.push(`Tipe: ${tMap[detState.type] || detState.type}`);
+        }
+        if (detState.camera_id) {
+            const camSel = document.getElementById('detCameraFilter');
+            const camName = camSel?.options[camSel.selectedIndex]?.text || `CCTV #${detState.camera_id}`;
+            parts.push(camName);
+        }
+        if (detState.status && detState.status !== 'all') {
+            const sMap = { '1': 'Terbaca', '2': 'Perlu Cek', '0': 'Gagal' };
+            parts.push(`Status: ${sMap[detState.status] || detState.status}`);
+        }
+        if (detState.search) parts.push(`Cari: "${detState.search}"`);
+        if (detState.start_date || detState.end_date) {
+            parts.push(`Tgl: ${detState.start_date || '...'} s/d ${detState.end_date || '...'}`);
+        } else {
+            parts.push(`Periode: ${detState.period === 'all' ? 'Keseluruhan' : (detState.period === 'today' ? 'Hari Ini' : detState.period)}`);
+        }
+        summaryText = parts.length ? parts.join(' | ') : 'Semua data aktif';
+    } else if (moduleName === 'plates') {
+        modTitle = 'Riwayat Plat Nomor';
+        const parts = [];
+        if (plateState.camera_id) {
+            const camSel = document.getElementById('plateCameraFilter');
+            const camName = camSel?.options[camSel.selectedIndex]?.text || `CCTV #${plateState.camera_id}`;
+            parts.push(camName);
+        }
+        if (plateState.status && plateState.status !== 'all') {
+            const sMap = { '1': 'Terbaca', '2': 'Perlu Cek', '0': 'Gagal' };
+            parts.push(`Status: ${sMap[plateState.status] || plateState.status}`);
+        }
+        if (plateState.search) parts.push(`Cari: "${plateState.search}"`);
+        if (plateState.start_date || plateState.end_date) {
+            parts.push(`Tgl: ${plateState.start_date || '...'} s/d ${plateState.end_date || '...'}`);
+        } else {
+            parts.push(`Periode: ${plateState.period === 'all' ? 'Keseluruhan' : (plateState.period === 'today' ? 'Hari Ini' : plateState.period)}`);
+        }
+        summaryText = parts.length ? parts.join(' | ') : 'Semua data aktif';
+    } else if (moduleName === 'recap') {
+        modTitle = 'Rekapitulasi CCTV';
+        const camSel = document.getElementById('recapCamera');
+        const camText = camSel?.value ? (camSel.options[camSel.selectedIndex]?.text || '') : 'Semua Kamera';
+        const periodText = document.getElementById('recapPeriod')?.value || 'Hari ini';
+        summaryText = `${camText} | Periode: ${periodText}`;
+    } else if (moduleName === 'statistics') {
+        modTitle = 'Statistik CCTV';
+        const camSel = document.getElementById('statsCamera');
+        const camText = camSel?.value ? (camSel.options[camSel.selectedIndex]?.text || '') : 'Semua Kamera';
+        const periodText = document.getElementById('statsPeriod')?.value || 'Hari ini';
+        summaryText = `${camText} | Periode: ${periodText}`;
+    }
+
+    if (targetBadge) targetBadge.textContent = modTitle;
+    if (filterSummary) filterSummary.textContent = summaryText;
+
+    const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+    modal.show();
+}
+window.openExportModal = openExportModal;
+
+function triggerModalExport(format = 'excel') {
+    const selectedRadio = document.querySelector('input[name="exportPeriodRadio"]:checked')?.value || 'current';
+    let url = '';
+    const params = new URLSearchParams();
+
+    // Tentukan periode & tanggal berdasarkan pilihan radio
+    if (selectedRadio === 'current') {
+        // Gunakan parameter sesuai modul aktif saat ini
+        if (currentExportModule === 'detections') {
+            const ext = format === 'pdf' ? '/pdf' : '';
+            window.location.href = `/api/export/detections${ext}?${detectionExportParams().toString()}`;
+            closeModalAfterExport();
+            return;
+        } else if (currentExportModule === 'plates') {
+            const ext = format === 'pdf' ? '/pdf' : '';
+            window.location.href = `/api/export/plates${ext}?${plateExportParams().toString()}`;
+            closeModalAfterExport();
+            return;
+        } else if (currentExportModule === 'recap') {
+            const ext = format === 'pdf' ? '/pdf' : '';
+            window.location.href = `/api/export/recap${ext}?${analyticsParams('recap').toString()}`;
+            closeModalAfterExport();
+            return;
+        } else if (currentExportModule === 'statistics') {
+            const ext = format === 'pdf' ? '/pdf' : '';
+            const period = window._currentStatsPeriod || document.getElementById('statsPeriod')?.value || 'today';
+            window.location.href = `/api/export/statistics${ext}?${analyticsParams('stats', period).toString()}`;
+            closeModalAfterExport();
+            return;
+        }
+    } else if (selectedRadio === 'all') {
+        params.set('period', 'all');
+    } else if (selectedRadio === 'today') {
+        params.set('period', 'today');
+    } else if (selectedRadio === '7d') {
+        params.set('period', '7d');
+    } else if (selectedRadio === '30d') {
+        params.set('period', '30d');
+    } else if (selectedRadio === 'specific_day') {
+        const dateVal = document.getElementById('exportSpecificDateInput')?.value;
+        if (!dateVal) {
+            showNotification('Silakan pilih tanggal laporan.', 'warning');
+            return;
+        }
+        params.set('date', dateVal);
+    } else if (selectedRadio === 'custom') {
+        const startVal = document.getElementById('exportCustomStartInput')?.value;
+        const endVal = document.getElementById('exportCustomEndInput')?.value;
+        if (startVal && endVal && startVal > endVal) {
+            showNotification('Tanggal mulai tidak boleh melebihi tanggal akhir.', 'warning');
+            return;
+        }
+        if (startVal) params.set('start_date', startVal);
+        if (endVal) params.set('end_date', endVal);
+    }
+
+    // Sertakan filter konteks tambahan (kamera, jenis, status, pencarian) jika ada
+    if (currentExportModule === 'detections') {
+        if (detState.type && detState.type !== 'all') params.set('type', detState.type);
+        if (detState.camera_id) params.set('camera_id', detState.camera_id);
+        if (detState.status && detState.status !== 'all') params.set('status', detState.status);
+        if (detState.search) params.set('search', detState.search);
+        const ext = format === 'pdf' ? '/pdf' : '';
+        url = `/api/export/detections${ext}?${params.toString()}`;
+    } else if (currentExportModule === 'plates') {
+        if (plateState.camera_id) params.set('camera_id', plateState.camera_id);
+        if (plateState.status && plateState.status !== 'all') params.set('status', plateState.status);
+        if (plateState.search) params.set('search', plateState.search);
+        const ext = format === 'pdf' ? '/pdf' : '';
+        url = `/api/export/plates${ext}?${params.toString()}`;
+    } else if (currentExportModule === 'recap') {
+        const cam = document.getElementById('recapCamera')?.value;
+        if (cam) params.set('camera_id', cam);
+        const ext = format === 'pdf' ? '/pdf' : '';
+        url = `/api/export/recap${ext}?${params.toString()}`;
+    } else if (currentExportModule === 'statistics') {
+        const cam = document.getElementById('statsCamera')?.value;
+        if (cam) params.set('camera_id', cam);
+        const ext = format === 'pdf' ? '/pdf' : '';
+        url = `/api/export/statistics${ext}?${params.toString()}`;
+    }
+
+    showNotification('Sedang menyiapkan unduhan laporan...', 'info');
+    window.location.href = url;
+    closeModalAfterExport();
+}
+window.triggerModalExport = triggerModalExport;
+
+function closeModalAfterExport() {
+    const modalEl = document.getElementById('exportModal');
+    if (modalEl && window.bootstrap) {
+        const modal = bootstrap.Modal.getInstance(modalEl);
+        if (modal) modal.hide();
+    }
+}
+
+function initExportModal() {
+    const radioGroup = document.getElementById('exportPeriodRadioGroup');
+    if (radioGroup) {
+        radioGroup.querySelectorAll('input[name="exportPeriodRadio"]').forEach(radio => {
+            radio.addEventListener('change', () => {
+                const val = radio.value;
+                const specificWrap = document.getElementById('exportSpecificDayWrap');
+                const customWrap = document.getElementById('exportCustomRangeWrap');
+                if (specificWrap) specificWrap.classList.toggle('d-none', val !== 'specific_day');
+                if (customWrap) customWrap.classList.toggle('d-none', val !== 'custom');
+            });
+        });
+    }
+}
+window.initExportModal = initExportModal;
+
+
+// ============================================================
 // INISIALISASI HALAMAN (ROUTING CLIENT-SIDE)
 // ============================================================
 
 document.addEventListener('DOMContentLoaded', () => {
     initTheme();
     initSidebarToggle();
+    initExportModal();
     loadSettingsFromDb();
     setInterval(updateClock, 1000);
     updateClock();

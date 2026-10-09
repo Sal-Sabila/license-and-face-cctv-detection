@@ -1487,9 +1487,48 @@ html.dark .btn-camera-export:hover {
     transition: background 0.12s ease;
 }
 
-.camera-export-dropdown .dropdown-item:hover {
+.camera-export-dropdown .dropdown-item:hover,
+.detection-export-dropdown .dropdown-item:hover {
     background: var(--primary-soft);
     color: var(--primary);
+}
+
+/* Styling Modal Ekspor Fleksibel */
+.export-period-option {
+    background: var(--panel, #ffffff);
+    border-color: var(--line, #e2e8f0) !important;
+    transition: all 0.15s ease;
+    cursor: pointer;
+}
+
+.export-period-option:hover {
+    background: rgba(37, 99, 235, 0.04);
+    border-color: var(--primary, #2563eb) !important;
+}
+
+.export-period-option input[type="radio"]:checked ~ div .fw-medium {
+    color: var(--primary, #2563eb) !important;
+    font-weight: 600;
+}
+
+html.dark .export-period-option {
+    background: rgba(255, 255, 255, 0.03);
+    border-color: rgba(255, 255, 255, 0.1) !important;
+}
+
+html.dark .export-period-option:hover {
+    background: rgba(37, 99, 235, 0.15);
+    border-color: var(--primary, #3b82f6) !important;
+}
+
+html.dark #exportModal .bg-light {
+    background: rgba(255, 255, 255, 0.04) !important;
+    border-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+html.dark #exportModal .modal-content {
+    background: var(--panel, #1e293b);
+    color: var(--text, #f8fafc);
 }
 
 /* Tombol Tambah Kamera - Satu-satunya berwarna solid aksen */
