@@ -1,7 +1,4 @@
-/* ============================================================
-   PLATEVISION / WIKO VISION - MASTER STYLESHEET
-   Gabungan dari style.css v1 + v2
-   ============================================================ */
+/* PLATEVISION / WIKO VISION - MASTER STYLESHEET Gabungan dari style.css v1 + v2 */
 
 :root {
     --sidebar-width: 208px;
@@ -60,9 +57,7 @@ select {
     font: inherit;
 }
 
-/* ============================================================
-   FLOW SUMMARY & INSIGHT LIST (DASHBOARD)
-   ============================================================ */
+/* FLOW SUMMARY & INSIGHT LIST (DASHBOARD) */
 
 .flow-summary {
     border: 1px solid var(--line);
@@ -114,9 +109,7 @@ select {
     padding: 13px;
 }
 
-/* ============================================================
-   LAYOUT WRAPPER & SIDEBAR
-   ============================================================ */
+/* LAYOUT WRAPPER & SIDEBAR */
 
 .app-layout {
     display: flex;
@@ -345,9 +338,7 @@ select {
     transition: opacity 0.18s ease;
 }
 
-/* ============================================================
-   MAIN PANEL & TOPBAR
-   ============================================================ */
+/* MAIN PANEL & TOPBAR */
 
 .main-panel {
     flex: 1;
@@ -647,9 +638,7 @@ select {
     color: #b42332;
 }
 
-/* ============================================================
-   STAT CARDS (DIPERBAIKI AGAR SAMA DENGAN HALAMAN STATISTIK)
-   ============================================================ */
+/* STAT CARDS (DIPERBAIKI AGAR SAMA DENGAN HALAMAN STATISTIK) */
 
 .stats-row {
     margin-bottom: 0;
@@ -776,9 +765,7 @@ select {
     font-size: 0.64rem;
 }
 
-/* ============================================================
-   PANEL BASE
-   ============================================================ */
+/* PANEL BASE */
 
 .panel {
     background: #f1f7f7;
@@ -816,9 +803,7 @@ select {
     border-top: 1px solid rgba(166, 184, 208, 0.48);
 }
 
-/* ============================================================
-   LIVESTREAM BANNER
-   ============================================================ */
+/* LIVESTREAM BANNER */
 
 .livestream-banner {
     padding: 18px 20px 14px;
@@ -893,9 +878,7 @@ select {
     }
 }
 
-/* ============================================================
-   STREAM CONTROL BUTTONS
-   ============================================================ */
+/* STREAM CONTROL BUTTONS */
 
 .btn-stream-start,
 .btn-stream-stop {
@@ -942,9 +925,7 @@ select {
     font-size: 1rem;
 }
 
-/* ============================================================
-   BBOX CONTROL CARD & DASHBOARD ENHANCEMENTS
-   ============================================================ */
+/* BBOX CONTROL CARD & DASHBOARD ENHANCEMENTS */
 
 .bbox-control-card {
     height: 33px;
@@ -1010,9 +991,7 @@ select {
     font-size: 0.95rem;
 }
 
-/* ============================================================
-   VIDEO STAGE
-   ============================================================ */
+/* VIDEO STAGE */
 
 .video-stage {
     position: relative;
@@ -1114,9 +1093,7 @@ select {
     z-index: 3;
 }
 
-/* ============================================================
-   ACTION BUTTONS
-   ============================================================ */
+/* ACTION BUTTONS */
 
 .playlist-actions {
     display: flex;
@@ -1217,9 +1194,7 @@ select {
     font-size: 0.88rem;
 }
 
-/* ============================================================
-   RECENT DETECTIONS & TABLES
-   ============================================================ */
+/* RECENT DETECTIONS & TABLES */
 
 .recent-list {
     padding: 6px 0;
@@ -1337,9 +1312,7 @@ select {
     letter-spacing: 0.04em;
 }
 
-/* ============================================================
-   MONITORING CCTV REDESIGN (UI/UX MODERN & CLEAN)
-   ============================================================ */
+/* MONITORING CCTV REDESIGN (UI/UX MODERN & CLEAN) */
 
 /* 1. Summary Cards */
 .camera-summary-card {
@@ -1888,9 +1861,7 @@ html.dark .btn-table-action.action-delete:hover {
     box-shadow: 0 0 0 0.2rem rgba(15, 139, 141, 0.14);
 }
 
-/* ============================================================
-   FILTER TOOLBAR & DATE RANGE
-   ============================================================ */
+/* FILTER TOOLBAR & DATE RANGE */
 
 .filter-toolbar,
 .analytics-filters {
@@ -1922,9 +1893,7 @@ html.dark .btn-table-action.action-delete:hover {
     flex: 0 0 145px;
 }
 
-/* ============================================================
-   MODUL: HASIL DETEKSI TERPADU (/detections) - REDESIGN CLEAN UI
-   ============================================================ */
+/* MODUL: HASIL DETEKSI TERPADU (/detections) - REDESIGN CLEAN UI */
 
 .detections-page-container {
     display: flex;
@@ -2561,9 +2530,7 @@ html.dark .det-status-pill.status-gagal {
     color: var(--muted);
 }
 
-/* ============================================================
-   RIWAYAT PLAT REDESIGN (UI/UX MODERN & CLEAN)
-   ============================================================ */
+/* RIWAYAT PLAT REDESIGN (UI/UX MODERN & CLEAN) */
 
 .plate-history-page-container {
     display: flex;
@@ -2633,9 +2600,7 @@ html.dark .det-status-pill.status-gagal {
     width: 80px;
 }
 
-/* ============================================================
-   REKAPITULASI REDESIGN (UI/UX MODERN & CLEAN)
-   ============================================================ */
+/* REKAPITULASI REDESIGN (UI/UX MODERN & CLEAN) */
 
 .recap-page-container {
     display: flex;
@@ -2998,9 +2963,7 @@ html.dark .recap-status-dot.dot-offline {
     }
 }
 
-/* ============================================================
-   DASHBOARD REDESIGN (UI/UX MODERN & CLEAN)
-   ============================================================ */
+/* DASHBOARD REDESIGN (UI/UX MODERN & CLEAN) */
 
 .dashboard-page-container {
     display: flex;
@@ -4112,9 +4075,7 @@ html.dark .flow-proportion-bar {
     }
 }
 
-/* ============================================================
-   BOUNDING BOX TOGGLE
-   ============================================================ */
+/* BOUNDING BOX TOGGLE */
 
 .bbox-switch-container {
     border-radius: 8px;
@@ -4142,9 +4103,7 @@ html.dark .flow-proportion-bar {
     gap: 6px;
 }
 
-/* ============================================================
-   STATISTIKA DETEKSI REDESIGN (UI/UX MODERN & CLEAN)
-   ============================================================ */
+/* STATISTIKA DETEKSI REDESIGN (UI/UX MODERN & CLEAN) */
 
 .statistics-page-container {
     display: flex;
@@ -4585,9 +4544,7 @@ html.dark .badge-peak-pill {
     }
 }
 
-/* ============================================================
-   LIVE PULSE ANIMATION
-   ============================================================ */
+/* LIVE PULSE ANIMATION */
 
 .live-pulse-dot {
     width: 7px;
@@ -4615,9 +4572,7 @@ html.dark .badge-peak-pill {
 }
 
 
-/* ============================================================
-   ZONE EDITOR REDESIGN (UI/UX MODERN & CLEAN)
-   ============================================================ */
+/* ZONE EDITOR REDESIGN (UI/UX MODERN & CLEAN) */
 
 .zone-page-container {
     display: flex;
@@ -5182,9 +5137,7 @@ html.dark .badge-peak-pill {
     }
 }
  
-/* ============================================================
-   PROFILE PAGE REDESIGN (UI/UX MODERN & CLEAN)
-   ============================================================ */
+/* PROFILE PAGE REDESIGN (UI/UX MODERN & CLEAN) */
 
 .profile-page-container {
     width: 100%;
@@ -5458,9 +5411,7 @@ html.dark .profile-input:focus {
     }
 }
 
-/* ============================================================
-   DETECTION CAPTURE MODAL
-   ============================================================ */
+/* DETECTION CAPTURE MODAL */
 
 .detection-image-modal {
     width: 800px;
@@ -5524,9 +5475,7 @@ html.dark .profile-input:focus {
     font-size: 0.78rem;
 }
 
-/* ============================================================
-   RESPONSIVE BREAKPOINTS
-   ============================================================ */
+/* RESPONSIVE BREAKPOINTS */
 
 @media (min-width: 992px) {
     .app-layout.sidebar-collapsed .sidebar {
@@ -5846,9 +5795,7 @@ html.dark .profile-input:focus {
     }
 }
 
-/* ============================================================
-   PRINT STYLING
-   ============================================================ */
+/* PRINT STYLING */
 
 @media print {
 
@@ -5886,9 +5833,7 @@ html.dark .profile-input:focus {
     }
 }
 
-/* ============================================================
-   DARK THEME SYSTEM
-   ============================================================ */
+/* DARK THEME SYSTEM */
 
 html.dark,
 [data-bs-theme="dark"] {
@@ -6479,16 +6424,11 @@ html.dark .btn-stream-video-file:hover {
     color: #ffffff !important;
 }
 
-/* ============================================================
-   FIX MOBILE - DETECTION TABLE + ALL FILTERS
-   WIKO VISION
-   ============================================================ */
+/* FIX MOBILE - DETECTION TABLE + ALL FILTERS WIKO VISION */
 
 @media (max-width: 767.98px) {
 
-    /* ========================================================
-       1. GLOBAL - HILANGKAN HORIZONTAL OVERFLOW
-       ======================================================== */
+    /* 1. GLOBAL - HILANGKAN HORIZONTAL OVERFLOW */
 
     html,
     body {
@@ -6509,9 +6449,7 @@ html.dark .btn-stream-video-file:hover {
     }
 
 
-    /* ========================================================
-       2. FILTER - SEMUA FITUR
-       ======================================================== */
+    /* 2. FILTER - SEMUA FITUR */
 
     .filter-toolbar,
     .analytics-filters,
@@ -6557,9 +6495,7 @@ html.dark .btn-stream-video-file:hover {
     }
 
 
-    /* ========================================================
-       SEARCH + EXPORT
-       ======================================================== */
+    /* SEARCH + EXPORT */
 
     .filter-toolbar .input-group {
         width: 100% !important;
@@ -6578,9 +6514,7 @@ html.dark .btn-stream-video-file:hover {
     }
 
 
-    /* ========================================================
-       TYPE FILTER
-       ======================================================== */
+    /* TYPE FILTER */
 
     .detection-type-filter,
     .type-filter,
@@ -6611,9 +6545,7 @@ html.dark .btn-stream-video-file:hover {
     }
 
 
-    /* ========================================================
-       DATE FILTER
-       ======================================================== */
+    /* DATE FILTER */
 
     .date-filter-group,
     .date-range-group,
@@ -6643,9 +6575,7 @@ html.dark .btn-stream-video-file:hover {
     }
 
 
-    /* ========================================================
-       PERIOD BUTTON
-       ======================================================== */
+    /* PERIOD BUTTON */
 
     .period-btn-group {
         width: 100% !important;
@@ -6660,9 +6590,7 @@ html.dark .btn-stream-video-file:hover {
     }
 
 
-    /* ========================================================
-       MONITORING CCTV TOOLBAR & TABLE MOBILE OPTIMIZATION
-       ======================================================== */
+    /* MONITORING CCTV TOOLBAR & TABLE MOBILE OPTIMIZATION */
 
     .monitoring-toolbar-wrap,
     .detection-toolbar-wrap {
@@ -6834,9 +6762,7 @@ html.dark .btn-stream-video-file:hover {
         line-height: 1 !important;
     }
 
-    /* ========================================================
-       3. DETECTION TOOLBAR & SCROLLABLE TABLE (TABLET / MOBILE)
-       ======================================================== */
+    /* 3. DETECTION TOOLBAR & SCROLLABLE TABLE (TABLET / MOBILE) */
 
     .detection-header-row {
         flex-direction: column !important;
@@ -6908,9 +6834,7 @@ html.dark .btn-stream-video-file:hover {
     }
 
 
-    /* ========================================================
-       4. PANEL DETECTION
-       ======================================================== */
+    /* 4. PANEL DETECTION */
 
     .panel {
         overflow: hidden !important;
@@ -6932,9 +6856,7 @@ html.dark .btn-stream-video-file:hover {
     }
 
 
-    /* ========================================================
-       5. SEARCH + EXPORT DI ATAS DETECTION
-       ======================================================== */
+    /* 5. SEARCH + EXPORT DI ATAS DETECTION */
 
     .panel-header+.filter-toolbar,
     .panel-header+.analytics-filters {
@@ -6971,9 +6893,7 @@ html.dark .btn-stream-video-file:hover {
     }
 
 
-    /* ========================================================
-       6. MOBILE INPUT
-       ======================================================== */
+    /* 6. MOBILE INPUT */
 
     input,
     select,
@@ -6990,9 +6910,7 @@ html.dark .btn-stream-video-file:hover {
     }
 
 
-    /* ========================================================
-       7. BUTTON GROUP
-       ======================================================== */
+    /* 7. BUTTON GROUP */
 
     .btn-group {
         max-width: 100% !important;
@@ -7004,9 +6922,7 @@ html.dark .btn-stream-video-file:hover {
     }
 
 
-    /* ========================================================
-       8. EXPORT EXCEL
-       ======================================================== */
+    /* 8. EXPORT EXCEL */
 
     .btn-action-outline,
     .btn-action-primary {
@@ -7014,9 +6930,7 @@ html.dark .btn-stream-video-file:hover {
     }
 
 
-    /* ========================================================
-       9. MODAL CAPTURE
-       ======================================================== */
+    /* 9. MODAL CAPTURE */
 
     .detection-image-modal {
         width: calc(100vw - 16px) !important;
@@ -7053,9 +6967,7 @@ html.dark .btn-stream-video-file:hover {
 }
 
 
-/* ============================================================
-   SMALL PHONE
-   ============================================================ */
+/* SMALL PHONE */
 
 @media (max-width: 575.98px) {
 
@@ -7166,9 +7078,7 @@ html.dark .btn-stream-video-file:hover {
     }
 }
 
-/* ============================================================
-   EXTRA SMALL PHONE 360px
-   ============================================================ */
+/* EXTRA SMALL PHONE 360px */
 
 @media (max-width: 380px) {
 

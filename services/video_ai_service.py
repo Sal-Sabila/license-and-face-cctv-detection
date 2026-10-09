@@ -36,9 +36,7 @@ import db
 import line_crossing
 
 
-# ============================================================
 # PATH
-# ============================================================
 
 def _find_project_root():
     current = os.path.abspath(os.path.dirname(__file__))
@@ -82,9 +80,7 @@ CAMERA_ID = 1
 CAMERA_NAME = "Video CCTV"
 
 
-# ============================================================
 # AI CONFIG
-# ============================================================
 
 VEHICLE_CLASSES = [0, 2, 3, 5, 7]
 VEHICLE_CONFIDENCE = 0.35
@@ -116,9 +112,7 @@ MAX_PLATE_ROIS_PER_CYCLE = 2
 MAX_PLATES_PER_CYCLE = 3
 
 
-# ============================================================
 # LIGHTING / FOCUS CONFIG
-# ============================================================
 # Semua koordinat ROI memakai rasio 0.0-1.0 terhadap lebar/tinggi video.
 # Default diarahkan ke area tengah-bawah, tempat kendaraan/plat biasanya
 # menjadi titik fokus. Sesuaikan 4 angka ini jika posisi CCTV berbeda.
@@ -163,9 +157,7 @@ CLAHE_GRID = (8, 8)
 
 
 
-# ============================================================
 # OUTPUT DISPLAY
-# ============================================================
 
 TILE_WIDTH = 960
 TILE_HEIGHT = 540
@@ -176,9 +168,7 @@ GRID_HEIGHT = TILE_HEIGHT
 HEADER_HEIGHT = 52
 
 
-# ============================================================
 # FFMPEG READER
-# ============================================================
 
 
 class FFmpegVideoReader:
@@ -335,9 +325,7 @@ class FFmpegVideoReader:
         self.release()
 
 
-# ============================================================
 # HELPERS
-# ============================================================
 
 
 def safe_float(value, default=0.0):
@@ -484,9 +472,7 @@ def get_vehicle_crop_for_plate(frame, plate_bbox, vehicle_dets):
     return best_crop, best_confidence, best_track_id
 
 
-# ============================================================
 # VIDEO AI SERVICE
-# ============================================================
 
 
 class VideoAIService:
@@ -2209,9 +2195,7 @@ class VideoAIService:
         print("=" * 75)
 
 
-# ============================================================
 # MAIN
-# ============================================================
 
 if __name__ == "__main__":
     service = VideoAIService(

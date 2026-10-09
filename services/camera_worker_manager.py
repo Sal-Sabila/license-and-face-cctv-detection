@@ -5,9 +5,7 @@ from ffmpeg_stream_reader import FFmpegStreamReader, normalize_stream_url
 import db
 
 
-# ============================================================
 # KONFIGURASI
-# ============================================================
 
 # Seberapa sering supervisor cek status kamera di database
 # (start worker baru kalau ada kamera di-"Aktifkan", stop worker

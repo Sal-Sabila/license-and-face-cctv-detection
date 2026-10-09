@@ -5,9 +5,7 @@ import db
 zones_bp = Blueprint("zones_page", __name__)
 
 
-# ============================================================
 # ZONA DEFAULT PER KAMERA
-# ============================================================
 # ✅ FIX: Zona baru dinaikkan supaya motor/pejalan di tengah frame
 # tetap masuk zona NEAR. Sebelumnya y=0.35/0.38 membuat motor di
 # y=0.11-0.24 (dari log) dianggap FAR dan di-skip.

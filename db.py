@@ -19,9 +19,7 @@ except ImportError:
     print("[DB WARNING] imagehash/Pillow tidak terinstall. Dedup visual dinonaktifkan.")
     print("[DB WARNING] Install dengan: pip install imagehash Pillow")
 
-# ============================================================
 # ✅ IMPORT VALIDATOR PLAT INDONESIA
-# ============================================================
 try:
     from ai.plate.validator import (
         correct_and_validate_plate,
@@ -37,9 +35,7 @@ except ImportError:
     print("[DB WARNING] ai.plate.validator tidak tersedia, pakai fallback regex")
 
 
-# ============================================================
 # KONFIGURASI DATABASE
-# ============================================================
 
 DB_CONFIG = {
     "host": os.getenv("DB_HOST", "127.0.0.1"),
@@ -67,9 +63,7 @@ def get_db():
     return pymysql.connect(**DB_CONFIG)
 
 
-# ============================================================
 # KONFIGURASI DEDUP
-# ============================================================
 
 HASH_WINDOW_SECONDS = 1800
 HASH_MAX_DISTANCE = 6
@@ -295,16 +289,12 @@ def get_camera_direction(camera_id: int) -> str:
     return "unknown"
 
 
-# ============================================================
 # REGEX FALLBACK (kalau validator tidak tersedia)
-# ============================================================
 INDONESIAN_PLATE_REGEX = re.compile(r"^[A-Z]{1,2}\s?[0-9]{1,4}(?:\s?[A-Z]{1,3})?$")
 PLATE_REGEX = INDONESIAN_PLATE_REGEX
 
 
-# ============================================================
 # ✅ VALIDASI PLAT — PAKAI KODE WILAYAH RESMI
-# ============================================================
 def is_valid_indonesian_plate(plate: str) -> bool:
     if not plate:
         return False
@@ -318,9 +308,7 @@ def is_valid_indonesian_plate(plate: str) -> bool:
     return bool(INDONESIAN_PLATE_REGEX.match(text))
 
 
-# ============================================================
 # ✅ NORMALISASI + KOREKSI PLAT
-# ============================================================
 def normalize_plate_number(text: str) -> str:
     if not text:
         return ""
@@ -336,9 +324,7 @@ def normalize_plate_number(text: str) -> str:
     return clean
 
 
-# ============================================================
 # ✅ HELPER: extract region code (untuk audit)
-# ============================================================
 def extract_region_code(plate: str) -> str:
     if not plate or not HAS_PLATE_VALIDATOR:
         return None
@@ -351,9 +337,7 @@ def extract_region_code(plate: str) -> str:
     return None
 
 
-# ============================================================
 # ✅ COMPUTE PLATE STATUS
-# ============================================================
 def compute_plate_status(plate_number: str, ocr_conf: float) -> int:
     if not plate_number:
         return 0
@@ -857,9 +841,7 @@ def delete_plate(plate_id: int) -> bool:
     return True
 
 
-# ============================================================
 # SAVE DETECTION EVENT — DENGAN BEST FRAME ONLY
-# ============================================================
 
 def save_detection_event(
     camera_id: int,
@@ -1450,9 +1432,7 @@ def save_detection_event(
         conn.close()
 
 
-# ============================================================
 # QUERY WEB & DASHBOARD — DEDUP DIPERBAIKI
-# ============================================================
 
 def _dedup_event_ids(cur, where_sql, params):
     sql = f"""
@@ -2076,9 +2056,7 @@ def get_all_detections_paginated(
             return {"items": items, "total": total, "page": page, "limit": limit, "total_pages": total_pages}
 
 
-# ============================================================
 # ✅ RIWAYAT PLAT — HANYA TAMPILKAN "TERBACA" (DIPERBAIKI)
-# ============================================================
 def get_plate_history_paginated(
     page: int = 1, limit: int = 20, search: str = None,
     camera_id: int = None, status_filter: str = "all",
@@ -2103,9 +2081,7 @@ def get_plate_history_paginated(
         where_clauses.append("(p.plate_number LIKE %s OR c.location LIKE %s)")
         params.extend([s, s])
 
-    # =========================================================
     # ✅ PERBAIKAN UTAMA: Default hanya tampilkan yang "Terbaca"
-    # =========================================================
     if status_filter == "all" or not status_filter:
         # Paksa hanya status 1 = Terbaca
         where_clauses.append("p.detection_status = 1")

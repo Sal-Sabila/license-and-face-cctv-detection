@@ -42,9 +42,7 @@ def require_login():
     return redirect(url_for("auth.login", next=request.full_path))
 
 
-# ==============================
 # REGISTER BLUEPRINT
-# ==============================
 
 app.register_blueprint(auth_bp)
 app.register_blueprint(
@@ -61,20 +59,14 @@ app.register_blueprint(settings_bp)
 app.register_blueprint(zones_bp)
 app.register_blueprint(zones_page_bp)
 
-# ==============================
 # HALAMAN UTAMA
-# ==============================
 
-# ==============================
 # START CAMERA WORKERS
-# ==============================
 
 if not app.debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
     CameraWorkerManager.get_instance().start()
 
-# ==============================
 # HEALTH CHECK
-# ==============================
 
 @app.route("/health")
 def health():
@@ -85,9 +77,7 @@ def health():
     }
 
 
-# ==============================
 # RUN SERVER
-# ==============================
 
 if __name__ == "__main__":
 
