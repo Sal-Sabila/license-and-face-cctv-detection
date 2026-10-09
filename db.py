@@ -205,7 +205,14 @@ def ensure_event_schema():
                     ("full_detection", "idx_detection_event_key", "(`event_key`)"),
                     ("full_detection", "idx_detection_vehicle_hash", "(`vehicle_hash`)"),
                     ("full_detection", "idx_detection_face_hash", "(`face_hash`)"),
+                    ("full_detection", "idx_fd_status_created", "(`detection_status`, `created_at`)"),
+                    ("full_detection", "idx_fd_obj_status_created", "(`object_type`, `detection_status`, `created_at`)"),
+                    ("full_detection", "idx_fd_camera_created", "(`camera_id`, `created_at`)"),
+                    ("full_detection", "idx_fd_created_at", "(`created_at`)"),
                     ("plate", "idx_plate_region_code", "(`region_code`)"),
+                    ("plate", "idx_plate_status_created", "(`detection_status`, `created_at`)"),
+                    ("plate", "idx_plate_created_at", "(`created_at`)"),
+                    ("plate", "idx_plate_status", "(`detection_status`)"),
                 ]
                 for table, index, definition in indexes:
                     cur.execute("""SELECT COUNT(*) AS count FROM INFORMATION_SCHEMA.STATISTICS
@@ -502,7 +509,15 @@ def get_vehicle_occurrence_summary(camera_id=None, limit: int = 50):
     limit = max(1, min(int(limit or 50), 200))
     with get_db() as conn:
         with conn.cursor() as cur:
-            where_clauses = ["fd.object_type = 'vehicle'"]
+            # Karena status SERING_MUNCUL/MENCURIGAKAN dengan occ_count >= 2 hanya
+            # dapat dicapai oleh kendaraan berplat valid (rule baris 581-591),
+            # kita filter langsung kendaraan yang memiliki plat di level SQL menggunakan index.
+            where_clauses = [
+                "fd.object_type = 'vehicle'",
+                "p.plate_number IS NOT NULL",
+                "TRIM(p.plate_number) != ''",
+                "p.plate_number != '-'"
+            ]
             params = []
             if camera_id is not None and str(camera_id).strip() not in ("", "all"):
                 where_clauses.append("fd.camera_id = %s")
@@ -516,7 +531,7 @@ def get_vehicle_occurrence_summary(camera_id=None, limit: int = 50):
                            p.normalized_plate_number, p.plate_number, p.plate_image_path,
                            COALESCE(c.location, CONCAT('CCTV ', fd.camera_id)) AS camera_name
                     FROM full_detection fd
-                    LEFT JOIN plate p ON p.plate_id = fd.plate_id
+                    JOIN plate p ON p.plate_id = fd.plate_id
                     LEFT JOIN cameras c ON c.camera_id = fd.camera_id
                     WHERE {" AND ".join(where_clauses)}
                     ORDER BY fd.created_at ASC
@@ -534,28 +549,21 @@ def get_vehicle_occurrence_summary(camera_id=None, limit: int = 50):
                     track_id=row.get("track_id"),
                     camera_id=row.get("camera_id"),
                 )
-                if not identity:
+                if not identity or not valid_plate:
                     continue
 
-                if valid_plate:
-                    key = f"plate:{valid_plate}"
-                else:
-                    # Tanpa plat valid: isolasi per sesi/kamera agar continuity dalam satu sesi terjaga,
-                    # tetapi TIDAK digabung dengan kemunculan kendaraan lain di waktu berbeda.
-                    key = f"nonplate:{row.get('camera_id')}:{identity}"
-
+                key = f"plate:{valid_plate}"
                 bucket = buckets.setdefault(
                     key,
                     {
                         "identity": identity,
                         "plate": valid_plate,
-                        "has_valid_plate": bool(valid_plate),
+                        "has_valid_plate": True,
                         "vehicle_type": row.get("vehicle_type") or "unknown",
                         "camera_id": row.get("camera_id"),
                         "camera_name": row.get("camera_name"),
                         "detections": [],
                         "vehicle_image_path": None,
-                        "_img_exists": False,
                     },
                 )
                 bucket["detections"].append(row)
@@ -566,27 +574,14 @@ def get_vehicle_occurrence_summary(camera_id=None, limit: int = 50):
                     bucket["vehicle_type"] = row.get("vehicle_type")
 
                 candidate_img = row.get("vehicle_image_path") or row.get("plate_image_path")
-                if candidate_img:
-                    if not bucket["vehicle_image_path"]:
-                        bucket["vehicle_image_path"] = candidate_img
-                        bucket["_img_exists"] = _capture_file_exists(candidate_img)
-                    elif not bucket["_img_exists"] and _capture_file_exists(candidate_img):
-                        bucket["vehicle_image_path"] = candidate_img
-                        bucket["_img_exists"] = True
+                if candidate_img and not bucket["vehicle_image_path"]:
+                    bucket["vehicle_image_path"] = candidate_img
 
             result = []
             for bucket in buckets.values():
                 sessions = compute_appearance_sessions(bucket["detections"], max_gap_seconds=90.0)
-                has_valid_plate = bucket.get("has_valid_plate", False)
-                if has_valid_plate:
-                    occ_count = len(sessions)
-                    status = compute_vehicle_occurrence_status(occ_count, has_valid_plate=True)
-                else:
-                    # Tanpa plat valid: tidak dihitung recurrence lintas appearance,
-                    # hanya 1 kemunculan per sesi, status selalu NORMAL
-                    occ_count = 1
-                    status = "NORMAL"
-
+                occ_count = len(sessions)
+                status = compute_vehicle_occurrence_status(occ_count, has_valid_plate=True)
                 det_count = len(bucket["detections"])
                 if occ_count < 2 or status not in ("SERING_MUNCUL", "MENCURIGAKAN"):
                     continue
@@ -644,19 +639,17 @@ def get_person_occurrence_summary(camera_id=None, limit: int = 50):
                 where_clauses.append("fd.camera_id = %s")
                 params.append(int(camera_id))
 
-            dedup_ids = _dedup_event_ids(cur, " AND ".join(where_clauses), params)
-            if not dedup_ids:
-                return []
-
-            placeholders = ",".join(["%s"] * len(dedup_ids))
+            # Eksekusi satu query terpadu tanpa perantara double query IN (placeholders)
             cur.execute(
                 f"""
-                    SELECT fd.detection_id, fd.camera_id, fd.track_id, fd.event_key, fd.created_at
+                    SELECT fd.detection_id, fd.camera_id, fd.track_id, fd.event_key, fd.created_at,
+                           COALESCE(c.location, CONCAT('CCTV ', fd.camera_id)) AS camera_name
                     FROM full_detection fd
-                    WHERE fd.detection_id IN ({placeholders})
+                    LEFT JOIN cameras c ON c.camera_id = fd.camera_id
+                    WHERE {" AND ".join(where_clauses)}
                     ORDER BY fd.created_at DESC
                 """,
-                dedup_ids,
+                params,
             )
             rows = cur.fetchall()
 
@@ -674,6 +667,7 @@ def get_person_occurrence_summary(camera_id=None, limit: int = 50):
                         "identity": identity,
                         "object_group_id": identity if str(identity).startswith("person_group_") else None,
                         "camera_id": camera_value,
+                        "camera_name": row.get("camera_name"),
                         "occurrence_count": 0,
                         "last_seen": row.get("created_at"),
                     },
@@ -698,6 +692,7 @@ def get_person_occurrence_summary(camera_id=None, limit: int = 50):
                     "status": status,
                     "last_seen": bucket["last_seen"],
                     "camera_id": bucket["camera_id"],
+                    "camera_name": bucket["camera_name"],
                 })
 
             result.sort(key=lambda item: (-int(item["occurrence_count"]), item.get("last_seen") or datetime.min), reverse=True)
@@ -1451,21 +1446,24 @@ def save_detection_event(
 
 
 # ============================================================
-# QUERY WEB & DASHBOARD — DEDUP DIPERBAIKI
+# QUERY WEB & DASHBOARD — DEDUP DIPERBAIKI DENGAN PERFORMA TINGGI
 # ============================================================
 
-def _dedup_event_ids(cur, where_sql, params):
+_NORM_EVENT_RE = re.compile(r":(?:gen|g)\d+")
+
+def _dedup_event_ids(cur, where_sql, params, scan_limit: int = None):
+    """Mengambil detection_id unik hasil deduplikasi event dengan query minimal dan cepat."""
+    limit_clause = f"LIMIT {int(scan_limit)}" if scan_limit else ""
     sql = f"""
         SELECT
-            fd.detection_id, fd.camera_id, fd.track_id, fd.object_type,
-            fd.event_key, fd.vehicle_hash, fd.face_hash,
-            fd.created_at, fd.detection_confidence,
+            fd.detection_id, fd.camera_id, fd.track_id,
+            fd.event_key, fd.created_at, fd.detection_confidence,
             p.plate_number
         FROM full_detection fd
         LEFT JOIN plate p ON p.plate_id = fd.plate_id
-        LEFT JOIN cameras c ON c.camera_id = fd.camera_id
         WHERE {where_sql}
         ORDER BY fd.created_at DESC
+        {limit_clause}
     """
     cur.execute(sql, params)
     rows = cur.fetchall()
@@ -1473,10 +1471,10 @@ def _dedup_event_ids(cur, where_sql, params):
 
     for r in rows:
         cam = r.get("camera_id")
-        event_key = str(r.get("event_key") or "").strip()
+        event_key = r.get("event_key")
 
         if event_key:
-            norm_event = re.sub(r":(?:gen|g)\d+", "", event_key)
+            norm_event = _NORM_EVENT_RE.sub("", event_key)
             key = (cam, f"event:{norm_event}")
         else:
             raw_plate = r.get("plate_number")
@@ -1489,37 +1487,32 @@ def _dedup_event_ids(cur, where_sql, params):
                 key = (cam, f"det:{r['detection_id']}")
 
         conf = float(r.get("detection_confidence") or 0.0)
-        ts = r.get("created_at")
         best = buckets.get(key)
-        if best is None or conf > best["conf"]:
-            buckets[key] = {
-                "detection_id": r["detection_id"],
-                "conf": conf,
-                "created_at": ts
-            }
+        if best is None or conf > best[1]:
+            buckets[key] = (r["detection_id"], conf, r.get("created_at"))
 
     selected = sorted(
         buckets.values(),
-        key=lambda x: (x["created_at"] or datetime.min),
+        key=lambda x: (x[2] or datetime.min),
         reverse=True
     )
-    return [row["detection_id"] for row in selected]
+    return [row[0] for row in selected]
 
 
 def _dedup_plate_ids(cur, where_sql, params):
+    """Mengambil plate_id unik per (plat, kamera, tanggal) terurut OCR confidence tertinggi."""
     sql = f"""
         SELECT p.plate_id, p.plate_number, p.created_at,
                p.ocr_confidence, p.detection_confidence, pl.camera_id
         FROM plate p
         LEFT JOIN plate_logs pl ON p.plate_id = pl.plate_id
-        LEFT JOIN cameras c ON pl.camera_id = c.camera_id
         WHERE {where_sql}
         ORDER BY p.ocr_confidence DESC, p.created_at DESC, p.plate_id DESC
     """
     cur.execute(sql, params)
     rows = cur.fetchall()
     seen = set()
-    result = []
+    result_rows = []
     for r in rows:
         pnum = (r.get("plate_number") or "").strip().upper()
         cam = r.get("camera_id")
@@ -1537,14 +1530,8 @@ def _dedup_plate_ids(cur, where_sql, params):
 
         if key not in seen:
             seen.add(key)
-            result.append(r["plate_id"])
+            result_rows.append(r)
 
-    result_rows = []
-    for pid in result:
-        for r in rows:
-            if r["plate_id"] == pid:
-                result_rows.append(r)
-                break
     result_rows.sort(
         key=lambda x: (x.get("created_at") or datetime.min),
         reverse=True
@@ -1558,7 +1545,11 @@ def get_recent_detections(limit: int = 50):
         with conn.cursor() as cur:
             where_sql = "1=1"
             params = []
-            all_ids = _dedup_event_ids(cur, where_sql, params)
+            # Scan parsial cepat untuk 50 recent detections agar tidak memindai puluhan ribu baris
+            scan_limit = max(limit * 6, 250)
+            all_ids = _dedup_event_ids(cur, where_sql, params, scan_limit=scan_limit)
+            if len(all_ids) < limit:
+                all_ids = _dedup_event_ids(cur, where_sql, params)
             selected = all_ids[:limit]
             if not selected:
                 return []
@@ -1625,8 +1616,12 @@ def _analytics_filters(args=None):
         period = "custom"
 
     clauses = ["1=1"]; params = []
-    if start_date: clauses.append("DATE(fd.created_at) >= %s"); params.append(str(start_date))
-    if end_date: clauses.append("DATE(fd.created_at) <= %s"); params.append(str(end_date))
+    if start_date:
+        clauses.append("fd.created_at >= %s")
+        params.append(f"{start_date} 00:00:00" if len(str(start_date)) == 10 else str(start_date))
+    if end_date:
+        clauses.append("fd.created_at <= %s")
+        params.append(f"{end_date} 23:59:59" if len(str(end_date)) == 10 else str(end_date))
     if str(args.get("camera_id") or "").isdigit():
         clauses.append("fd.camera_id = %s"); params.append(int(args["camera_id"]))
     if args.get("region"): clauses.append("c.location LIKE %s"); params.append(f"%{str(args['region']).strip()}%")
@@ -1675,204 +1670,216 @@ def get_analytics(args=None):
 
     with get_db() as conn:
         with conn.cursor() as cur:
+            # Optimal: Buat temporary table satu kali agar window function ROW_NUMBER()
+            # tidak dievaluasi ulang berulang kali di setiap query agregasi.
+            cur.execute("DROP TEMPORARY TABLE IF EXISTS temp_analytics_dedup;")
             cur.execute(f"""
+                CREATE TEMPORARY TABLE temp_analytics_dedup AS
                 SELECT
-                    SUM(d.object_type = 'vehicle') AS vehicles,
-                    SUM(d.object_type = 'vehicle' AND d.direction = 'entry') AS vehicle_entry,
-                    SUM(d.object_type = 'vehicle' AND d.direction = 'exit') AS vehicle_exit,
-                    SUM(d.object_type = 'person') AS people,
-                    SUM(d.object_type = 'person' AND d.direction = 'entry') AS people_entry,
-                    SUM(d.object_type = 'person' AND d.direction = 'exit') AS people_exit,
-                    SUM(d.object_type = 'vehicle' AND (d.has_plate = 1 OR d.plate_id IS NOT NULL)) AS plates,
-                    COUNT(DISTINCT CASE
-                        WHEN d.object_type = 'vehicle'
-                            AND (d.has_plate = 1 OR d.plate_id IS NOT NULL)
-                            AND p.plate_number IS NOT NULL AND p.plate_number != ''
-                        THEN p.plate_number END) AS unique_plates
+                    d.detection_id, d.camera_id, d.object_type, d.vehicle_type, d.has_plate,
+                    d.plate_id, d.detection_confidence, d.created_at, d.direction
                 FROM ({dedup_subquery}) d
-                LEFT JOIN plate p ON p.plate_id = d.plate_id
-                WHERE d.rn = 1
+                WHERE d.rn = 1;
             """, params)
-            row = cur.fetchone() or {}
-            cur.execute("SELECT COUNT(*) AS total, SUM(status = 1) AS active FROM cameras")
-            cams = cur.fetchone() or {}
-            summary = {
-                "vehicles": int(row.get("vehicles") or 0), "vehicle_entry": int(row.get("vehicle_entry") or 0),
-                "vehicle_exit": int(row.get("vehicle_exit") or 0), "people": int(row.get("people") or 0),
-                "people_entry": int(row.get("people_entry") or 0), "people_exit": int(row.get("people_exit") or 0),
-                "plates": int(row.get("plates") or 0), "unique_plates": int(row.get("unique_plates") or 0),
-                "total_cameras": int(cams.get("total") or 0), "active_cameras": int(cams.get("active") or 0)
-            }
 
-            def query_rows(sql):
-                cur.execute(sql, params); return cur.fetchall()
+            try:
+                cur.execute("""
+                    SELECT
+                        SUM(d.object_type = 'vehicle') AS vehicles,
+                        SUM(d.object_type = 'vehicle' AND d.direction = 'entry') AS vehicle_entry,
+                        SUM(d.object_type = 'vehicle' AND d.direction = 'exit') AS vehicle_exit,
+                        SUM(d.object_type = 'person') AS people,
+                        SUM(d.object_type = 'person' AND d.direction = 'entry') AS people_entry,
+                        SUM(d.object_type = 'person' AND d.direction = 'exit') AS people_exit,
+                        SUM(d.object_type = 'vehicle' AND (d.has_plate = 1 OR d.plate_id IS NOT NULL)) AS plates,
+                        COUNT(DISTINCT CASE
+                            WHEN d.object_type = 'vehicle'
+                                AND (d.has_plate = 1 OR d.plate_id IS NOT NULL)
+                                AND p.plate_number IS NOT NULL AND p.plate_number != ''
+                            THEN p.plate_number END) AS unique_plates
+                    FROM temp_analytics_dedup d
+                    LEFT JOIN plate p ON p.plate_id = d.plate_id
+                """)
+                row = cur.fetchone() or {}
+                cur.execute("SELECT COUNT(*) AS total, SUM(status = 1) AS active FROM cameras")
+                cams = cur.fetchone() or {}
+                summary = {
+                    "vehicles": int(row.get("vehicles") or 0), "vehicle_entry": int(row.get("vehicle_entry") or 0),
+                    "vehicle_exit": int(row.get("vehicle_exit") or 0), "people": int(row.get("people") or 0),
+                    "people_entry": int(row.get("people_entry") or 0), "people_exit": int(row.get("people_exit") or 0),
+                    "plates": int(row.get("plates") or 0), "unique_plates": int(row.get("unique_plates") or 0),
+                    "total_cameras": int(cams.get("total") or 0), "active_cameras": int(cams.get("active") or 0)
+                }
 
-            camera_rows = query_rows(f"""
-                SELECT d.camera_id,
-                    COALESCE(MAX(c.location), CONCAT('CCTV-', d.camera_id)) AS camera_name,
-                    SUM(d.object_type = 'vehicle') AS vehicles,
-                    SUM(d.object_type = 'person') AS people,
-                    COUNT(DISTINCT CASE WHEN d.object_type = 'vehicle'
-                        AND (d.has_plate = 1 OR d.plate_id IS NOT NULL)
-                        THEN p.plate_number END) AS unique_plates,
-                    CASE WHEN MAX(c.direction) = 'entry' THEN 'Masuk'
-                         WHEN MAX(c.direction) = 'exit' THEN 'Keluar'
-                         ELSE 'Tidak ditentukan' END AS direction,
-                    MAX(c.status) AS status
-                FROM ({dedup_subquery}) d
-                LEFT JOIN plate p ON p.plate_id = d.plate_id
-                LEFT JOIN cameras c ON c.camera_id = d.camera_id
-                WHERE d.rn = 1
-                GROUP BY d.camera_id ORDER BY vehicles DESC, people DESC
-            """)
-            cameras = [{"camera_id": r.get("camera_id"), "camera": r.get("camera_name"),
-                        "vehicles": int(r.get("vehicles") or 0), "people": int(r.get("people") or 0),
-                        "unique_plates": int(r.get("unique_plates") or 0), "direction": r.get("direction"),
-                        "status": "Aktif" if r.get("status") == 1 else "Offline"} for r in camera_rows]
+                def query_rows(sql):
+                    cur.execute(sql); return cur.fetchall()
 
-            daily_rows = query_rows(f"""
-                SELECT DATE(d.created_at) AS day,
-                    SUM(d.object_type = 'vehicle') AS vehicles,
-                    COUNT(DISTINCT CASE WHEN d.object_type = 'vehicle'
-                        AND (d.has_plate = 1 OR d.plate_id IS NOT NULL)
-                        THEN p.plate_number END) AS unique_plates,
-                    SUM(d.object_type = 'vehicle' AND d.direction = 'entry') AS entry_count,
-                    SUM(d.object_type = 'vehicle' AND d.direction = 'exit') AS exit_count,
-                    SUM(d.object_type = 'person') AS people,
-                    SUM(d.object_type = 'person' AND d.direction = 'entry') AS people_entry_count,
-                    SUM(d.object_type = 'person' AND d.direction = 'exit') AS people_exit_count
-                FROM ({dedup_subquery}) d
-                LEFT JOIN plate p ON p.plate_id = d.plate_id
-                WHERE d.rn = 1
-                GROUP BY DATE(d.created_at) ORDER BY day ASC
-            """)
-            daily = [{"date": str(r.get("day")), "vehicles": int(r.get("vehicles") or 0),
-                      "unique_plates": int(r.get("unique_plates") or 0),
-                      "entry": int(r.get("entry_count") or 0), "exit": int(r.get("exit_count") or 0),
-                      "people": int(r.get("people") or 0),
-                      "people_entry": int(r.get("people_entry_count") or 0),
-                      "people_exit": int(r.get("people_exit_count") or 0)} for r in daily_rows]
+                camera_rows = query_rows("""
+                    SELECT d.camera_id,
+                        COALESCE(MAX(c.location), CONCAT('CCTV-', d.camera_id)) AS camera_name,
+                        SUM(d.object_type = 'vehicle') AS vehicles,
+                        SUM(d.object_type = 'person') AS people,
+                        COUNT(DISTINCT CASE WHEN d.object_type = 'vehicle'
+                            AND (d.has_plate = 1 OR d.plate_id IS NOT NULL)
+                            THEN p.plate_number END) AS unique_plates,
+                        CASE WHEN MAX(c.direction) = 'entry' THEN 'Masuk'
+                             WHEN MAX(c.direction) = 'exit' THEN 'Keluar'
+                             ELSE 'Tidak ditentukan' END AS direction,
+                        MAX(c.status) AS status
+                    FROM temp_analytics_dedup d
+                    LEFT JOIN plate p ON p.plate_id = d.plate_id
+                    LEFT JOIN cameras c ON c.camera_id = d.camera_id
+                    GROUP BY d.camera_id ORDER BY vehicles DESC, people DESC
+                """)
+                cameras = [{"camera_id": r.get("camera_id"), "camera": r.get("camera_name"),
+                            "vehicles": int(r.get("vehicles") or 0), "people": int(r.get("people") or 0),
+                            "unique_plates": int(r.get("unique_plates") or 0), "direction": r.get("direction"),
+                            "status": "Aktif" if r.get("status") == 1 else "Offline"} for r in camera_rows]
 
-            hourly_rows = query_rows(f"""
-                SELECT HOUR(d.created_at) AS hour,
-                    SUM(d.object_type = 'vehicle') AS vehicles,
-                    SUM(d.object_type = 'person') AS people,
-                    SUM(d.object_type = 'vehicle' AND d.direction = 'entry') AS vehicle_entry,
-                    SUM(d.object_type = 'vehicle' AND d.direction = 'exit') AS vehicle_exit,
-                    SUM(d.object_type = 'person' AND d.direction = 'entry') AS people_entry,
-                    SUM(d.object_type = 'person' AND d.direction = 'exit') AS people_exit
-                FROM ({dedup_subquery}) d
-                WHERE d.rn = 1
-                GROUP BY HOUR(d.created_at) ORDER BY hour ASC
-            """)
-            hourly_map = {int(r["hour"]): r for r in hourly_rows}
-            hourly = [{"hour": h, "label": f"{h:02d}:00",
-                       "vehicles": int(hourly_map.get(h, {}).get("vehicles") or 0),
-                       "people": int(hourly_map.get(h, {}).get("people") or 0),
-                       "vehicle_entry": int(hourly_map.get(h, {}).get("vehicle_entry") or 0),
-                       "vehicle_exit": int(hourly_map.get(h, {}).get("vehicle_exit") or 0),
-                       "people_entry": int(hourly_map.get(h, {}).get("people_entry") or 0),
-                       "people_exit": int(hourly_map.get(h, {}).get("people_exit") or 0)} for h in range(24)]
+                daily_rows = query_rows("""
+                    SELECT DATE(d.created_at) AS day,
+                        SUM(d.object_type = 'vehicle') AS vehicles,
+                        COUNT(DISTINCT CASE WHEN d.object_type = 'vehicle'
+                            AND (d.has_plate = 1 OR d.plate_id IS NOT NULL)
+                            THEN p.plate_number END) AS unique_plates,
+                        SUM(d.object_type = 'vehicle' AND d.direction = 'entry') AS entry_count,
+                        SUM(d.object_type = 'vehicle' AND d.direction = 'exit') AS exit_count,
+                        SUM(d.object_type = 'person') AS people,
+                        SUM(d.object_type = 'person' AND d.direction = 'entry') AS people_entry_count,
+                        SUM(d.object_type = 'person' AND d.direction = 'exit') AS people_exit_count
+                    FROM temp_analytics_dedup d
+                    LEFT JOIN plate p ON p.plate_id = d.plate_id
+                    GROUP BY DATE(d.created_at) ORDER BY day ASC
+                """)
+                daily = [{"date": str(r.get("day")), "vehicles": int(r.get("vehicles") or 0),
+                          "unique_plates": int(r.get("unique_plates") or 0),
+                          "entry": int(r.get("entry_count") or 0), "exit": int(r.get("exit_count") or 0),
+                          "people": int(r.get("people") or 0),
+                          "people_entry": int(r.get("people_entry_count") or 0),
+                          "people_exit": int(r.get("people_exit_count") or 0)} for r in daily_rows]
 
-            # Distribusi jenis kendaraan (existing data)
-            v_type_rows = query_rows(f"""
-                SELECT
-                    SUM(d.object_type = 'vehicle') AS total,
-                    SUM(d.object_type = 'vehicle' AND d.vehicle_type = 'car') AS car,
-                    SUM(d.object_type = 'vehicle' AND d.vehicle_type = 'motorcycle') AS motorcycle,
-                    SUM(d.object_type = 'vehicle' AND d.vehicle_type = 'truck') AS truck,
-                    SUM(d.object_type = 'vehicle' AND d.vehicle_type = 'bus') AS bus,
-                    SUM(d.object_type = 'vehicle' AND (d.vehicle_type = 'unknown' OR d.vehicle_type IS NULL)) AS other
-                FROM ({dedup_subquery}) d
-                WHERE d.rn = 1
-            """)
-            vt = v_type_rows[0] if v_type_rows else {}
-            vehicle_types = {
-                "total": int(vt.get("total") or 0),
-                "car": int(vt.get("car") or 0),
-                "motorcycle": int(vt.get("motorcycle") or 0),
-                "truck": int(vt.get("truck") or 0),
-                "bus": int(vt.get("bus") or 0),
-                "other": int(vt.get("other") or 0),
-            }
+                hourly_rows = query_rows("""
+                    SELECT HOUR(d.created_at) AS hour,
+                        SUM(d.object_type = 'vehicle') AS vehicles,
+                        SUM(d.object_type = 'person') AS people,
+                        SUM(d.object_type = 'vehicle' AND d.direction = 'entry') AS vehicle_entry,
+                        SUM(d.object_type = 'vehicle' AND d.direction = 'exit') AS vehicle_exit,
+                        SUM(d.object_type = 'person' AND d.direction = 'entry') AS people_entry,
+                        SUM(d.object_type = 'person' AND d.direction = 'exit') AS people_exit
+                    FROM temp_analytics_dedup d
+                    GROUP BY HOUR(d.created_at) ORDER BY hour ASC
+                """)
+                hourly_map = {int(r["hour"]): r for r in hourly_rows}
+                hourly = [{"hour": h, "label": f"{h:02d}:00",
+                           "vehicles": int(hourly_map.get(h, {}).get("vehicles") or 0),
+                           "people": int(hourly_map.get(h, {}).get("people") or 0),
+                           "vehicle_entry": int(hourly_map.get(h, {}).get("vehicle_entry") or 0),
+                           "vehicle_exit": int(hourly_map.get(h, {}).get("vehicle_exit") or 0),
+                           "people_entry": int(hourly_map.get(h, {}).get("people_entry") or 0),
+                           "people_exit": int(hourly_map.get(h, {}).get("people_exit") or 0)} for h in range(24)]
 
-            # Performa pembacaan plat (existing data)
-            plate_perf_rows = query_rows(f"""
-                SELECT
-                    COUNT(p.plate_id) AS total_plates,
-                    SUM(p.detection_status = 1) AS valid_plates,
-                    SUM(p.detection_status = 2) AS check_plates,
-                    SUM(p.detection_status = 0 OR p.detection_status IS NULL) AS failed_plates,
-                    AVG(CASE WHEN p.detection_status IN (1, 2) THEN p.ocr_confidence END) AS avg_confidence
-                FROM ({dedup_subquery}) d
-                JOIN plate p ON p.plate_id = d.plate_id
-                WHERE d.rn = 1 AND d.object_type = 'vehicle'
-            """)
-            pp = plate_perf_rows[0] if plate_perf_rows else {}
-            total_detected_plates = int(pp.get("total_plates") or 0)
-            valid_plates = int(pp.get("valid_plates") or 0)
-            check_plates = int(pp.get("check_plates") or 0)
-            failed_plates = int(pp.get("failed_plates") or 0)
-            avg_conf_raw = pp.get("avg_confidence")
-            avg_conf = round(float(avg_conf_raw) * 100, 1) if avg_conf_raw is not None else None
-            read_rate = round((valid_plates / total_detected_plates) * 100, 1) if total_detected_plates > 0 else 0.0
+                # Distribusi jenis kendaraan
+                v_type_rows = query_rows("""
+                    SELECT
+                        SUM(d.object_type = 'vehicle') AS total,
+                        SUM(d.object_type = 'vehicle' AND d.vehicle_type = 'car') AS car,
+                        SUM(d.object_type = 'vehicle' AND d.vehicle_type = 'motorcycle') AS motorcycle,
+                        SUM(d.object_type = 'vehicle' AND d.vehicle_type = 'truck') AS truck,
+                        SUM(d.object_type = 'vehicle' AND d.vehicle_type = 'bus') AS bus,
+                        SUM(d.object_type = 'vehicle' AND (d.vehicle_type = 'unknown' OR d.vehicle_type IS NULL)) AS other
+                    FROM temp_analytics_dedup d
+                """)
+                vt = v_type_rows[0] if v_type_rows else {}
+                vehicle_types = {
+                    "total": int(vt.get("total") or 0),
+                    "car": int(vt.get("car") or 0),
+                    "motorcycle": int(vt.get("motorcycle") or 0),
+                    "truck": int(vt.get("truck") or 0),
+                    "bus": int(vt.get("bus") or 0),
+                    "other": int(vt.get("other") or 0),
+                }
 
-            plate_performance = {
-                "total_plates": total_detected_plates,
-                "valid_plates": valid_plates,
-                "check_plates": check_plates,
-                "failed_plates": failed_plates,
-                "read_rate": read_rate,
-                "avg_confidence": avg_conf,
-            }
+                # Performa pembacaan plat
+                plate_perf_rows = query_rows("""
+                    SELECT
+                        COUNT(p.plate_id) AS total_plates,
+                        SUM(p.detection_status = 1) AS valid_plates,
+                        SUM(p.detection_status = 2) AS check_plates,
+                        SUM(p.detection_status = 0 OR p.detection_status IS NULL) AS failed_plates,
+                        AVG(CASE WHEN p.detection_status IN (1, 2) THEN p.ocr_confidence END) AS avg_confidence
+                    FROM temp_analytics_dedup d
+                    JOIN plate p ON p.plate_id = d.plate_id
+                    WHERE d.object_type = 'vehicle'
+                """)
+                pp = plate_perf_rows[0] if plate_perf_rows else {}
+                total_detected_plates = int(pp.get("total_plates") or 0)
+                valid_plates = int(pp.get("valid_plates") or 0)
+                check_plates = int(pp.get("check_plates") or 0)
+                failed_plates = int(pp.get("failed_plates") or 0)
+                avg_conf_raw = pp.get("avg_confidence")
+                avg_conf = round(float(avg_conf_raw) * 100, 1) if avg_conf_raw is not None else None
+                read_rate = round((valid_plates / total_detected_plates) * 100, 1) if total_detected_plates > 0 else 0.0
 
-            top_rows = query_rows(f"""
-                SELECT p.plate_number, COUNT(*) AS total_seen, AVG(p.ocr_confidence) AS avg_confidence,
-                    MAX(d.created_at) AS last_seen, COALESCE(MAX(c.location), 'CCTV') AS last_camera,
-                    MAX(p.detection_status) AS last_status
-                FROM ({dedup_subquery}) d
-                JOIN plate p ON p.plate_id = d.plate_id
-                LEFT JOIN cameras c ON c.camera_id = d.camera_id
-                WHERE d.rn = 1 AND p.plate_number IS NOT NULL AND p.plate_number != ''
-                GROUP BY p.plate_number ORDER BY total_seen DESC, last_seen DESC LIMIT 10
-            """)
-            top_plates = []
-            for r in top_rows:
-                last_code = r.get("last_status")
-                last_text = "Tidak tersedia" if last_code is None else ("Terbaca" if last_code == 1 else ("Perlu cek" if last_code == 2 else "Gagal"))
-                top_plates.append({"plate": r["plate_number"], "count": int(r["total_seen"] or 0),
-                                   "confidence": round(float(r.get("avg_confidence") or 0) * 100, 1),
-                                   "last_seen": str(r.get("last_seen") or ""), "camera": r.get("last_camera") or "CCTV",
-                                   "status_code": last_code, "status": last_text})
+                plate_performance = {
+                    "total_plates": total_detected_plates,
+                    "valid_plates": valid_plates,
+                    "check_plates": check_plates,
+                    "failed_plates": failed_plates,
+                    "read_rate": read_rate,
+                    "avg_confidence": avg_conf,
+                }
 
-            recent_rows = query_rows(f"""
-                SELECT d.detection_id AS id, p.plate_number AS plate, d.created_at AS detected_at,
-                    COALESCE(c.location, 'CCTV') AS camera, d.detection_confidence AS confidence,
-                    CASE WHEN d.object_type = 'vehicle' THEN 'Kendaraan' ELSE 'Orang' END AS type,
-                    CASE WHEN d.direction = 'entry' THEN 'Masuk'
-                        WHEN d.direction = 'exit' THEN 'Keluar' ELSE 'Tidak ditentukan' END AS direction
-                FROM ({dedup_subquery}) d
-                LEFT JOIN plate p ON p.plate_id = d.plate_id
-                LEFT JOIN cameras c ON c.camera_id = d.camera_id
-                WHERE d.rn = 1
-                ORDER BY d.created_at DESC LIMIT 12
-            """)
-            recent = [{"id": r["id"], "plate": r.get("plate") or "-", "camera": r.get("camera"),
-                       "type": r.get("type"), "direction": r.get("direction"),
-                       "timestamp": str(r.get("detected_at") or ""),
-                       "confidence": round(float(r.get("confidence") or 0) * 100, 1)} for r in recent_rows]
+                top_rows = query_rows("""
+                    SELECT p.plate_number, COUNT(*) AS total_seen, AVG(p.ocr_confidence) AS avg_confidence,
+                        MAX(d.created_at) AS last_seen, COALESCE(MAX(c.location), 'CCTV') AS last_camera,
+                        MAX(p.detection_status) AS last_status
+                    FROM temp_analytics_dedup d
+                    JOIN plate p ON p.plate_id = d.plate_id
+                    LEFT JOIN cameras c ON c.camera_id = d.camera_id
+                    WHERE p.plate_number IS NOT NULL AND p.plate_number != ''
+                    GROUP BY p.plate_number ORDER BY total_seen DESC, last_seen DESC LIMIT 10
+                """)
+                top_plates = []
+                for r in top_rows:
+                    last_code = r.get("last_status")
+                    last_text = "Tidak tersedia" if last_code is None else ("Terbaca" if last_code == 1 else ("Perlu cek" if last_code == 2 else "Gagal"))
+                    top_plates.append({"plate": r["plate_number"], "count": int(r["total_seen"] or 0),
+                                       "confidence": round(float(r.get("avg_confidence") or 0) * 100, 1),
+                                       "last_seen": str(r.get("last_seen") or ""), "camera": r.get("last_camera") or "CCTV",
+                                       "status_code": last_code, "status": last_text})
 
-            peak = max(hourly, key=lambda item: item["vehicles"], default={"label": "-", "vehicles": 0})
-            busiest = cameras[0]["camera"] if cameras else "Belum ada data"
-            top_plate = top_plates[0]["plate"] if top_plates else "Belum ada data"
-            insights = [f"{busiest} memiliki aktivitas kendaraan tertinggi.",
-                        f"Periode terpilih mencatat {summary['vehicles']:,} kendaraan.".replace(",", "."),
-                        f"{top_plate} merupakan plat yang paling sering terdeteksi.",
-                        f"Jam {peak['label']} merupakan periode kendaraan tersibuk ({peak['vehicles']} kendaraan)."]
-            return {"period": period, "start_date": start_date, "end_date": end_date, "summary": summary,
-                    "cameras": cameras, "daily": daily, "hourly": hourly,
-                    "vehicle_types": vehicle_types, "plate_performance": plate_performance,
-                    "top_plates": top_plates, "recent": recent, "insights": insights}
+                recent_rows = query_rows("""
+                    SELECT d.detection_id AS id, p.plate_number AS plate, d.created_at AS detected_at,
+                        COALESCE(c.location, 'CCTV') AS camera, d.detection_confidence AS confidence,
+                        CASE WHEN d.object_type = 'vehicle' THEN 'Kendaraan' ELSE 'Orang' END AS type,
+                        CASE WHEN d.direction = 'entry' THEN 'Masuk'
+                            WHEN d.direction = 'exit' THEN 'Keluar' ELSE 'Tidak ditentukan' END AS direction
+                    FROM temp_analytics_dedup d
+                    LEFT JOIN plate p ON p.plate_id = d.plate_id
+                    LEFT JOIN cameras c ON c.camera_id = d.camera_id
+                    ORDER BY d.created_at DESC LIMIT 12
+                """)
+                recent = [{"id": r["id"], "plate": r.get("plate") or "-", "camera": r.get("camera"),
+                           "type": r.get("type"), "direction": r.get("direction"),
+                           "timestamp": str(r.get("detected_at") or ""),
+                           "confidence": round(float(r.get("confidence") or 0) * 100, 1)} for r in recent_rows]
+
+                peak = max(hourly, key=lambda item: item["vehicles"], default={"label": "-", "vehicles": 0})
+                busiest = cameras[0]["camera"] if cameras else "Belum ada data"
+                top_plate = top_plates[0]["plate"] if top_plates else "Belum ada data"
+                insights = [f"{busiest} memiliki aktivitas kendaraan tertinggi.",
+                            f"Periode terpilih mencatat {summary['vehicles']:,} kendaraan.".replace(",", "."),
+                            f"{top_plate} merupakan plat yang paling sering terdeteksi.",
+                            f"Jam {peak['label']} merupakan periode kendaraan tersibuk ({peak['vehicles']} kendaraan)."]
+                return {"period": period, "start_date": start_date, "end_date": end_date, "summary": summary,
+                        "cameras": cameras, "daily": daily, "hourly": hourly,
+                        "vehicle_types": vehicle_types, "plate_performance": plate_performance,
+                        "top_plates": top_plates, "recent": recent, "insights": insights}
+            finally:
+                try:
+                    cur.execute("DROP TEMPORARY TABLE IF EXISTS temp_analytics_dedup;")
+                except Exception:
+                    pass
 
 
 def ensure_tables_exist():
@@ -1987,9 +1994,11 @@ def get_all_detections_paginated(
         s = f"%{search.strip()}%"
         where_clauses.append("(p.plate_number LIKE %s OR c.location LIKE %s)"); params.extend([s, s])
     if start_date:
-        where_clauses.append("DATE(fd.created_at) >= %s"); params.append(start_date)
+        where_clauses.append("fd.created_at >= %s")
+        params.append(f"{start_date} 00:00:00" if len(str(start_date)) == 10 else str(start_date))
     if end_date:
-        where_clauses.append("DATE(fd.created_at) <= %s"); params.append(end_date)
+        where_clauses.append("fd.created_at <= %s")
+        params.append(f"{end_date} 23:59:59" if len(str(end_date)) == 10 else str(end_date))
 
     where_sql = " AND ".join(where_clauses)
 
@@ -2121,13 +2130,13 @@ def get_plate_history_paginated(
         where_clauses.append("pl.camera_id = %s")
         params.append(int(camera_id))
 
-    # Filter tanggal
+    # Filter tanggal (SARGable range query)
     if start_date:
-        where_clauses.append("DATE(p.created_at) >= %s")
-        params.append(start_date)
+        where_clauses.append("p.created_at >= %s")
+        params.append(f"{start_date} 00:00:00" if len(str(start_date)) == 10 else str(start_date))
     if end_date:
-        where_clauses.append("DATE(p.created_at) <= %s")
-        params.append(end_date)
+        where_clauses.append("p.created_at <= %s")
+        params.append(f"{end_date} 23:59:59" if len(str(end_date)) == 10 else str(end_date))
 
     where_sql = " AND ".join(where_clauses)
 
@@ -2202,8 +2211,8 @@ def get_enterprise_statistics(period: str = "today") -> dict:
     now = datetime.now()
 
     if period == "today":
-        cond_fd = "DATE(fd.created_at) = CURDATE()"
-        cond_p = "DATE(p.created_at) = CURDATE()"
+        cond_fd = "fd.created_at >= CURDATE() AND fd.created_at <= CONCAT(CURDATE(), ' 23:59:59')"
+        cond_p = "p.created_at >= CURDATE() AND p.created_at <= CONCAT(CURDATE(), ' 23:59:59')"
         period_label = "Hari Ini"
     elif period == "7d":
         cond_fd = "fd.created_at >= DATE_SUB(CURDATE(), INTERVAL 6 DAY)"
@@ -2244,161 +2253,173 @@ def get_enterprise_statistics(period: str = "today") -> dict:
 
     with get_db() as conn:
         with conn.cursor() as cur:
+            # Gunakan temporary table agar window function ROW_NUMBER() hanya dihitung 1 kali
+            cur.execute("DROP TEMPORARY TABLE IF EXISTS temp_ent_stats_dedup;")
             cur.execute(f"""
+                CREATE TEMPORARY TABLE temp_ent_stats_dedup AS
                 SELECT
-                    COUNT(*) AS total_detections,
-                    SUM(d.object_type = 'vehicle') AS total_vehicles,
-                    SUM(d.object_type = 'vehicle' AND (d.has_plate = 1 OR d.plate_id IS NOT NULL)) AS total_plates,
-                    SUM(d.object_type = 'person') AS total_faces,
-                    SUM(d.object_type = 'vehicle' AND d.direction = 'entry') AS vehicle_entry,
-                    SUM(d.object_type = 'vehicle' AND d.direction = 'exit') AS vehicle_exit,
-                    SUM(d.object_type = 'person' AND d.direction = 'entry') AS people_entry,
-                    SUM(d.object_type = 'person' AND d.direction = 'exit') AS people_exit,
-                    SUM(d.detection_status = 1) AS status_valid,
-                    SUM(d.detection_status = 2) AS status_warning,
-                    SUM(d.detection_status = 0) AS status_failed,
-                    AVG(d.detection_confidence) AS avg_conf
+                    d.detection_id, d.camera_id, d.object_type, d.has_plate,
+                    d.plate_id, d.detection_confidence, d.created_at, d.direction,
+                    d.detection_status
                 FROM ({dedup_subquery}) d
-                WHERE d.rn = 1
+                WHERE d.rn = 1;
             """)
-            kpi_row = cur.fetchone()
 
-            total_dets = int(kpi_row["total_detections"] or 0)
-            total_vehicles = int(kpi_row["total_vehicles"] or 0)
-            total_plates = int(kpi_row["total_plates"] or 0)
-            total_faces = int(kpi_row["total_faces"] or 0)
-            vehicle_entry = int(kpi_row["vehicle_entry"] or 0)
-            vehicle_exit = int(kpi_row["vehicle_exit"] or 0)
-            people_entry = int(kpi_row["people_entry"] or 0)
-            people_exit = int(kpi_row["people_exit"] or 0)
-            status_valid = int(kpi_row["status_valid"] or 0)
-            status_warning = int(kpi_row["status_warning"] or 0)
-            status_failed = int(kpi_row["status_failed"] or 0)
-            avg_conf = float(kpi_row["avg_conf"] or 0.85)
-
-            plate_read_rate = round((float(total_plates) / max(total_vehicles, 1)) * 100, 1) if total_vehicles > 0 else 0.0
-
-            cur.execute("SELECT COUNT(*) AS total_cams, SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END) AS active_cams FROM cameras;")
-            cam_info = cur.fetchone()
-            total_cams = int(cam_info["total_cams"] or 0)
-            active_cams = int(cam_info["active_cams"] or 0)
-            cam_availability = round((float(active_cams) / max(total_cams, 1)) * 100, 1)
-
-            trend_labels = []; trend_plates = []; trend_faces = []; trend_totals = []
-
-            if period == "today":
-                cur.execute(f"""
-                    SELECT HOUR(d.created_at) AS hr, COUNT(*) AS total,
-                        SUM(d.object_type = 'vehicle') AS vehicles,
-                        SUM(d.object_type = 'vehicle' AND (d.has_plate = 1 OR d.plate_id IS NOT NULL)) AS plates,
-                        SUM(d.object_type = 'person') AS faces
-                    FROM ({dedup_subquery}) d
-                    WHERE d.rn = 1
-                    GROUP BY HOUR(d.created_at) ORDER BY hr ASC
+            try:
+                cur.execute("""
+                    SELECT
+                        COUNT(*) AS total_detections,
+                        SUM(d.object_type = 'vehicle') AS total_vehicles,
+                        SUM(d.object_type = 'vehicle' AND (d.has_plate = 1 OR d.plate_id IS NOT NULL)) AS total_plates,
+                        SUM(d.object_type = 'person') AS total_faces,
+                        SUM(d.object_type = 'vehicle' AND d.direction = 'entry') AS vehicle_entry,
+                        SUM(d.object_type = 'vehicle' AND d.direction = 'exit') AS vehicle_exit,
+                        SUM(d.object_type = 'person' AND d.direction = 'entry') AS people_entry,
+                        SUM(d.object_type = 'person' AND d.direction = 'exit') AS people_exit,
+                        SUM(d.detection_status = 1) AS status_valid,
+                        SUM(d.detection_status = 2) AS status_warning,
+                        SUM(d.detection_status = 0) AS status_failed,
+                        AVG(d.detection_confidence) AS avg_conf
+                    FROM temp_ent_stats_dedup d;
                 """)
-                hour_map = {r["hr"]: r for r in cur.fetchall()}
-                for h in range(24):
-                    trend_labels.append(f"{h:02d}:00")
-                    row = hour_map.get(h, {})
-                    trend_plates.append(int(row.get("plates", 0) or 0))
-                    trend_faces.append(int(row.get("faces", 0) or 0))
-                    trend_totals.append(int(row.get("total", 0) or 0))
-            elif period in ("7d", "30d"):
-                num_days = 7 if period == "7d" else 30
-                cur.execute(f"""
-                    SELECT DATE(d.created_at) AS dt, COUNT(*) AS total,
-                        SUM(d.object_type = 'vehicle' AND (d.has_plate = 1 OR d.plate_id IS NOT NULL)) AS plates,
-                        SUM(d.object_type = 'person') AS faces
-                    FROM ({dedup_subquery}) d
-                    WHERE d.rn = 1
-                    GROUP BY DATE(d.created_at) ORDER BY dt ASC
+                kpi_row = cur.fetchone()
+
+                total_dets = int(kpi_row["total_detections"] or 0)
+                total_vehicles = int(kpi_row["total_vehicles"] or 0)
+                total_plates = int(kpi_row["total_plates"] or 0)
+                total_faces = int(kpi_row["total_faces"] or 0)
+                vehicle_entry = int(kpi_row["vehicle_entry"] or 0)
+                vehicle_exit = int(kpi_row["vehicle_exit"] or 0)
+                people_entry = int(kpi_row["people_entry"] or 0)
+                people_exit = int(kpi_row["people_exit"] or 0)
+                status_valid = int(kpi_row["status_valid"] or 0)
+                status_warning = int(kpi_row["status_warning"] or 0)
+                status_failed = int(kpi_row["status_failed"] or 0)
+                avg_conf = float(kpi_row["avg_conf"] or 0.85)
+
+                plate_read_rate = round((float(total_plates) / max(total_vehicles, 1)) * 100, 1) if total_vehicles > 0 else 0.0
+
+                cur.execute("SELECT COUNT(*) AS total_cams, SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END) AS active_cams FROM cameras;")
+                cam_info = cur.fetchone()
+                total_cams = int(cam_info["total_cams"] or 0)
+                active_cams = int(cam_info["active_cams"] or 0)
+                cam_availability = round((float(active_cams) / max(total_cams, 1)) * 100, 1)
+
+                trend_labels = []; trend_plates = []; trend_faces = []; trend_totals = []
+
+                if period == "today":
+                    cur.execute("""
+                        SELECT HOUR(d.created_at) AS hr, COUNT(*) AS total,
+                            SUM(d.object_type = 'vehicle') AS vehicles,
+                            SUM(d.object_type = 'vehicle' AND (d.has_plate = 1 OR d.plate_id IS NOT NULL)) AS plates,
+                            SUM(d.object_type = 'person') AS faces
+                        FROM temp_ent_stats_dedup d
+                        GROUP BY HOUR(d.created_at) ORDER BY hr ASC;
+                    """)
+                    hour_map = {r["hr"]: r for r in cur.fetchall()}
+                    for h in range(24):
+                        trend_labels.append(f"{h:02d}:00")
+                        row = hour_map.get(h, {})
+                        trend_plates.append(int(row.get("plates", 0) or 0))
+                        trend_faces.append(int(row.get("faces", 0) or 0))
+                        trend_totals.append(int(row.get("total", 0) or 0))
+                elif period in ("7d", "30d"):
+                    num_days = 7 if period == "7d" else 30
+                    cur.execute("""
+                        SELECT DATE(d.created_at) AS dt, COUNT(*) AS total,
+                            SUM(d.object_type = 'vehicle' AND (d.has_plate = 1 OR d.plate_id IS NOT NULL)) AS plates,
+                            SUM(d.object_type = 'person') AS faces
+                        FROM temp_ent_stats_dedup d
+                        GROUP BY DATE(d.created_at) ORDER BY dt ASC;
+                    """)
+                    date_map = {str(r["dt"]): r for r in cur.fetchall()}
+                    for i in range(num_days - 1, -1, -1):
+                        day_d = now - timedelta(days=i)
+                        d_key = day_d.strftime("%Y-%m-%d")
+                        trend_labels.append(day_d.strftime("%d/%m"))
+                        row = date_map.get(d_key, {})
+                        trend_plates.append(int(row.get("plates", 0) or 0))
+                        trend_faces.append(int(row.get("faces", 0) or 0))
+                        trend_totals.append(int(row.get("total", 0) or 0))
+                else:
+                    cur.execute("""
+                        SELECT DATE(d.created_at) AS dt, COUNT(*) AS total,
+                            SUM(d.object_type = 'vehicle' AND (d.has_plate = 1 OR d.plate_id IS NOT NULL)) AS plates,
+                            SUM(d.object_type = 'person') AS faces
+                        FROM temp_ent_stats_dedup d
+                        GROUP BY DATE(d.created_at) ORDER BY dt ASC LIMIT 30;
+                    """)
+                    for r in cur.fetchall():
+                        d_obj = r["dt"]
+                        trend_labels.append(d_obj.strftime("%d/%m") if isinstance(d_obj, datetime) else str(d_obj))
+                        trend_plates.append(int(r.get("plates") or 0))
+                        trend_faces.append(int(r.get("faces") or 0))
+                        trend_totals.append(int(r.get("total") or 0))
+
+                cur.execute("""
+                    SELECT COALESCE(c.location, 'CCTV') AS camera_name,
+                        COUNT(d.detection_id) AS total_count,
+                        SUM(d.object_type = 'vehicle' AND (d.has_plate = 1 OR d.plate_id IS NOT NULL)) AS plate_count,
+                        SUM(d.object_type = 'person') AS face_count
+                    FROM temp_ent_stats_dedup d
+                    LEFT JOIN cameras c ON c.camera_id = d.camera_id
+                    GROUP BY d.camera_id, c.location
+                    ORDER BY total_count DESC;
                 """)
-                date_map = {str(r["dt"]): r for r in cur.fetchall()}
-                for i in range(num_days - 1, -1, -1):
-                    day_d = now - timedelta(days=i)
-                    d_key = day_d.strftime("%Y-%m-%d")
-                    trend_labels.append(day_d.strftime("%d/%m"))
-                    row = date_map.get(d_key, {})
-                    trend_plates.append(int(row.get("plates", 0) or 0))
-                    trend_faces.append(int(row.get("faces", 0) or 0))
-                    trend_totals.append(int(row.get("total", 0) or 0))
-            else:
-                cur.execute(f"""
-                    SELECT DATE(d.created_at) AS dt, COUNT(*) AS total,
-                        SUM(d.object_type = 'vehicle' AND (d.has_plate = 1 OR d.plate_id IS NOT NULL)) AS plates,
-                        SUM(d.object_type = 'person') AS faces
-                    FROM ({dedup_subquery}) d
-                    WHERE d.rn = 1
-                    GROUP BY DATE(d.created_at) ORDER BY dt ASC LIMIT 30
+                camera_distribution = []
+                for cr in cur.fetchall():
+                    c_tot = int(cr["total_count"] or 0)
+                    camera_distribution.append({
+                        "camera_name": cr["camera_name"],
+                        "total_count": c_tot,
+                        "plate_count": int(cr["plate_count"] or 0),
+                        "face_count": int(cr["face_count"] or 0),
+                        "percentage": round((c_tot / max(total_dets, 1)) * 100, 1)
+                    })
+
+                cur.execute("""
+                    SELECT HOUR(d.created_at) AS hr, COUNT(*) AS cnt
+                    FROM temp_ent_stats_dedup d
+                    GROUP BY HOUR(d.created_at) ORDER BY cnt DESC LIMIT 3;
                 """)
-                for r in cur.fetchall():
-                    d_obj = r["dt"]
-                    trend_labels.append(d_obj.strftime("%d/%m") if isinstance(d_obj, datetime) else str(d_obj))
-                    trend_plates.append(int(r.get("plates") or 0))
-                    trend_faces.append(int(r.get("faces") or 0))
-                    trend_totals.append(int(r.get("total") or 0))
+                peak_hours = []
+                for pr in cur.fetchall():
+                    h = pr["hr"]; c_peak = pr["cnt"]
+                    peak_hours.append({
+                        "time_range": f"{h:02d}:00 - {h+1:02d}:00 WIB",
+                        "count": c_peak,
+                        "percentage": round((c_peak / max(total_dets, 1)) * 100, 1)
+                    })
 
-            cur.execute(f"""
-                SELECT COALESCE(c.location, 'CCTV') AS camera_name,
-                    COUNT(d.detection_id) AS total_count,
-                    SUM(d.object_type = 'vehicle' AND (d.has_plate = 1 OR d.plate_id IS NOT NULL)) AS plate_count,
-                    SUM(d.object_type = 'person') AS face_count
-                FROM ({dedup_subquery}) d
-                LEFT JOIN cameras c ON c.camera_id = d.camera_id
-                WHERE d.rn = 1
-                GROUP BY d.camera_id, c.location
-                ORDER BY total_count DESC
-            """)
-            camera_distribution = []
-            for cr in cur.fetchall():
-                c_tot = int(cr["total_count"] or 0)
-                camera_distribution.append({
-                    "camera_name": cr["camera_name"],
-                    "total_count": c_tot,
-                    "plate_count": int(cr["plate_count"] or 0),
-                    "face_count": int(cr["face_count"] or 0),
-                    "percentage": round((c_tot / max(total_dets, 1)) * 100, 1)
-                })
-
-            cur.execute(f"""
-                SELECT HOUR(d.created_at) AS hr, COUNT(*) AS cnt
-                FROM ({dedup_subquery}) d
-                WHERE d.rn = 1
-                GROUP BY HOUR(d.created_at) ORDER BY cnt DESC LIMIT 3
-            """)
-            peak_hours = []
-            for pr in cur.fetchall():
-                h = pr["hr"]; c_peak = pr["cnt"]
-                peak_hours.append({
-                    "time_range": f"{h:02d}:00 - {h+1:02d}:00 WIB",
-                    "count": c_peak,
-                    "percentage": round((c_peak / max(total_dets, 1)) * 100, 1)
-                })
-
-            cur.execute(f"""
-                SELECT p.plate_number, COUNT(*) AS total_seen,
-                    MAX(p.created_at) AS last_seen,
-                    MAX(p.detection_status) AS last_status,
-                    AVG(p.detection_confidence) AS avg_conf,
-                    COALESCE(MAX(c.location), 'CCTV') AS last_camera
-                FROM ({dedup_subquery}) d
-                JOIN plate p ON p.plate_id = d.plate_id
-                LEFT JOIN cameras c ON c.camera_id = d.camera_id
-                WHERE d.rn = 1 AND p.plate_number IS NOT NULL AND p.plate_number != ''
-                GROUP BY p.plate_number ORDER BY total_seen DESC LIMIT 10
-            """)
-            top_plates = []
-            for tp in cur.fetchall():
-                code = tp.get("last_status", 1)
-                stext = "Terbaca" if code == 1 else ("Perlu cek" if code == 2 else "Gagal")
-                ls = tp.get("last_seen")
-                ls_str = ls.strftime("%Y-%m-%d %H:%M") if isinstance(ls, datetime) else str(ls or "")
-                top_plates.append({
-                    "plate_number": tp["plate_number"], "total_seen": tp["total_seen"],
-                    "last_seen": ls_str, "last_camera": tp.get("last_camera") or "CCTV",
-                    "status": stext, "status_code": code,
-                    "avg_confidence_percent": round(float(tp.get("avg_conf") or 0.8) * 100, 1)
-                })
+                cur.execute("""
+                    SELECT p.plate_number, COUNT(*) AS total_seen,
+                        MAX(p.created_at) AS last_seen,
+                        MAX(p.detection_status) AS last_status,
+                        AVG(p.detection_confidence) AS avg_conf,
+                        COALESCE(MAX(c.location), 'CCTV') AS last_camera
+                    FROM temp_ent_stats_dedup d
+                    JOIN plate p ON p.plate_id = d.plate_id
+                    LEFT JOIN cameras c ON c.camera_id = d.camera_id
+                    WHERE p.plate_number IS NOT NULL AND p.plate_number != ''
+                    GROUP BY p.plate_number ORDER BY total_seen DESC LIMIT 10;
+                """)
+                top_plates = []
+                for tp in cur.fetchall():
+                    code = tp.get("last_status", 1)
+                    stext = "Terbaca" if code == 1 else ("Perlu cek" if code == 2 else "Gagal")
+                    ls = tp.get("last_seen")
+                    ls_str = ls.strftime("%Y-%m-%d %H:%M") if isinstance(ls, datetime) else str(ls or "")
+                    top_plates.append({
+                        "plate_number": tp["plate_number"], "total_seen": tp["total_seen"],
+                        "last_seen": ls_str, "last_camera": tp.get("last_camera") or "CCTV",
+                        "status": stext, "status_code": code,
+                        "avg_confidence_percent": round(float(tp.get("avg_conf") or 0.8) * 100, 1)
+                    })
+            finally:
+                try:
+                    cur.execute("DROP TEMPORARY TABLE IF EXISTS temp_ent_stats_dedup;")
+                except Exception:
+                    pass
 
             return {
                 "period": period, "period_label": period_label,

@@ -328,11 +328,11 @@ def _get_terbaca_detections_paginated(
         where_clauses.append("(p.plate_number LIKE %s OR c.location LIKE %s)")
         params.extend([s, s])
     if start_date:
-        where_clauses.append("DATE(fd.created_at) >= %s")
-        params.append(start_date)
+        where_clauses.append("fd.created_at >= %s")
+        params.append(f"{start_date} 00:00:00" if len(str(start_date)) == 10 else str(start_date))
     if end_date:
-        where_clauses.append("DATE(fd.created_at) <= %s")
-        params.append(end_date)
+        where_clauses.append("fd.created_at <= %s")
+        params.append(f"{end_date} 23:59:59" if len(str(end_date)) == 10 else str(end_date))
 
     where_sql = " AND ".join(where_clauses)
 
