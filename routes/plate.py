@@ -221,6 +221,12 @@ def create_camera():
 
     try:
         new_id = db.add_camera(location=name, stream_url=url, stream_type=1, status=1 if active else 0, direction=direction)
+        try:
+            from services.camera_worker_manager import CameraWorkerManager
+            CameraWorkerManager.get_instance().sync_now()
+        except Exception as exc:
+            print(f"[CAMERA SYNC ERROR] {exc}")
+
         return jsonify({
             "success": True,
             "data": {
@@ -248,6 +254,13 @@ def update_camera(camera_id):
         ok = db.update_camera(camera_id, location=location, stream_url=stream_url, status=status, direction=direction)
         if not ok:
             return jsonify({"success": False, "message": "Kamera tidak ditemukan atau tidak ada perubahan"}), 404
+
+        try:
+            from services.camera_worker_manager import CameraWorkerManager
+            CameraWorkerManager.get_instance().sync_now()
+        except Exception as exc:
+            print(f"[CAMERA SYNC ERROR] {exc}")
+
         return jsonify({"success": True, "message": "Kamera berhasil diperbarui"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
@@ -260,6 +273,13 @@ def delete_camera(camera_id):
         ok = db.delete_camera(camera_id)
         if not ok:
             return jsonify({"success": False, "message": "Kamera tidak ditemukan"}), 404
+
+        try:
+            from services.camera_worker_manager import CameraWorkerManager
+            CameraWorkerManager.get_instance().sync_now()
+        except Exception as exc:
+            print(f"[CAMERA SYNC ERROR] {exc}")
+
         return jsonify({"success": True, "message": "Kamera berhasil dihapus"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
@@ -1287,7 +1307,11 @@ def video_feed(camera_id=None):
     if not target_cam or target_cam.get("status") != 1 or not target_cam.get("stream_url"):
         return "Kamera tidak ditemukan atau belum aktif", 404
 
-    if CameraWorkerManager.get_instance().get_worker(target_cam["camera_id"]) is None:
+    manager = CameraWorkerManager.get_instance()
+    if manager.get_worker(target_cam["camera_id"]) is None:
+        manager.sync_now()
+
+    if manager.get_worker(target_cam["camera_id"]) is None:
         return "Worker kamera belum tersedia", 503
 
     return Response(

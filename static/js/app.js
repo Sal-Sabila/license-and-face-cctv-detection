@@ -977,7 +977,7 @@ async function initDashboard() {
     let videoJobPoller = null;
 
     function getStreamUrl(camId) {
-        return `/api/video_feed/${camId}?bbox=1`;
+        return `/api/video_feed/${camId}?bbox=1&t=${Date.now()}`;
     }
 
     function startCameraStream(camId) {
@@ -1103,13 +1103,21 @@ async function initDashboard() {
         startCameraStream(activeCam.id);
     } else {
         stopCameraStream();
+        if (cameraNameEl && activeCam) cameraNameEl.textContent = activeCam.name;
     }
 
     if (select) {
         select.addEventListener('change', () => {
-            localStorage.setItem('platevision.cameraId', select.value);
+            const camId = select.value;
+            localStorage.setItem('platevision.cameraId', camId);
             if (detectionMode?.value === 'video') return;
-            if (select.value) startCameraStream(select.value);
+            const cam = cameras.find(c => String(c.id) === String(camId));
+            if (cam && cam.active) {
+                startCameraStream(cam.id);
+            } else {
+                stopCameraStream();
+                if (cameraNameEl && cam) cameraNameEl.textContent = cam.name;
+            }
         });
     }
 
@@ -1135,14 +1143,49 @@ async function initDashboard() {
     }
 
     if (startBtn) {
-        startBtn.addEventListener('click', () => {
+        let isActivating = false;
+        startBtn.addEventListener('click', async () => {
             const selectedId = select?.value || activeCam?.id;
             if (!selectedId) return;
             if (detectionMode?.value === 'video') {
                 startVideoJob(videoFileInput?.files?.[0], selectedId);
-            } else {
-                startCameraStream(selectedId);
+                return;
             }
+
+            const cam = cameras.find(c => String(c.id) === String(selectedId));
+            if (!cam) return;
+
+            if (!cam.active) {
+                if (isActivating) return;
+                isActivating = true;
+                try {
+                    const res = await json(`/api/cameras/${cam.id}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ active: true })
+                    });
+                    if (res && res.success !== false) {
+                        cam.active = true;
+                        const cctvName = cam.name ? cam.name.trim() : `Kamera ${cam.id}`;
+                        const message = cctvName.toLowerCase().startsWith('cctv')
+                            ? `${cctvName} telah diaktifkan`
+                            : `CCTV ${cctvName} telah diaktifkan`;
+                        showNotification(message, 'success');
+                        updateDashboardMetrics();
+                    } else {
+                        throw new Error(res?.message || 'Gagal mengaktifkan CCTV');
+                    }
+                } catch (err) {
+                    console.error('Error mengaktifkan CCTV:', err);
+                    showNotification('Gagal mengaktifkan CCTV: ' + err.message, 'danger');
+                    isActivating = false;
+                    return;
+                } finally {
+                    isActivating = false;
+                }
+            }
+
+            startCameraStream(cam.id);
         });
     }
 
