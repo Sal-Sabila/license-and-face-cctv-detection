@@ -747,7 +747,10 @@ def update_camera(camera_id: int, location: str = None, stream_url: str = None, 
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(f"UPDATE cameras SET {', '.join(fields)} WHERE camera_id = %s;", params)
-            return cur.rowcount > 0
+            if cur.rowcount > 0:
+                return True
+            cur.execute("SELECT 1 FROM cameras WHERE camera_id = %s;", (camera_id,))
+            return cur.fetchone() is not None
 
 
 def delete_camera(camera_id: int):

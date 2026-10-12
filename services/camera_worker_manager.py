@@ -185,6 +185,7 @@ class CameraWorkerManager:
     def __init__(self):
         self.workers = {}          # camera_id -> _CameraWorker
         self.workers_lock = threading.Lock()
+        self.sync_lock = threading.Lock()
         self.supervisor_thread = None
         self.running = False
 
@@ -213,6 +214,15 @@ class CameraWorkerManager:
         with self.workers_lock:
             return self.workers.get(camera_id)
 
+    def sync_now(self):
+        """Segera sinkronkan worker dengan database tanpa menunggu interval polling supervisor."""
+        try:
+            from services.stream_ai_service import StreamAIService
+            ai_service = StreamAIService.get_instance()
+            self._sync_workers_with_db(ai_service)
+        except Exception as exc:
+            print(f"[CAMERA SUPERVISOR SYNC ERROR] {exc}")
+
     # --------------------------------------------------------
     # SUPERVISOR LOOP
     # --------------------------------------------------------
@@ -235,17 +245,18 @@ class CameraWorkerManager:
             time.sleep(SUPERVISOR_POLL_INTERVAL)
 
     def _sync_workers_with_db(self, ai_service):
-        cameras = db.get_all_cameras()
+        with self.sync_lock:
+            cameras = db.get_all_cameras()
 
-        # camera_id -> stream_url, hanya untuk kamera berstatus aktif
-        active_cameras = {
-            c["camera_id"]: c["stream_url"]
-            for c in cameras
-            if c.get("status") == 1 and c.get("stream_url")
-        }
+            # camera_id -> stream_url, hanya untuk kamera berstatus aktif
+            active_cameras = {
+                c["camera_id"]: c["stream_url"]
+                for c in cameras
+                if c.get("status") == 1 and c.get("stream_url")
+            }
 
-        with self.workers_lock:
-            currently_running = set(self.workers.keys())
+            with self.workers_lock:
+                currently_running = set(self.workers.keys())
 
         # ---- Stop worker untuk kamera yang sudah tidak aktif ----
         for camera_id in currently_running - set(active_cameras.keys()):
