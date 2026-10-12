@@ -452,9 +452,20 @@
                                         <span>Pilih Video</span>
                                         <input id="videoFileInput" type="file" accept="video/*" hidden>
                                     </label>
+                                    <label class="form-check-label small">
+                                        <input id="exportProcessedVideo" class="form-check-input me-1"
+                                            type="checkbox" value="1">
+                                        Buat video unduhan
+                                    </label>
                                 </div>
                             </div>
                             <div class="dashboard-toolbar-right">
+                                <a id="downloadProcessedVideo"
+                                    class="btn-dashboard-control btn-dashboard-video-file"
+                                    href="#" style="display: none;" download>
+                                    <i class="bi bi-download"></i>
+                                    <span>Unduh hasil</span>
+                                </a>
                                 <button id="startStreamBtn" type="button"
                                     class="btn-dashboard-control btn-stream-start-solid" title="Mulai Stream">
                                     <i class="bi bi-play-fill"></i>
@@ -473,8 +484,6 @@
                             <div class="video-stage">
                                 <img id="liveStreamImg" class="live-stream-feed" alt="Live CCTV Feed"
                                     style="display: none;" />
-                                <video id="processedVideo" class="live-stream-feed" controls playsinline
-                                    style="display: none;" aria-label="Hasil deteksi video"></video>
                                 <div class="video-placeholder" id="videoPlaceholder">
                                     <div class="camera-icon"><i class="bi bi-camera-video"></i></div>
                                     <strong id="cameraName">Tidak Ada Kamera</strong>

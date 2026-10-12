@@ -10,7 +10,6 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 import supervision as sv
-import collections
 import uuid
 
 from ai.plate.detector import PlateDetector
@@ -72,7 +71,7 @@ os.makedirs(PLATE_CAPTURE_DIR, exist_ok=True)
 # CONFIGURATION
 
 VEHICLE_CLASSES = [0, 2, 3, 5, 7]
-VEHICLE_CONFIDENCE = 0.45
+VEHICLE_CONFIDENCE = 0.35
 VEHICLE_IMGSZ = 480
 
 # DISTANCE / DETECTION ZONES
@@ -173,12 +172,11 @@ PLATE_VEHICLE_MIN_WIDTH = 30
 PLATE_VEHICLE_MIN_HEIGHT = 20
 
 FAKE_VEHICLE_ASPECT_MIN = 0.9
-FAKE_MOTORCYCLE_ASPECT_MIN = 0.20
 
 # AI INTERVAL
-BASE_AI_INTERVAL = 0.60
-MIN_AI_INTERVAL = 0.40
-MAX_AI_INTERVAL = 1.20
+BASE_AI_INTERVAL = 0.30
+MIN_AI_INTERVAL = 0.20
+MAX_AI_INTERVAL = 0.60
 TARGET_CPU = 75.0
 HIGH_CPU = 85.0
 LOW_CPU = 55.0
@@ -224,8 +222,8 @@ TRACK_REUSE_GAP = 8.0
 
 EVENT_SESSION_ID_LENGTH = 12
 
-TRACKER_LOST_BUFFER = 150
-TRACKER_MATCH_THRESHOLD = 0.80
+TRACKER_LOST_BUFFER = 90
+TRACKER_MATCH_THRESHOLD = 0.70
 TRACKER_ACTIVATION_THRESHOLD = 0.30
 
 TRACK_EVENT_COOLDOWN = 2.0
@@ -240,6 +238,8 @@ PERSON_TRACK_DEDUP_COOLDOWN = 300.0
 # Object Grouping Configurations
 OBJECT_GROUP_MAX_GAP = 8.0
 OBJECT_GROUP_MAX_CENTROID_DISTANCE = 120.0
+VEHICLE_GROUP_SWITCH_MAX_GAP = 1.5
+VEHICLE_GROUP_SWITCH_MIN_IOU = 0.65
 OBJECT_GROUP_PERSON_MAX_DIST = 130.0
 OBJECT_GROUP_AREA_TOLERANCE = 0.50
 OBJECT_GROUP_MIN_IOU = 0.15
@@ -900,7 +900,7 @@ class StreamAIService:
         self.object_groups = {}
         self._group_counter = 0
 
-        self.frame_queue = collections.deque(maxlen=2)
+        self.frame_queue = {}
         self.frame_queue_lock = threading.Lock()
         self.ai_wakeup = threading.Event()
         self.ai_thread = threading.Thread(target=self._ai_loop, name="PlateVision-AI", daemon=True)
@@ -968,7 +968,7 @@ class StreamAIService:
                     track_activation_threshold=TRACKER_ACTIVATION_THRESHOLD,
                     lost_track_buffer=TRACKER_LOST_BUFFER,
                     minimum_matching_threshold=TRACKER_MATCH_THRESHOLD,
-                    frame_rate=25,
+                    frame_rate=3,
                 ),
                 "plate_tracker": PlateTracker(
                     iou_threshold=PLATE_TRACKER_IOU,
@@ -1003,6 +1003,7 @@ class StreamAIService:
             area = bw * bh
 
             track_id = int(d.get("track_id", -1)) if d.get("track_id") is not None else -1
+            cls_id = int(d.get("cls", -1))
             conf = _safe_float(d.get("conf", d.get("confidence", 0.0)))
             object_type = d.get("object_type", "vehicle")
             vehicle_type = d.get("vehicle_type", "unknown")
@@ -1050,12 +1051,16 @@ class StreamAIService:
                 g_centroid = group.get("last_centroid", (0, 0))
                 g_bbox = group.get("last_bbox", [0, 0, 0, 0])
                 g_area = max(1, (g_bbox[2] - g_bbox[0]) * (g_bbox[3] - g_bbox[1]))
+                same_track = (
+                    track_id >= 0
+                    and (g_last_track == track_id or track_id in g_tracks_seen)
+                )
 
                 dist = ((cx - g_centroid[0]) ** 2 + (cy - g_centroid[1]) ** 2) ** 0.5
                 iou_val = _calculate_iou(bbox, g_bbox)
                 area_ratio = abs(area - g_area) / max(1, max(area, g_area))
 
-                if track_id >= 0 and (g_last_track == track_id or track_id in g_tracks_seen):
+                if same_track:
                     if dist <= max_dist_allowed * 1.5 or iou_val > 0.0:
                         score = 1000.0 - dist
                         if score > best_score:
@@ -1068,11 +1073,21 @@ class StreamAIService:
                         continue
 
                 if object_type == "vehicle":
-                    two_wheelers = {"motorcycle", "bicycle"}
-                    g_two = group.get("vehicle_type") in two_wheelers
-                    v_two = vehicle_type in two_wheelers
-                    if group.get("vehicle_type") != "unknown" and vehicle_type != "unknown":
-                        if g_two != v_two:
+                    if not same_track:
+                        if now - group.get("last_seen", 0) > VEHICLE_GROUP_SWITCH_MAX_GAP:
+                            continue
+                        if group.get("class_id", cls_id) != cls_id:
+                            continue
+                        max_box_dimension = max(
+                            bw,
+                            bh,
+                            g_bbox[2] - g_bbox[0],
+                            g_bbox[3] - g_bbox[1],
+                        )
+                        if (
+                            iou_val < VEHICLE_GROUP_SWITCH_MIN_IOU
+                            or dist > max(30.0, max_box_dimension * 0.25)
+                        ):
                             continue
 
                 if dist > max_dist_allowed:
@@ -1142,6 +1157,7 @@ class StreamAIService:
                     "object_group_id": group_id,
                     "camera_id": camera_id,
                     "object_type": object_type,
+                    "class_id": cls_id,
                     "vehicle_type": vehicle_type,
                     "last_zone": zone,
                     "last_seen": now,
@@ -1174,7 +1190,7 @@ class StreamAIService:
             )[0]
             boxes = result.boxes
             if boxes is None or len(boxes) == 0:
-                tracked = sv.Detections.empty()
+                detections_for_tracker = sv.Detections.empty()
             else:
                 keep_indices = []
                 for i, box_tensor in enumerate(boxes.xyxy):
@@ -1193,8 +1209,7 @@ class StreamAIService:
                         if bw < MIN_VEHICLE_WIDTH or bh < MIN_VEHICLE_HEIGHT:
                             continue
                         aspect = bw / max(1, bh)
-                        min_aspect = FAKE_MOTORCYCLE_ASPECT_MIN if cls_id == 3 else FAKE_VEHICLE_ASPECT_MIN
-                        if aspect < min_aspect:
+                        if aspect < FAKE_VEHICLE_ASPECT_MIN:
                             continue
                     else:
                         continue
@@ -1202,11 +1217,13 @@ class StreamAIService:
 
                 if keep_indices:
                     filtered_result = result[keep_indices]
-                    tracked = self._camera_state(camera_id)["person_tracker"].update_with_detections(
-                        sv.Detections.from_ultralytics(filtered_result)
-                    )
+                    detections_for_tracker = sv.Detections.from_ultralytics(filtered_result)
                 else:
-                    tracked = sv.Detections.empty()
+                    detections_for_tracker = sv.Detections.empty()
+
+            tracked = self._camera_state(camera_id)["person_tracker"].update_with_detections(
+                detections_for_tracker
+            )
 
             for i in range(len(tracked)):
                 bbox = tracked.xyxy[i].astype(int).tolist()
@@ -1552,12 +1569,7 @@ class StreamAIService:
             bh = max(1, by2 - by1)
             aspect = bw / bh
 
-            is_motorcycle = (
-                vehicle.get("cls") == 3
-                or vehicle.get("vehicle_type") == "motorcycle"
-            )
-            min_aspect = FAKE_MOTORCYCLE_ASPECT_MIN if is_motorcycle else FAKE_VEHICLE_ASPECT_MIN
-            if plate is None and aspect < min_aspect:
+            if plate is None and aspect < FAKE_VEHICLE_ASPECT_MIN:
                 continue
 
             driver = None
@@ -2582,26 +2594,31 @@ class StreamAIService:
     def _ai_loop(self):
         print("[AI THREAD] Background AI worker started")
         while self.running:
-            item = None
             self.ai_wakeup.wait(timeout=0.05)
             self.ai_wakeup.clear()
             if not self.running:
                 break
+            item = None
+            now = time.time()
             with self.frame_queue_lock:
-                if self.frame_queue:
-                    item = self.frame_queue.pop()
-                    self.frame_queue.clear()
+                due_cameras = [
+                    camera_id
+                    for camera_id in self.frame_queue
+                    if now - self._camera_state(camera_id)["last_ai_time"]
+                    >= self.adaptive_ai.get_interval()
+                ]
+                if due_cameras:
+                    camera_id = min(
+                        due_cameras,
+                        key=lambda cam_id: self._camera_state(cam_id)["last_ai_time"],
+                    )
+                    item = (self.frame_queue.pop(camera_id), camera_id)
             if item is None:
                 continue
             frame, camera_id = item
             camera_id = _normalize_camera_id(camera_id)
             camera_state = self._camera_state(camera_id)
             now = time.time()
-            interval = self.adaptive_ai.get_interval()
-            remaining = interval - (now - camera_state["last_ai_time"])
-            if remaining > 0:
-                time.sleep(min(remaining, 0.05))
-                continue
             camera_state["last_ai_time"] = now
             self._run_ai_pipeline(frame, camera_id)
         print("[AI THREAD] Background AI worker stopped")
@@ -2613,9 +2630,7 @@ class StreamAIService:
         camera_id = _normalize_camera_id(camera_id)
         try:
             with self.frame_queue_lock:
-                self.frame_queue.append((frame.copy(), camera_id))
-                while len(self.frame_queue) > 1:
-                    self.frame_queue.popleft()
+                self.frame_queue[camera_id] = frame.copy()
             self.ai_wakeup.set()
         except Exception as exc:
             if DEBUG_PERFORMANCE:

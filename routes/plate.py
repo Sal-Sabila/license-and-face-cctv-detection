@@ -39,16 +39,19 @@ def _video_job(job_id, input_path, output_path, camera_id):
 
         def update_progress(frame_number, total_frames, processed_frame=None):
             progress = round((frame_number / total_frames) * 100, 1) if total_frames else 0
+            frame_bytes = None
+            if processed_frame is not None:
+                encoded, buffer = cv2.imencode(
+                    ".jpg", processed_frame,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), 78]
+                )
+                if encoded:
+                    frame_bytes = buffer.tobytes()
             with VIDEO_JOBS_LOCK:
                 if job_id in VIDEO_JOBS:
                     VIDEO_JOBS[job_id]["progress"] = progress
-                    if processed_frame is not None:
-                        encoded, buffer = cv2.imencode(
-                            ".jpg", processed_frame,
-                            [int(cv2.IMWRITE_JPEG_QUALITY), 78]
-                        )
-                        if encoded:
-                            VIDEO_JOBS[job_id]["latest_frame"] = buffer.tobytes()
+                    if frame_bytes is not None:
+                        VIDEO_JOBS[job_id]["latest_frame"] = frame_bytes
 
         with VIDEO_JOBS_LOCK:
             VIDEO_JOBS[job_id]["status"] = "processing"
@@ -66,7 +69,11 @@ def _video_job(job_id, input_path, output_path, camera_id):
             VIDEO_JOBS[job_id].update({
                 "status": "completed",
                 "progress": 100,
-                "output_url": f"/api/video_jobs/{job_id}/result"
+                "output_url": (
+                    f"/api/video_jobs/{job_id}/result"
+                    if output_path and os.path.isfile(output_path)
+                    else None
+                )
             })
     except Exception as exc:
         print(f"[VIDEO JOB ERROR] {job_id}: {exc}")
@@ -107,7 +114,11 @@ def create_video_job():
 
     job_id = uuid.uuid4().hex
     input_path = os.path.join(VIDEO_UPLOAD_DIR, f"{job_id}.{extension}")
-    output_path = os.path.join(VIDEO_OUTPUT_DIR, f"{job_id}.mp4")
+    export_video = request.form.get("export_video") == "1"
+    output_path = (
+        os.path.join(VIDEO_OUTPUT_DIR, f"{job_id}.mp4")
+        if export_video else None
+    )
     uploaded.save(input_path)
 
     with VIDEO_JOBS_LOCK:
@@ -145,12 +156,20 @@ def video_job_status(job_id):
 
 @plate_bp.route("/video_jobs/<job_id>/result", methods=["GET"])
 def video_job_result(job_id):
-    filename = f"{job_id}.mp4"
     with VIDEO_JOBS_LOCK:
         job = VIDEO_JOBS.get(job_id)
-        if not job or job.get("status") != "completed":
+        if (
+            not job
+            or job.get("status") != "completed"
+            or not job.get("output_url")
+        ):
             return jsonify({"success": False, "message": "Video belum selesai diproses"}), 404
-    return send_from_directory(VIDEO_OUTPUT_DIR, filename, as_attachment=False)
+    filename = f"{job_id}.mp4"
+    return send_from_directory(
+        VIDEO_OUTPUT_DIR,
+        filename,
+        as_attachment=request.args.get("download") == "1",
+    )
 
 
 @plate_bp.route("/video_jobs/<job_id>/feed", methods=["GET"])
@@ -1297,6 +1316,32 @@ def video_feed(camera_id=None):
         ),
         mimetype='multipart/x-mixed-replace; boundary=frame'
     )
+
+
+@plate_bp.route("/video_feed/<int:camera_id>/status", methods=["GET"])
+def video_feed_status(camera_id):
+    """Expose per-camera worker connectivity state for the dashboard."""
+    from services.camera_worker_manager import CameraWorkerManager
+
+    worker = CameraWorkerManager.get_instance().get_worker(camera_id)
+    if worker is None:
+        return jsonify({
+            "success": True,
+            "data": {
+                "camera_id": camera_id,
+                "status": "OFFLINE",
+                "retry_in_seconds": 0,
+                "last_error": "Worker kamera tidak tersedia",
+            },
+        })
+
+    return jsonify({
+        "success": True,
+        "data": {
+            "camera_id": camera_id,
+            **worker.get_status(),
+        },
+    })
 
 
 # ENDPOINT SNAPSHOT (1 FRAME) — untuk Editor Zona

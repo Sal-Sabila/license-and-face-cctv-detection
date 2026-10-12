@@ -107,6 +107,8 @@ class FFmpegStreamReader:
         ffmpeg_path="ffmpeg",
         max_reconnect=3,
         reconnect_delay=1.5,
+        reconnect_http=True,
+        read_timeout_us=15000000,
     ):
         self.width = int(width)
         self.height = int(height)
@@ -117,6 +119,8 @@ class FFmpegStreamReader:
 
         self.max_reconnect = max(1, int(max_reconnect))
         self.reconnect_delay = max(0.2, float(reconnect_delay))
+        self.reconnect_http = bool(reconnect_http)
+        self.read_timeout_us = max(1000000, int(read_timeout_us))
 
         self.error_message = None
         self.last_error = None
@@ -149,7 +153,7 @@ class FFmpegStreamReader:
             "-fflags", "+genpts",
 
             # Jangan menunggu input terlalu lama.
-            "-rw_timeout", "15000000",
+            "-rw_timeout", str(self.read_timeout_us),
         ]
 
         if url.lower().startswith("rtsp://"):
@@ -163,12 +167,13 @@ class FFmpegStreamReader:
             ])
 
         elif url.lower().startswith(("http://", "https://")):
-            command.extend([
-                "-reconnect", "1",
-                "-reconnect_at_eof", "1",
-                "-reconnect_streamed", "1",
-                "-reconnect_delay_max", "2",
-            ])
+            if self.reconnect_http:
+                command.extend([
+                    "-reconnect", "1",
+                    "-reconnect_at_eof", "1",
+                    "-reconnect_streamed", "1",
+                    "-reconnect_delay_max", "2",
+                ])
 
         command.extend([
             "-i", url,

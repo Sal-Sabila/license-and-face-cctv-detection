@@ -19,9 +19,7 @@ SUPERVISOR_POLL_INTERVAL = 5.0
 WORKER_WIDTH = 960
 WORKER_HEIGHT = 540
 
-# Batas gagal baca frame berturut-turut sebelum worker mencoba
-# membuka ulang koneksi RTMP dari awal (stream mungkin sempat putus).
-MAX_CONSECUTIVE_FAILURES = 60
+RECONNECT_BACKOFF_SECONDS = (5.0, 10.0, 30.0)
 
 
 class _CameraWorker:
@@ -47,6 +45,10 @@ class _CameraWorker:
 
         self.last_frame = None
         self.last_frame_lock = threading.Lock()
+        self.status = "CONNECTING"
+        self.retry_in_seconds = 0
+        self.last_error = None
+        self.status_lock = threading.Lock()
 
     def start(self):
         self.thread.start()
@@ -60,37 +62,72 @@ class _CameraWorker:
         with self.last_frame_lock:
             return None if self.last_frame is None else self.last_frame.copy()
 
+    def get_status(self):
+        with self.status_lock:
+            return {
+                "status": self.status,
+                "retry_in_seconds": self.retry_in_seconds,
+                "last_error": self.last_error,
+            }
+
+    def _set_status(self, status, retry_in_seconds=0, error=None):
+        with self.status_lock:
+            self.status = status
+            self.retry_in_seconds = retry_in_seconds
+            self.last_error = error
+
     def _run(self):
         print(f"[CAMERA WORKER] Kamera {self.camera_id}: mulai membaca stream (background)")
 
         norm_url = normalize_stream_url(self.stream_url)
-        reader = FFmpegStreamReader(norm_url, width=WORKER_WIDTH, height=WORKER_HEIGHT)
-
-        consecutive_failures = 0
+        reader = None
+        retry_count = 0
 
         try:
             while not self.stop_event.is_set():
+                try:
+                    if reader is None:
+                        self._set_status("CONNECTING")
+                        reader = FFmpegStreamReader(
+                            norm_url,
+                            width=WORKER_WIDTH,
+                            height=WORKER_HEIGHT,
+                            max_reconnect=1,
+                            reconnect_delay=0.5,
+                            reconnect_http=False,
+                            read_timeout_us=5000000,
+                        )
 
-                ret, frame = reader.read()
+                    ret, frame = reader.read()
+                except Exception as exc:
+                    ret, frame = False, None
+                    error_message = str(exc)
+                else:
+                    error_message = (
+                        getattr(reader, "last_error", None)
+                        or getattr(reader, "error_message", None)
+                        or "Tidak menerima frame dari stream"
+                    )
 
                 if not ret or frame is None:
-                    consecutive_failures += 1
-
-                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                        print(
-                            f"[CAMERA WORKER] Kamera {self.camera_id}: "
-                            f"gagal baca {consecutive_failures}x berturut-turut, "
-                            f"mencoba buka ulang koneksi..."
-                        )
+                    if reader is not None:
                         reader.release()
-                        time.sleep(1.0)
-                        reader = FFmpegStreamReader(norm_url, width=WORKER_WIDTH, height=WORKER_HEIGHT)
-                        consecutive_failures = 0
+                        reader = None
 
-                    time.sleep(0.1)
+                    delay = RECONNECT_BACKOFF_SECONDS[
+                        min(retry_count, len(RECONNECT_BACKOFF_SECONDS) - 1)
+                    ]
+                    retry_count += 1
+                    self._set_status("OFFLINE", delay, error_message)
+                    print(
+                        f"[CAMERA WORKER] Kamera {self.camera_id}: OFFLINE; "
+                        f"reconnect dalam {delay:.0f} detik ({error_message})"
+                    )
+                    self.stop_event.wait(delay)
                     continue
 
-                consecutive_failures = 0
+                retry_count = 0
+                self._set_status("ONLINE")
 
                 with self.last_frame_lock:
                     self.last_frame = frame
@@ -100,11 +137,16 @@ class _CameraWorker:
                 # process_frame() sendiri murah (cuma push ke queue),
                 # AI berat-nya jalan di thread _ai_loop milik
                 # StreamAIService, terpisah dari loop ini.
-                self.ai_service.process_frame(
-                    frame,
-                    draw_bbox=False,
-                    camera_id=self.camera_id,
-                )
+                try:
+                    self.ai_service.process_frame(
+                        frame,
+                        draw_bbox=False,
+                        camera_id=self.camera_id,
+                    )
+                except Exception as exc:
+                    print(
+                        f"[CAMERA WORKER AI ERROR] Kamera {self.camera_id}: {exc}"
+                    )
 
                 # Batasi kecepatan baca supaya tidak membebani CPU
                 # secara percuma -- AI sendiri sudah adaptif soal
@@ -115,7 +157,9 @@ class _CameraWorker:
             print(f"[CAMERA WORKER ERROR] Kamera {self.camera_id}: {exc}")
 
         finally:
-            reader.release()
+            if reader is not None:
+                reader.release()
+            self._set_status("STOPPED")
             print(f"[CAMERA WORKER] Kamera {self.camera_id}: berhenti")
 
 

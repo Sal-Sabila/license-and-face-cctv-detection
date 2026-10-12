@@ -70,7 +70,7 @@ PLATE_MODEL_PATH = os.path.join(
     BASE_DIR,
     "models",
     "plate",
-    "license-plate-finetune-v2n.pt",
+    "license-plate-finetune-v3n.pt",
 )
 
 CAPTURE_DIR = os.path.join(BASE_DIR, "static", "captures")
@@ -84,32 +84,32 @@ CAMERA_NAME = "Video CCTV"
 
 VEHICLE_CLASSES = [0, 2, 3, 5, 7]
 VEHICLE_CONFIDENCE = 0.35
-VEHICLE_IMGSZ = 512
+VEHICLE_IMGSZ = 480
 
-PLATE_CONFIDENCE = 0.42
-PLATE_IMGSZ = 640
+PLATE_CONFIDENCE = 0.25
+PLATE_IMGSZ = 512
 PLATE_MAX_DET = 5
 PLATE_IOU = 0.45
-PLATE_MIN_WIDTH = 20
-PLATE_MIN_HEIGHT = 7
+PLATE_MIN_WIDTH = 12
+PLATE_MIN_HEIGHT = 4
 
 # Video offline: AI berbasis frame, bukan wall-clock.
-# 2 berarti AI memproses frame 1,3,5,... pada video 25 FPS ~12.5 AI FPS.
+# AI memproses tiap frame ketiga, sekitar 8 AI FPS pada video 25 FPS.
 PROCESS_EVERY_N_FRAMES = 3
 
 # PlateTracker OCR setiap 2 match agar voting mempunyai beberapa sampel.
-PLATE_TRACKER_IOU = 0.40
-PLATE_TRACKER_FRAME_GAP = 30
-PLATE_TRACKER_OCR_EVERY = 3
-PLATE_TRACKER_MIN_CONFIDENCE = 0.42
+PLATE_TRACKER_IOU = 0.35
+PLATE_TRACKER_FRAME_GAP = 40
+PLATE_TRACKER_OCR_EVERY = 2
+PLATE_TRACKER_MIN_CONFIDENCE = 0.35
 PLATE_TRACKER_MAX_HISTORY = 5
 
 PLATE_REVIEW_CONFIDENCE = 0.65
 PERSON_CAPTURE_CONFIDENCE = 0.40
 PERSON_CAPTURE_COOLDOWN = 30.0
 
-MAX_PLATE_ROIS_PER_CYCLE = 2
-MAX_PLATES_PER_CYCLE = 3
+MAX_PLATE_ROIS_PER_CYCLE = 3
+MAX_PLATES_PER_CYCLE = 5
 
 
 # LIGHTING / FOCUS CONFIG
@@ -1099,8 +1099,8 @@ class VideoAIService:
             iou=PLATE_IOU,
             min_width=PLATE_MIN_WIDTH,
             min_height=PLATE_MIN_HEIGHT,
-            min_aspect_ratio=1.5,
-            max_aspect_ratio=7.0,
+            min_aspect_ratio=1.2,
+            max_aspect_ratio=8.0,
         )
 
         try:
@@ -1137,10 +1137,10 @@ class VideoAIService:
 
             boxes = result.boxes
             if boxes is None or len(boxes) == 0:
-                tracked = sv.Detections.empty()
+                raw = sv.Detections.empty()
             else:
                 raw = sv.Detections.from_ultralytics(result)
-                tracked = self.person_tracker.update_with_detections(raw)
+            tracked = self.person_tracker.update_with_detections(raw)
 
             for i in range(len(tracked)):
                 bbox = tracked.xyxy[i].astype(int).tolist()
@@ -1220,8 +1220,8 @@ class VideoAIService:
                 track_id=track_id,
                 generation=generation,
                 bbox=item["box"],
-                frame_width=w_frame,
-                frame_height=h_frame,
+                frame_width=w,
+                frame_height=h,
                 camera_direction=db.get_camera_direction(self.camera_id),
             )
             event_key = self._build_event_key("person", track_id, generation)
@@ -2015,7 +2015,8 @@ class VideoAIService:
     # ------------------------------------------------------------
 
     def run(self):
-        os.makedirs(os.path.dirname(OUTPUT_VIDEO_PATH), exist_ok=True)
+        if self.output_path:
+            os.makedirs(os.path.dirname(self.output_path), exist_ok=True)
         os.makedirs(CAPTURE_DIR, exist_ok=True)
         os.makedirs(PLATE_CAPTURE_DIR, exist_ok=True)
 
@@ -2035,18 +2036,19 @@ class VideoAIService:
             grabber = FFmpegVideoReader(self.video_path)
         except Exception as exc:
             print(f"[VIDEO ERROR] {exc}")
-            return
+            raise RuntimeError(f"Gagal membuka video input: {exc}") from exc
 
         print(f"[VIDEO] Resolution : {grabber.width}x{grabber.height}")
         print(f"[VIDEO] FPS        : {grabber.fps:.2f}")
         print(f"[VIDEO] Duration   : {grabber.duration:.2f}s")
         print(f"[VIDEO] Frames     : {grabber.frame_count}")
 
+        tracker_fps = max(1, int(round(grabber.fps / PROCESS_EVERY_N_FRAMES)))
         self.person_tracker = sv.ByteTrack(
             track_activation_threshold=0.35,
-            lost_track_buffer=max(30, int(round(grabber.fps * 2))),
+            lost_track_buffer=max(30, int(round(tracker_fps * 3))),
             minimum_matching_threshold=0.7,
-            frame_rate=max(1, int(round(grabber.fps))),
+            frame_rate=tracker_fps,
         )
 
         self.plate_tracker = PlateTracker(
@@ -2079,6 +2081,7 @@ class VideoAIService:
         processed_frames = 0
         start_time = time.time()
         last_frame = None
+        last_processed_frame = None
         last_vehicle_dets = []
 
         try:
@@ -2101,6 +2104,7 @@ class VideoAIService:
                     last_vehicle_dets = list(self.last_results.get("persons", []))
                 else:
                     processed = self._render(frame)
+                last_processed_frame = processed
 
                 if writer is not None:
                     writer.write(processed)
@@ -2170,6 +2174,15 @@ class VideoAIService:
                     max(0.0, (frame_number - 1) / grabber.fps),
                     last_vehicle_dets,
                 )
+
+            if last_frame is not None:
+                last_processed_frame = self._render(last_frame)
+                if self.progress_callback:
+                    self.progress_callback(
+                        frame_number,
+                        grabber.frame_count,
+                        last_processed_frame,
+                    )
 
             grabber.release()
             if writer is not None:

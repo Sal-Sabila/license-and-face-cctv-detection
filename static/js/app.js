@@ -973,8 +973,11 @@ async function initDashboard() {
     const detectionMode = document.getElementById('detectionMode');
     const videoFileLabel = document.getElementById('videoFileLabel');
     const videoFileInput = document.getElementById('videoFileInput');
-    const processedVideo = document.getElementById('processedVideo');
+    const exportProcessedVideo = document.getElementById('exportProcessedVideo');
+    const downloadProcessedVideo = document.getElementById('downloadProcessedVideo');
     let videoJobPoller = null;
+    let activeVideoJobId = null;
+    let cameraStatusPoller = null;
 
     function getStreamUrl(camId) {
         return `/api/video_feed/${camId}?bbox=1`;
@@ -984,16 +987,44 @@ async function initDashboard() {
         if (!streamImg) return;
         const cam = cameras.find(c => String(c.id) === String(camId));
         if (cam) {
+            if (cameraStatusPoller) clearInterval(cameraStatusPoller);
+            cameraStatusPoller = null;
             if (videoJobPoller) clearInterval(videoJobPoller);
-            if (processedVideo) {
-                processedVideo.pause();
-                processedVideo.removeAttribute('src');
-                processedVideo.style.display = 'none';
-            }
+            videoJobPoller = null;
+            activeVideoJobId = null;
+            if (downloadProcessedVideo) downloadProcessedVideo.style.display = 'none';
             streamImg.src = getStreamUrl(cam.id);
             streamImg.style.display = 'block';
             if (placeholder) placeholder.style.display = 'none';
             if (cameraNameEl) cameraNameEl.textContent = cam.name;
+
+            const updateCameraStatus = async () => {
+                if (
+                    detectionMode?.value === 'video' ||
+                    String(select?.value || camId) !== String(camId)
+                ) return;
+
+                try {
+                    const response = await json(`/api/video_feed/${camId}/status`);
+                    if (
+                        detectionMode?.value === 'video' ||
+                        String(select?.value || camId) !== String(camId)
+                    ) return;
+                    const status = response.data?.status;
+                    if (!cameraNameEl) return;
+                    if (status === 'OFFLINE') {
+                        cameraNameEl.textContent = `${cam.name} · OFFLINE`;
+                    } else if (status === 'CONNECTING') {
+                        cameraNameEl.textContent = `${cam.name} · MENGHUBUNGKAN`;
+                    } else if (status === 'ONLINE') {
+                        cameraNameEl.textContent = `${cam.name} · ONLINE`;
+                    }
+                } catch (error) {
+                    console.error(`Status CCTV ${camId} error:`, error);
+                }
+            };
+            updateCameraStatus();
+            cameraStatusPoller = setInterval(updateCameraStatus, 2000);
         }
     }
 
@@ -1001,12 +1032,12 @@ async function initDashboard() {
         if (!streamImg) return;
         streamImg.src = '';
         streamImg.style.display = 'none';
+        if (cameraStatusPoller) clearInterval(cameraStatusPoller);
+        cameraStatusPoller = null;
         if (videoJobPoller) clearInterval(videoJobPoller);
-        if (processedVideo) {
-            processedVideo.pause();
-            processedVideo.removeAttribute('src');
-            processedVideo.style.display = 'none';
-        }
+        videoJobPoller = null;
+        activeVideoJobId = null;
+        if (downloadProcessedVideo) downloadProcessedVideo.style.display = 'none';
         if (placeholder) placeholder.style.display = 'flex';
         if (cameraNameEl) cameraNameEl.textContent = 'Stream Dihentikan';
     }
@@ -1016,8 +1047,8 @@ async function initDashboard() {
         const videoFileCol = document.getElementById('videoFileCol');
         if (videoFileCol) videoFileCol.style.display = videoMode ? 'block' : 'none';
         if (videoFileLabel) videoFileLabel.style.display = videoMode ? 'inline-flex' : 'none';
-        if (streamImg) streamImg.style.display = videoMode ? (videoJobPoller ? 'block' : 'none') : streamImg.src ? 'block' : 'none';
-        if (processedVideo && !videoMode) processedVideo.style.display = 'none';
+        if (streamImg) streamImg.style.display = videoMode ? (activeVideoJobId ? 'block' : 'none') : streamImg.src ? 'block' : 'none';
+        if (!videoMode && downloadProcessedVideo) downloadProcessedVideo.style.display = 'none';
     }
 
     async function startVideoJob(file, camId) {
@@ -1028,6 +1059,7 @@ async function initDashboard() {
         const formData = new FormData();
         formData.append('video', file);
         formData.append('camera_id', camId);
+        if (exportProcessedVideo?.checked) formData.append('export_video', '1');
 
         try {
             const response = await fetch('/api/video_jobs', { method: 'POST', body: formData });
@@ -1044,12 +1076,13 @@ async function initDashboard() {
     function monitorVideoJob(jobId) {
         if (!jobId) return;
         if (videoJobPoller) clearInterval(videoJobPoller);
+        activeVideoJobId = jobId;
         if (streamImg) {
             streamImg.src = `/api/video_jobs/${jobId}/feed`;
             streamImg.style.display = 'block';
         }
         if (placeholder) placeholder.style.display = 'none';
-        if (processedVideo) processedVideo.style.display = 'none';
+        if (downloadProcessedVideo) downloadProcessedVideo.style.display = 'none';
 
         const checkJob = async () => {
             try {
@@ -1057,20 +1090,20 @@ async function initDashboard() {
                 const job = statusResult.data;
                 if (job.status === 'completed') {
                     clearInterval(videoJobPoller);
-                    if (streamImg) {
-                        streamImg.src = '';
-                        streamImg.style.display = 'none';
-                    }
-                    if (processedVideo) {
-                        processedVideo.src = `${job.output_url}?t=${Date.now()}`;
-                        processedVideo.style.display = 'block';
-                        processedVideo.load();
-                        processedVideo.play().catch(() => { });
+                    videoJobPoller = null;
+                    if (downloadProcessedVideo && job.output_url) {
+                        downloadProcessedVideo.href = `${job.output_url}?download=1`;
+                        downloadProcessedVideo.style.display = 'inline-flex';
                     }
                     if (placeholder) placeholder.style.display = 'none';
-                    if (cameraNameEl) cameraNameEl.textContent = 'Hasil Deteksi Video';
+                    if (cameraNameEl) {
+                        cameraNameEl.textContent = job.output_url
+                            ? 'Deteksi selesai — preview anotasi ditampilkan'
+                            : 'Deteksi selesai — preview anotasi ditampilkan (tanpa ekspor video)';
+                    }
                 } else if (job.status === 'failed') {
                     clearInterval(videoJobPoller);
+                    videoJobPoller = null;
                     localStorage.removeItem('platevision.videoJobId');
                     if (cameraNameEl) cameraNameEl.textContent = `Gagal: ${job.error || 'proses video'}`;
                 } else if (cameraNameEl) {
@@ -1082,8 +1115,8 @@ async function initDashboard() {
             }
         };
 
-        checkJob();
         videoJobPoller = setInterval(checkJob, 1000);
+        checkJob();
     }
 
     const savedMode = localStorage.getItem('platevision.mode') || 'stream';
