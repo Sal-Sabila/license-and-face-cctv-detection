@@ -73,3 +73,4 @@ install.log
 _backup_unused_files.zip
 videos/uploads/*
 videos/processed/*
+videos/segments/*

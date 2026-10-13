@@ -61,10 +61,13 @@ app.register_blueprint(zones_page_bp)
 
 # HALAMAN UTAMA
 
-# START CAMERA WORKERS
+# START CAMERA WORKERS & RECORDER
 
 if not app.debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
     CameraWorkerManager.get_instance().start()
+    if os.environ.get("ENABLE_RECORDER", "true").lower() in ("true", "1", "yes"):
+        from services.camera_recorder_service import CameraRecorderService
+        CameraRecorderService.get_instance().start()
 
 # HEALTH CHECK
 

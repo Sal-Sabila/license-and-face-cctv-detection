@@ -1,0 +1,1253 @@
+import os
+import re
+import csv
+import json
+import time
+import queue
+import shutil
+import subprocess
+import threading
+from datetime import datetime, timedelta
+
+from ffmpeg_stream_reader import find_ffmpeg_executable, normalize_stream_url
+import db
+
+# Root directory untuk penyimpanan rekaman segmen
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_SEGMENTS_DIR = os.path.join(BASE_DIR, "videos", "segments")
+
+
+class CameraRecorderService:
+    """
+    Layanan perekaman CCTV hybrid berbasis FFmpeg dengan segmentasi otomatis 10 detik
+    dan antrean pemrosesan worker tunggal (Tahap 1, 2, & 3).
+
+    Prinsip Arsitektur:
+    1. Hemat CPU: Merekam menggunakan stream copy (`-c:v copy -an`), 0% beban transcode.
+    2. Single Processing Worker: Tepat 1 background worker untuk inferensi AI serial,
+       menghindari konkurensi AI paralel yang dapat membuat CPU 100% jenuh.
+    3. State Tracking & Idempoten: Setiap segmen tercatat statusnya:
+       - 'pending'    : Rekaman selesai & tervalidasi di disk, menunggu giliran proses.
+       - 'processing' : Sedang diproses oleh worker tunggal.
+       - 'completed'  : Berhasil diproses oleh VideoAIService.
+       - 'failed'     : Gagal diproses (error dicatat, tidak menghentikan sistem).
+       Tidak ada segmen yang diproses lebih dari satu kali.
+    4. Bounded Queue & Backlog Monitor: Antrean memori dibatasi (default 50),
+       backlog dipantau tanpa menghilangkan rekaman file di disk.
+    5. Toleransi Restart: Status antrean dipersistensikan ke JSON disk sehingga
+       segmen yang sudah 'completed' tidak diproses ulang saat aplikasi di-restart.
+    6. Isolasi Realtime: Perekaman dan antrean AI berjalan independen dari jalur
+       deteksi realtime CCTV (CameraWorkerManager).
+    """
+
+    _instance = None
+    _instance_lock = threading.Lock()
+
+    @classmethod
+    def get_instance(cls):
+        with cls._instance_lock:
+            if cls._instance is None:
+                cls._instance = cls()
+            return cls._instance
+
+    def __init__(self, segments_dir=None, segment_duration=10):
+        self.segments_dir = segments_dir or DEFAULT_SEGMENTS_DIR
+        self.segment_duration = max(5, int(segment_duration))
+        self.ffmpeg_path = find_ffmpeg_executable()
+
+        self.camera_id = None
+        self.camera_name = None
+        self.stream_url = None
+
+        self.process = None
+        self.process_lock = threading.Lock()
+
+        self.is_running = False
+        self.status = "STOPPED"  # STOPPED, CONNECTING, RECORDING, ERROR
+        self.last_error = None
+        self.started_at = None
+
+        # Threading & sinkronisasi perekaman
+        self.supervisor_thread = None
+        self.monitor_thread = None
+        self.stderr_thread = None
+        self.stop_event = threading.Event()
+
+        # Pelacakan direktori & file sesi
+        self.session_id = None
+        self.camera_dir = None
+        self.list_file = None
+        self.state_file = None
+
+        # Tahap 3: Antrean bounded & Single Worker AI
+        self.max_queue_size = int(os.environ.get("HYBRID_MAX_QUEUE_SIZE", "50"))
+        self.auto_process_enabled = os.environ.get("ENABLE_AUTO_PROCESS", "true").lower() in ("true", "1", "yes")
+        self._processing_queue = queue.Queue(maxsize=self.max_queue_size)
+        self._worker_thread = None
+
+        # State storage (filename -> metadata dict)
+        self._segments_state = {}
+        self._completed_segments = []
+        self._completed_segments_lock = threading.Lock()
+        self._processed_segment_filenames = set()
+        self._callbacks = []
+
+        # Status pemantauan worker
+        self.worker_is_busy = False
+        self.current_processing_segment = None
+        self.latest_completed_segment = None
+        self.latest_failed_segment = None
+        self.latest_processed_segment = None
+        self.processing_lock = threading.Lock()
+
+    # ------------------------------------------------------------------
+    # MANAJEMEN SIKLUS HIDUP (LIFECYCLE)
+    # ------------------------------------------------------------------
+
+    def start(self, camera_id=None):
+        """
+        Memulai perekaman otomatis dan single processing worker.
+        Jika camera_id berbeda dari target aktif, recorder di-restart ke kamera baru.
+        """
+        if self.is_running:
+            if camera_id is not None and self.camera_id != camera_id:
+                print(f"[RECORDER] Mengganti target kamera ke {camera_id}, me-restart recorder...")
+                self.stop()
+                self.camera_id = None
+                self.stream_url = None
+            else:
+                print("[RECORDER] Layanan perekaman sudah berjalan")
+                return True
+
+        self.stop_event.clear()
+        self.is_running = True
+        self.status = "CONNECTING"
+        self.last_error = None
+
+        # 1. Jalankan supervisor perekam FFmpeg
+        self.supervisor_thread = threading.Thread(
+            target=self._run_supervisor,
+            args=(camera_id,),
+            name="CameraRecorderSupervisor",
+            daemon=True,
+        )
+        self.supervisor_thread.start()
+        print("[RECORDER] Supervisor perekaman otomatis dimulai")
+
+        # 2. Jalankan single processing worker
+        if self.auto_process_enabled and (self._worker_thread is None or not self._worker_thread.is_alive()):
+            self._worker_thread = threading.Thread(
+                target=self._run_processing_worker,
+                name="SegmentAIWorker",
+                daemon=True,
+            )
+            self._worker_thread.start()
+            print("[RECORDER] Worker antrean pemrosesan tunggal dimulai")
+
+        return True
+
+    def stop(self):
+        """Menghentikan perekaman dan membersihkan worker background."""
+        print("[RECORDER] Menghentikan perekaman dan worker...")
+        self.is_running = False
+        self.stop_event.set()
+
+        self._terminate_ffmpeg()
+
+        if self.supervisor_thread and self.supervisor_thread.is_alive():
+            self.supervisor_thread.join(timeout=3.0)
+
+        if self._worker_thread and self._worker_thread.is_alive():
+            self._worker_thread.join(timeout=4.0)
+
+        self.status = "STOPPED"
+        print("[RECORDER] Perekaman dan worker berhasil dihentikan")
+
+    def register_completed_callback(self, callback):
+        """Mendaftarkan callback fungsi saat ada segmen selesai diproses."""
+        if callable(callback) and callback not in self._callbacks:
+            self._callbacks.append(callback)
+
+    def get_completed_segments(self, status=None):
+        """
+        Mengambil salinan daftar segmen.
+        Dapat difilter berdasarkan status ('pending', 'processing', 'completed', 'failed').
+        """
+        with self._completed_segments_lock:
+            all_segs = list(self._segments_state.values())
+            if status:
+                st = str(status).lower().strip()
+                return [s for s in all_segs if str(s.get("status", "")).lower() == st]
+            return all_segs
+
+    def pop_next_completed_segment(self, timeout=None):
+        """Ambil segmen selesai dari queue lama jika dibutuhkan."""
+        try:
+            return self._processing_queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def get_status(self):
+        """Mengembalikan status komprehensif recorder, worker, dan backlog antrean."""
+        with self.process_lock:
+            proc_alive = self.process is not None and self.process.poll() is None
+
+        with self._completed_segments_lock:
+            total_recorded = len(self._segments_state)
+            count_pending = sum(1 for s in self._segments_state.values() if s.get("status") == "pending")
+            count_processing = 1 if self.worker_is_busy else 0
+            count_completed = sum(1 for s in self._segments_state.values() if s.get("status") == "completed")
+            count_failed = sum(1 for s in self._segments_state.values() if s.get("status") == "failed")
+            count_stored = sum(1 for s in self._segments_state.values() if s.get("status") == "stored")
+            latest_seg = self._completed_segments[-1] if self._completed_segments else None
+
+        uptime_seconds = 0
+        if self.started_at and self.is_running:
+            uptime_seconds = round(time.time() - self.started_at, 1)
+
+        backlog = {
+            "total_recorded": total_recorded,
+            "pending": count_pending,
+            "processing": count_processing,
+            "completed": count_completed,
+            "failed": count_failed,
+            "stored": count_stored,
+            "queue_size": self._processing_queue.qsize(),
+            "max_queue_size": self.max_queue_size,
+            "worker_is_busy": self.worker_is_busy,
+            "current_processing_segment": self.current_processing_segment,
+        }
+
+        return {
+            "status": self.status,
+            "is_running": self.is_running,
+            "process_active": proc_alive,
+            "camera_id": self.camera_id,
+            "camera_name": self.camera_name,
+            "stream_url": self.stream_url,
+            "segment_duration": self.segment_duration,
+            "auto_process_enabled": self.auto_process_enabled,
+            "backlog": backlog,
+            "latest_segment": latest_seg,
+            "latest_processed_segment": self.latest_processed_segment,
+            "latest_completed_segment": self.latest_completed_segment,
+            "latest_failed_segment": self.latest_failed_segment,
+            "uptime_seconds": uptime_seconds,
+            "last_error": self.last_error,
+        }
+
+    # ------------------------------------------------------------------
+    # PERSISTENSI STATE (JSON PADA DISK)
+    # ------------------------------------------------------------------
+
+    def _load_state(self):
+        """
+        Memuat riwayat segmen dari file JSON saat aplikasi start / restart.
+        Menjamin tidak ada pemrosesan ganda untuk segmen yang sudah 'completed'.
+        """
+        if not self.state_file or not os.path.isfile(self.state_file):
+            return
+
+        try:
+            with open(self.state_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            if isinstance(data, dict):
+                loaded_count = 0
+                requeued_count = 0
+                with self._completed_segments_lock:
+                    for filename, info in data.items():
+                        fpath = info.get("file_path", "")
+                        # Pastikan file fisik segmen masih ada di disk
+                        if os.path.isfile(fpath):
+                            self._processed_segment_filenames.add(filename)
+                            # Jika segmen sebelumnya terputus saat 'processing', kembalikan ke 'pending'
+                            if info.get("status") == "processing":
+                                info["status"] = "pending"
+
+                            self._segments_state[filename] = info
+                            self._completed_segments.append(info)
+                            loaded_count += 1
+
+                            # Jika statusnya pending, masukkan kembali ke antrean jika muat
+                            if info.get("status") == "pending" and self.auto_process_enabled:
+                                try:
+                                    self._processing_queue.put_nowait(info)
+                                    requeued_count += 1
+                                except queue.Full:
+                                    pass
+
+                print(
+                    f"[RECORDER STATE] Berhasil memuat {loaded_count} segmen dari {os.path.basename(self.state_file)} "
+                    f"({requeued_count} pending dimasukkan ke antrean)"
+                )
+        except Exception as exc:
+            print(f"[RECORDER STATE ERROR] Gagal memuat state: {exc}")
+
+    def _save_state(self):
+        """Menyimpan status antrean segmen ke file JSON secara atomik."""
+        if not self.state_file:
+            return
+
+        try:
+            tmp_file = f"{self.state_file}.tmp"
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(self._segments_state, f, indent=2)
+            os.replace(tmp_file, self.state_file)
+        except Exception as exc:
+            print(f"[RECORDER STATE ERROR] Gagal menyimpan state: {exc}")
+
+    # ------------------------------------------------------------------
+    # TAHAP 3: SINGLE WORKER CONSUMER LOOP (INFERENSI SERIAL)
+    # ------------------------------------------------------------------
+
+    def _run_processing_worker(self):
+        """
+        Background worker tunggal yang memproses antrean segmen secara serial.
+        Inferensi AI tidak pernah berjalan paralel antar-segmen.
+        """
+        print("[QUEUE WORKER] Worker pemrosesan segmen tunggal aktif")
+
+        while self.is_running and not self.stop_event.is_set():
+            try:
+                # Ambil segmen berikutnya dari bounded queue dengan timeout
+                segment_info = self._processing_queue.get(timeout=1.0)
+            except queue.Empty:
+                # Periksa apakah ada pending backlog di _segments_state yang belum masuk queue
+                self._repopulate_queue_from_backlog()
+                continue
+
+            if not self.is_running or self.stop_event.is_set():
+                break
+
+            filename = segment_info.get("filename")
+            if not filename:
+                self._processing_queue.task_done()
+                continue
+
+            # Verifikasi status: jangan proses jika sudah completed atau processing
+            with self._completed_segments_lock:
+                current_state = self._segments_state.get(filename, dict(segment_info))
+                if current_state.get("status") == "completed":
+                    self._processing_queue.task_done()
+                    continue
+
+                # Tandai sebagai processing
+                current_state["status"] = "processing"
+                current_state["started_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                self._segments_state[filename] = current_state
+                self.worker_is_busy = True
+                self.current_processing_segment = filename
+                self._save_state()
+
+            print(f"[QUEUE WORKER] Memulai inferensi AI segmen: {filename}")
+            try:
+                result = self._execute_segment_ai(segment_info)
+
+                with self._completed_segments_lock:
+                    current_state["status"] = "completed"
+                    current_state["completed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    current_state["detections"] = result.get("detections")
+                    current_state["cpu_usage"] = result.get("cpu_usage")
+                    current_state["elapsed_seconds"] = result.get("elapsed_seconds")
+                    self._segments_state[filename] = current_state
+                    self.latest_completed_segment = dict(current_state)
+                    self.latest_processed_segment = dict(current_state)
+                    self._save_state()
+
+                self._notify_completed(current_state)
+                print(
+                    f"[QUEUE WORKER] Segmen '{filename}' sukses diproses "
+                    f"({result.get('elapsed_seconds')}s, "
+                    f"caps={result.get('detections', {}).get('person_and_vehicle_captures', 0)})"
+                )
+
+            except Exception as exc:
+                # Catat kegagalan tanpa menghentikan worker atau recorder
+                with self._completed_segments_lock:
+                    current_state["status"] = "failed"
+                    current_state["failed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    current_state["error"] = str(exc)
+                    self._segments_state[filename] = current_state
+                    self.latest_failed_segment = dict(current_state)
+                    self._save_state()
+
+                print(f"[QUEUE WORKER ERROR] Segmen '{filename}' gagal diproses: {exc}")
+
+            finally:
+                with self._completed_segments_lock:
+                    self.worker_is_busy = False
+                    self.current_processing_segment = None
+                self._processing_queue.task_done()
+                # Jeda kooperatif singkat agar CPU tidak 100% saturasi dan jalur realtime lancar
+                time.sleep(0.3)
+
+        print("[QUEUE WORKER] Worker pemrosesan segmen dihentikan")
+
+    def _repopulate_queue_from_backlog(self):
+        """Memasukkan segmen 'pending' atau 'stored' dari backlog ke antrean jika ada kapasitas kosong."""
+        if not self.auto_process_enabled or self._processing_queue.full():
+            return
+
+        with self._completed_segments_lock:
+            for filename, info in self._segments_state.items():
+                if info.get("status") in ("pending", "stored"):
+                    try:
+                        info["status"] = "pending"
+                        self._processing_queue.put_nowait(info)
+                    except queue.Full:
+                        break
+
+    def _enqueue_segment(self, segment_info):
+        """Memasukkan segmen ke bounded queue sesuai kebijakan aman backlog (tanpa menghapus file)."""
+        try:
+            self._processing_queue.put_nowait(segment_info)
+            print(
+                f"[RECORDER QUEUE] Segmen '{segment_info['filename']}' dimasukkan ke antrean "
+                f"({self._processing_queue.qsize()}/{self.max_queue_size})"
+            )
+        except queue.Full:
+            filename = segment_info.get("filename")
+            with self._completed_segments_lock:
+                if filename in self._segments_state:
+                    self._segments_state[filename]["status"] = "stored"
+                    self._segments_state[filename]["note"] = "Tersimpan aman di disk (kebijakan batas antrean)"
+                    self._save_state()
+            print(
+                f"[RECORDER QUEUE BACKLOG] Antrean memori penuh ({self.max_queue_size}). "
+                f"Segmen '{segment_info['filename']}' tetap aman tersimpan di disk dengan status 'stored'."
+            )
+
+    def _execute_segment_ai(self, segment_info, save_annotated=False):
+        """
+        Menjalankan VideoAIService pada segmen video tunggal dan mengukur metrik CPU.
+        """
+        import psutil
+        from services.video_ai_service import VideoAIService
+
+        file_path = segment_info["file_path"]
+        if not os.path.isfile(file_path) or os.path.getsize(file_path) == 0:
+            raise FileNotFoundError(f"File segmen '{file_path}' tidak ditemukan atau kosong di disk.")
+
+        output_path = None
+        if save_annotated or os.environ.get("HYBRID_SAVE_ANNOTATED", "false").lower() in ("true", "1", "yes"):
+            processed_dir = os.path.join(BASE_DIR, "videos", "processed")
+            os.makedirs(processed_dir, exist_ok=True)
+            output_path = os.path.join(processed_dir, f"annotated_{segment_info['filename']}")
+
+        process_obj = psutil.Process()
+        psutil.cpu_percent(interval=None)
+        process_obj.cpu_percent(interval=None)
+        t_start = time.perf_counter()
+
+        # Jalankan VideoAIService bawaan proyek tanpa memodifikasi pipelinenya
+        ai_service = VideoAIService(
+            video_path=file_path,
+            output_path=output_path,
+            camera_id=segment_info.get("camera_id") or self.camera_id or 1,
+            show_window=False,
+            source_name=f"Segment Cam {segment_info.get('camera_id') or self.camera_id}",
+        )
+        ai_service.run()
+
+        t_elapsed = time.perf_counter() - t_start
+        sys_cpu = psutil.cpu_percent(interval=None)
+        proc_cpu = process_obj.cpu_percent(interval=None)
+
+        # Evaluasi shadow deduplication (Tahap 8) untuk audit trail tanpa memblokir INSERT
+        shadow_evaluations = []
+        try:
+            from services.shadow_dedup_service import ShadowDedupService
+            shadow_svc = ShadowDedupService.get_instance()
+            cam_id = segment_info.get("camera_id") or self.camera_id or 1
+            segment_time = self._segment_recorded_at(segment_info) or datetime.now()
+            
+            # Evaluasi untuk setiap event kendaraan
+            for vevent in ai_service.video_event_groups.get("vehicle", []):
+                s_eval = shadow_svc.evaluate_candidate(
+                    camera_id=cam_id,
+                    plate_number=vevent.get("plate_number") or vevent.get("plate"),
+                    timestamp=segment_time,
+                    source_type="video",
+                    object_type="vehicle",
+                    vehicle_type=vevent.get("vehicle_type", "unknown"),
+                    event_key=vevent.get("event_key"),
+                    track_id=vevent.get("track_id"),
+                    source_name=ai_service.source_name,
+                )
+                shadow_evaluations.append(s_eval)
+
+            # Evaluasi untuk setiap deteksi plat
+            for pevent in list(ai_service.last_plate_history):
+                p_text = pevent.get("plate") or pevent.get("text") or pevent.get("formatted")
+                s_eval = shadow_svc.evaluate_candidate(
+                    camera_id=cam_id,
+                    plate_number=p_text,
+                    timestamp=segment_time,
+                    source_type="video",
+                    object_type="vehicle",
+                    vehicle_type="unknown",
+                    event_key=pevent.get("event_key"),
+                    track_id=pevent.get("track_id") or pevent.get("vehicle_track_id"),
+                    source_name=ai_service.source_name,
+                )
+                shadow_evaluations.append(s_eval)
+        except Exception as exc:
+            print(f"[SHADOW EVAL ERROR] {exc}")
+
+        detections = {
+            "inference_frames": ai_service.inference_count,
+            "person_and_vehicle_captures": ai_service.person_capture_count,
+            "plate_captures": ai_service.plate_capture_count,
+            "plate_history": list(ai_service.last_plate_history),
+            "event_groups": {
+                "vehicle": len(ai_service.video_event_groups.get("vehicle", [])),
+                "person": len(ai_service.video_event_groups.get("person", [])),
+            },
+            "vehicle_events": [
+                dict(event) for event in ai_service.video_event_groups.get("vehicle", [])
+            ],
+            "shadow_dedup_evaluations": shadow_evaluations,
+            "annotated_output": output_path if (output_path and os.path.isfile(output_path)) else None,
+        }
+
+        return {
+            "detections": detections,
+            "elapsed_seconds": round(t_elapsed, 2),
+            "cpu_usage": {
+                "system_cpu_percent": round(sys_cpu, 1),
+                "process_cpu_percent": round(proc_cpu, 1),
+            }
+        }
+
+
+    def process_single_segment(self, segment_filename=None, save_annotated=False):
+        """
+        Metode pemrosesan on-demand untuk 1 segmen (kompatibilitas Tahap 2).
+        """
+        with self.processing_lock:
+            if self.worker_is_busy:
+                return {
+                    "success": False,
+                    "message": "Pemrosesan AI pada worker tunggal sedang aktif. Harap tunggu hingga selesai."
+                }
+
+        target_segment = None
+        with self._completed_segments_lock:
+            if segment_filename:
+                target_segment = self._segments_state.get(segment_filename)
+                if target_segment is None:
+                    candidate_path = (
+                        os.path.join(self.camera_dir or "", segment_filename)
+                        if self.camera_dir else None
+                    )
+                    if candidate_path and os.path.exists(candidate_path):
+                        raise ValueError(
+                            f"File '{segment_filename}' masih dalam proses perekaman oleh FFmpeg "
+                            f"atau belum divalidasi. Pemrosesan ditolak."
+                        )
+                    raise ValueError(
+                        f"File '{segment_filename}' tidak terdaftar sebagai segmen selesai."
+                    )
+            else:
+                for seg in self._segments_state.values():
+                    if seg.get("status") in ("pending", "ready"):
+                        target_segment = seg
+                        break
+
+        if target_segment is None:
+            return {
+                "success": False,
+                "message": "Tidak ada segmen selesai yang siap diproses."
+            }
+
+        filename = target_segment["filename"]
+        with self._completed_segments_lock:
+            target_segment["status"] = "processing"
+            target_segment["started_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.worker_is_busy = True
+            self.current_processing_segment = filename
+            self._save_state()
+
+        try:
+            result = self._execute_segment_ai(target_segment, save_annotated=save_annotated)
+            with self._completed_segments_lock:
+                target_segment["status"] = "completed"
+                target_segment["completed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                target_segment["detections"] = result["detections"]
+                target_segment["cpu_usage"] = result["cpu_usage"]
+                target_segment["elapsed_seconds"] = result["elapsed_seconds"]
+                self.latest_completed_segment = dict(target_segment)
+                self.latest_processed_segment = dict(target_segment)
+                self._save_state()
+
+            return {
+                "success": True,
+                "message": f"Segmen '{filename}' berhasil diproses.",
+                "data": {
+                    "segment": target_segment,
+                    "detections": result["detections"],
+                    "elapsed_seconds": result["elapsed_seconds"],
+                    "cpu_usage": result["cpu_usage"],
+                }
+            }
+        except Exception as exc:
+            with self._completed_segments_lock:
+                target_segment["status"] = "failed"
+                target_segment["error"] = str(exc)
+                self.latest_failed_segment = dict(target_segment)
+                self._save_state()
+            return {
+                "success": False,
+                "message": f"Gagal memproses segmen: {str(exc)}"
+            }
+        finally:
+            with self._completed_segments_lock:
+                self.worker_is_busy = False
+                self.current_processing_segment = None
+
+    def evaluate_duplicates(self, time_window_seconds=45):
+        """
+        Evaluasi prospektif duplikasi antarpipeline tanpa mengubah data database.
+        """
+        window = max(0.0, float(time_window_seconds))
+        segment_detections = []
+        segment_vehicle_events = 0
+
+        with self._completed_segments_lock:
+            for seg in self._segments_state.values():
+                if seg.get("status") == "completed" and seg.get("detections"):
+                    d = seg["detections"]
+                    segment_vehicle_events += len(
+                        d.get("vehicle_events", [])
+                    ) or int(d.get("event_groups", {}).get("vehicle", 0) or 0)
+
+                    segment_end = self._segment_recorded_at(seg)
+                    duration = max(0.0, float(seg.get("duration") or 0.0))
+                    for plate_event in d.get("plate_history", []):
+                        plate = (
+                            plate_event.get("plate")
+                            or plate_event.get("text")
+                            or plate_event.get("formatted")
+                        )
+                        normalized = self._normalize_duplicate_plate(plate)
+                        if not normalized:
+                            continue
+
+                        event_time = segment_end
+                        video_time = plate_event.get("video_time")
+                        try:
+                            if event_time is not None and video_time is not None:
+                                event_time = event_time - timedelta(
+                                    seconds=max(0.0, duration - float(video_time))
+                                )
+                            elif event_time is not None:
+                                event_time = event_time - timedelta(seconds=duration / 2.0)
+                        except (TypeError, ValueError):
+                            event_time = None
+
+                        segment_detections.append({
+                            "camera_id": seg.get("camera_id"),
+                            "plate": normalized,
+                            "timestamp": event_time,
+                            "track_id": (
+                                plate_event.get("vehicle_track_id")
+                                if plate_event.get("vehicle_track_id") is not None
+                                else plate_event.get("track_id")
+                            ),
+                            "generation": plate_event.get("vehicle_generation")
+                            or plate_event.get("generation"),
+                            "segment": seg.get("filename"),
+                            "confidence": plate_event.get("confidence"),
+                            "source": "segment",
+                        })
+
+        realtime_detections = []
+        realtime_vehicle_events = 0
+        query_error = None
+        try:
+            with db.get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT fd.detection_id, fd.camera_id, fd.track_id, fd.event_key,
+                               fd.created_at, p.plate_number, p.ocr_confidence
+                        FROM full_detection fd
+                        LEFT JOIN plate p ON fd.plate_id = p.plate_id
+                        WHERE (fd.source_type = 'stream' OR fd.source_type IS NULL)
+                          AND fd.object_type = 'vehicle'
+                          AND fd.created_at >= DATE_SUB(NOW(), INTERVAL %s SECOND)
+                        ORDER BY fd.created_at DESC
+                        LIMIT 1000
+                        """,
+                        (max(300, int(window * 2)),),
+                    )
+                    rows = cur.fetchall()
+                    for r in rows:
+                        realtime_vehicle_events += 1
+                        plate = self._normalize_duplicate_plate(r.get("plate_number"))
+                        if not plate:
+                            continue
+                        realtime_detections.append({
+                            "detection_id": r.get("detection_id"),
+                            "camera_id": r.get("camera_id"),
+                            "plate": plate,
+                            "timestamp": r.get("created_at"),
+                            "track_id": r.get("track_id"),
+                            "event_key": r.get("event_key"),
+                            "confidence": float(r.get("ocr_confidence") or 0.0),
+                            "source": "realtime",
+                        })
+        except Exception as exc:
+            query_error = str(exc)
+            print(f"[DUPLICATE EVAL ERROR] Gagal query realtime DB: {exc}")
+
+        result = self._deduplicate_plate_events(
+            realtime_detections,
+            segment_detections,
+            window,
+        )
+        duplicate_count = result["cross_path_duplicates_count"] + result["within_source_duplicates_count"]
+        before_count = result["events_before_deduplication"]
+
+        return {
+            "time_window_seconds": window,
+            "realtime_detections_sampled": len(realtime_detections),
+            "segment_detections_sampled": len(segment_detections),
+            "realtime_vehicle_events_sampled": realtime_vehicle_events,
+            "segment_vehicle_events_sampled": segment_vehicle_events,
+            "duplicate_candidates_count": result["cross_path_duplicates_count"],
+            "duplicate_candidates": result["duplicate_candidates"][:20],
+            "within_source_duplicate_events": result["within_source_duplicates_count"],
+            "events_before_deduplication": before_count,
+            "events_after_deduplication": max(0, before_count - duplicate_count),
+            "duplicate_events_removed_prospectively": duplicate_count,
+            "duplication_rate_percent": (
+                round(duplicate_count * 100.0 / before_count, 1) if before_count else 0.0
+            ),
+            "unmatched_events_without_timestamp": result["unmatched_events_without_timestamp"],
+            "repeated_pass_groups": result["repeated_pass_groups"],
+            "unplated_vehicle_events_not_deduplicated": max(
+                0,
+                realtime_vehicle_events + segment_vehicle_events - before_count,
+            ),
+            "database_mutated": False,
+            "realtime_query_error": query_error,
+            "sample_adequate": bool(
+                result["cross_path_duplicates_count"] >= 2
+                and result["repeated_pass_groups"] >= 1
+                and result["timestamped_realtime_events"] >= 3
+                and result["timestamped_segment_events"] >= 3
+            ),
+            "evaluation_analysis": {
+                "matching": (
+                    "Satu-ke-satu berdasarkan kamera, pelat ternormalisasi, dan selisih timestamp. "
+                    "Tracking ID dipertahankan sebagai bukti peristiwa dalam jalurnya, tetapi ID dari "
+                    "dua tracker berbeda tidak dianggap setara."
+                ),
+                "repeat_passes": (
+                    "Pemasangan satu-ke-satu menjaga lintasan berulang berpelat sama sebagai event "
+                    "terpisah; event tidak dipasangkan ulang setelah pasangan pertama."
+                ),
+                "unplated_vehicles": (
+                    "Tidak dihapus karena tidak tersedia identitas lintas-jalur yang cukup kuat; "
+                    "mengandalkan waktu/kelas saja berisiko menghapus kendaraan lain."
+                ),
+                "timestamp_basis": (
+                    "Timestamp segmen diperkirakan dari waktu akhir rekaman (recorded_at atau mtime) "
+                    "dan titik tengah durasi segmen bila video_time tidak tersedia."
+                ),
+                "persistence": (
+                    "Hasil sesudah deduplikasi bersifat simulasi evaluasi. Tidak ada INSERT, UPDATE, "
+                    "atau DELETE MySQL maupun perubahan perilaku penulis event."
+                ),
+            }
+        }
+
+    @staticmethod
+    def _normalize_duplicate_plate(value):
+        normalized = re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+        return normalized if normalized and normalized != "-" else ""
+
+    @staticmethod
+    def _parse_duplicate_timestamp(value):
+        if isinstance(value, datetime):
+            parsed = value
+        elif isinstance(value, str):
+            try:
+                parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        else:
+            return None
+
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone().replace(tzinfo=None)
+        return parsed
+
+    @classmethod
+    def _segment_recorded_at(cls, segment):
+        recorded_at = cls._parse_duplicate_timestamp(segment.get("recorded_at"))
+        if recorded_at is not None:
+            return recorded_at
+
+        file_path = segment.get("file_path")
+        if file_path and os.path.isfile(file_path):
+            try:
+                return datetime.fromtimestamp(os.path.getmtime(file_path))
+            except OSError:
+                return None
+        return None
+
+    @classmethod
+    def _deduplicate_plate_events(cls, realtime_events, segment_events, time_window_seconds):
+        def prepare(events):
+            prepared = []
+            for event in events:
+                plate = cls._normalize_duplicate_plate(event.get("plate"))
+                timestamp = cls._parse_duplicate_timestamp(
+                    event.get("timestamp") or event.get("created_at")
+                )
+                camera_id = event.get("camera_id")
+                if not plate or camera_id is None:
+                    continue
+                prepared.append({
+                    **event,
+                    "plate": plate,
+                    "timestamp": timestamp,
+                    "camera_id": str(camera_id),
+                })
+            return prepared
+
+        raw_realtime = prepare(realtime_events)
+        raw_segments = prepare(segment_events)
+        no_timestamp = sum(
+            1
+            for event in raw_realtime + raw_segments
+            if event.get("timestamp") is None
+        )
+        window = max(0.0, float(time_window_seconds))
+
+        def compact_source(events):
+            compacted = []
+            last_by_identity = {}
+            duplicate_count = 0
+            for event in sorted(
+                events,
+                key=lambda item: (
+                    item.get("timestamp") is None,
+                    item.get("timestamp") or datetime.max,
+                ),
+            ):
+                identity = event.get("event_key")
+                if (
+                    not identity
+                    and event.get("track_id") is not None
+                    and event.get("generation") is not None
+                ):
+                    identity = (
+                        f"track:{event.get('track_id')}:"
+                        f"generation:{event.get('generation')}"
+                    )
+                if identity is None or event.get("timestamp") is None:
+                    compacted.append(event)
+                    continue
+
+                identity_key = (event["camera_id"], event["plate"], str(identity))
+                previous = last_by_identity.get(identity_key)
+                if previous is not None:
+                    delta = (event["timestamp"] - previous["timestamp"]).total_seconds()
+                    if 0 <= delta <= window:
+                        duplicate_count += 1
+                        continue
+
+                compacted.append(event)
+                last_by_identity[identity_key] = event
+            return compacted, duplicate_count
+
+        realtime, realtime_same_source_duplicates = compact_source(raw_realtime)
+        segments, segment_same_source_duplicates = compact_source(raw_segments)
+        duplicate_candidates = []
+
+        group_keys = sorted({
+            (event["camera_id"], event["plate"])
+            for event in realtime + segments
+            if event.get("timestamp") is not None
+        })
+        for camera_id, plate in group_keys:
+            stream_group = sorted(
+                (
+                    (index, event)
+                    for index, event in enumerate(realtime)
+                    if event["camera_id"] == camera_id
+                    and event["plate"] == plate
+                    and event.get("timestamp") is not None
+                ),
+                key=lambda pair: pair[1]["timestamp"],
+            )
+            segment_group = sorted(
+                (
+                    (index, event)
+                    for index, event in enumerate(segments)
+                    if event["camera_id"] == camera_id
+                    and event["plate"] == plate
+                    and event.get("timestamp") is not None
+                ),
+                key=lambda pair: pair[1]["timestamp"],
+            )
+
+            stream_index = 0
+            segment_index = 0
+            while stream_index < len(stream_group) and segment_index < len(segment_group):
+                rt_event = stream_group[stream_index][1]
+                seg_event = segment_group[segment_index][1]
+                delta = (seg_event["timestamp"] - rt_event["timestamp"]).total_seconds()
+
+                if delta < -window:
+                    segment_index += 1
+                    continue
+                if delta > window:
+                    stream_index += 1
+                    continue
+
+                duplicate_candidates.append({
+                    "plate": plate,
+                    "camera_id": rt_event["camera_id"],
+                    "realtime_id": rt_event.get("detection_id"),
+                    "realtime_time": rt_event["timestamp"].isoformat(sep=" "),
+                    "realtime_track_id": rt_event.get("track_id"),
+                    "segment_file": seg_event.get("segment"),
+                    "segment_time": seg_event["timestamp"].isoformat(sep=" "),
+                    "segment_track_id": seg_event.get("track_id"),
+                    "time_delta_seconds": round(abs(delta), 2),
+                    "overlap_type": "same_camera_plate_time_match",
+                    "merge_policy": "keep_realtime_in_prospective_result",
+                })
+                stream_index += 1
+                segment_index += 1
+
+        valid_realtime = sum(1 for event in raw_realtime if event.get("timestamp") is not None)
+        valid_segments = sum(1 for event in raw_segments if event.get("timestamp") is not None)
+        cross_path_duplicates = len(duplicate_candidates)
+        pass_counts = {}
+        for candidate in duplicate_candidates:
+            pass_key = (candidate["camera_id"], candidate["plate"])
+            pass_counts[pass_key] = pass_counts.get(pass_key, 0) + 1
+        repeated_pass_groups = sum(1 for count in pass_counts.values() if count >= 2)
+        same_source_duplicates = (
+            realtime_same_source_duplicates + segment_same_source_duplicates
+        )
+        return {
+            "duplicate_candidates": duplicate_candidates,
+            "cross_path_duplicates_count": cross_path_duplicates,
+            "within_source_duplicates_count": same_source_duplicates,
+            "events_before_deduplication": len(raw_realtime) + len(raw_segments),
+            "events_after_deduplication": (
+                len(raw_realtime) + len(raw_segments)
+                - cross_path_duplicates - same_source_duplicates
+            ),
+            "unmatched_events_without_timestamp": no_timestamp,
+            "timestamped_realtime_events": valid_realtime,
+            "timestamped_segment_events": valid_segments,
+            "repeated_pass_groups": repeated_pass_groups,
+        }
+
+    # ------------------------------------------------------------------
+    # SUPERVISOR & PENANGANAN PROSES FFMPEG
+    # ------------------------------------------------------------------
+
+    def _resolve_target_camera(self, specified_camera_id=None):
+        """Mencari kamera aktif yang akan direkam."""
+        cameras = db.get_all_cameras()
+
+        target_id = specified_camera_id
+        if target_id is None:
+            env_cam = os.environ.get("RECORD_CAMERA_ID")
+            if env_cam and env_cam.isdigit():
+                target_id = int(env_cam)
+
+        if target_id is not None:
+            for cam in cameras:
+                if cam.get("camera_id") == target_id:
+                    return cam
+
+        # Jika target_id belum ditentukan, pilih kamera aktif pertama (status == 1)
+        for cam in cameras:
+            if cam.get("status") == 1 and cam.get("stream_url"):
+                return cam
+
+        # Fallback ke kamera pertama
+        if cameras:
+            return cameras[0]
+
+        return None
+
+    def _run_supervisor(self, target_camera_id):
+        """Loop pengawas untuk menjaga proses FFmpeg tetap aktif dan merekam."""
+        retry_delay = 3.0
+
+        while self.is_running and not self.stop_event.is_set():
+            if not self.stream_url:
+                cam = self._resolve_target_camera(target_camera_id)
+                if not cam or not cam.get("stream_url"):
+                    self.status = "ERROR"
+                    self.last_error = "Tidak ada kamera aktif untuk direkam"
+                    print(f"[RECORDER] {self.last_error}. Menunggu 5 detik...")
+                    self.stop_event.wait(5.0)
+                    continue
+
+                self.camera_id = cam["camera_id"]
+                self.camera_name = cam.get("location") or f"Camera_{self.camera_id}"
+                self.stream_url = normalize_stream_url(cam["stream_url"])
+            else:
+                self.camera_id = target_camera_id or self.camera_id or 1
+                self.camera_name = self.camera_name or f"Camera_{self.camera_id}"
+
+            success = self._start_recording_session()
+            if not success:
+                self.stop_event.wait(retry_delay)
+                continue
+
+            # Awasi proses FFmpeg sampai selesai atau terhenti
+            while self.is_running and not self.stop_event.is_set():
+                with self.process_lock:
+                    if self.process is None or self.process.poll() is not None:
+                        break
+                time.sleep(1.0)
+
+            if self.is_running and not self.stop_event.is_set():
+                print(f"[RECORDER] FFmpeg terhenti tak terduga. Reconnect dalam {retry_delay}s...")
+                self.status = "CONNECTING"
+                self.stop_event.wait(retry_delay)
+
+    def _start_recording_session(self):
+        """Inisialisasi direktori, sesi, muat state tersimpan, dan jalankan FFmpeg."""
+        self._terminate_ffmpeg()
+
+        self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.camera_dir = os.path.join(self.segments_dir, f"cam_{self.camera_id}")
+        os.makedirs(self.camera_dir, exist_ok=True)
+
+        self.state_file = os.path.join(self.camera_dir, "segment_queue_state.json")
+        self._load_state()
+
+        self.list_file = os.path.join(self.camera_dir, f"segments_{self.session_id}.csv")
+        segment_pattern = os.path.join(
+            self.camera_dir,
+            f"cam_{self.camera_id}_{self.session_id}_%05d.mp4"
+        )
+
+        command = self._build_ffmpeg_command(self.stream_url, segment_pattern, self.list_file)
+
+        try:
+            print(f"[RECORDER] Menjalankan FFmpeg segmenter untuk Kamera {self.camera_id} ({self.camera_name})")
+            proc = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+            )
+
+            with self.process_lock:
+                self.process = proc
+                self.started_at = time.time()
+                self.status = "RECORDING"
+                self.is_running = True
+                self.last_error = None
+
+            self.stderr_thread = threading.Thread(
+                target=self._drain_stderr,
+                args=(proc,),
+                name=f"Recorder-stderr-cam{self.camera_id}",
+                daemon=True,
+            )
+            self.stderr_thread.start()
+
+            self.monitor_thread = threading.Thread(
+                target=self._monitor_segments,
+                args=(self.list_file, self.camera_dir),
+                name=f"Recorder-monitor-cam{self.camera_id}",
+                daemon=True,
+            )
+            self.monitor_thread.start()
+
+            time.sleep(0.5)
+            if proc.poll() is not None:
+                rc = proc.poll()
+                if rc != 0:
+                    self.status = "ERROR"
+                    self.last_error = f"FFmpeg langsung keluar dengan returncode {rc}"
+                    print(f"[RECORDER ERROR] {self.last_error}")
+                    return False
+
+            return True
+
+        except Exception as exc:
+            self.status = "ERROR"
+            self.last_error = str(exc)
+            print(f"[RECORDER ERROR] Gagal memulai FFmpeg: {exc}")
+            return False
+
+    def _build_ffmpeg_command(self, stream_url, output_pattern, list_file):
+        """Menyusun parameter FFmpeg segmentasi: stream copy, 10s, CSV index."""
+        cmd = [
+            self.ffmpeg_path,
+            "-hide_banner",
+            "-loglevel", "warning",
+            "-fflags", "+genpts",
+        ]
+
+        url_lower = stream_url.lower()
+        if url_lower.startswith(("http://", "https://", "rtmp://", "rtsp://")):
+            cmd.extend(["-rw_timeout", "10000000"])
+
+        if url_lower.startswith("rtsp://"):
+            cmd.extend(["-rtsp_transport", "tcp"])
+        elif url_lower.startswith("rtmp://"):
+            cmd.extend(["-rtmp_live", "live"])
+        elif url_lower.startswith(("http://", "https://")):
+            cmd.extend([
+                "-reconnect", "1",
+                "-reconnect_at_eof", "1",
+                "-reconnect_streamed", "1",
+                "-reconnect_delay_max", "2",
+            ])
+        else:
+            cmd.append("-re")
+
+        cmd.extend([
+            "-i", stream_url,
+            "-c:v", "copy",
+            "-an",
+            "-f", "segment",
+            "-segment_time", str(self.segment_duration),
+            "-reset_timestamps", "1",
+            "-segment_list", list_file,
+            "-segment_list_type", "csv",
+            output_pattern,
+        ])
+
+        return cmd
+
+    def _drain_stderr(self, proc):
+        """Menguras stderr FFmpeg secara asinkron."""
+        try:
+            if proc and proc.stderr:
+                for line in iter(proc.stderr.readline, b""):
+                    if not self.is_running or proc.poll() is not None:
+                        break
+        except Exception:
+            pass
+
+    def _terminate_ffmpeg(self):
+        """Mematikan proses FFmpeg yang sedang berjalan."""
+        with self.process_lock:
+            proc = self.process
+            self.process = None
+
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=2.0)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+    # ------------------------------------------------------------------
+    # MONITOR SEGMEN SELESAI & ENQUEUE
+    # ------------------------------------------------------------------
+
+    def _monitor_segments(self, list_file, camera_dir):
+        """
+        Memantau file CSV segment list FFmpeg.
+        Hanya entri yang tercatat di CSV dan tervalidasi yang diberi status 'pending'
+        dan dimasukkan ke antrean worker tunggal.
+        """
+        last_read_line = 0
+
+        while self.is_running and not self.stop_event.is_set():
+            if not os.path.isfile(list_file):
+                time.sleep(0.5)
+                continue
+
+            try:
+                with open(list_file, "r", encoding="utf-8", errors="ignore") as f:
+                    lines = f.readlines()
+
+                if len(lines) > last_read_line:
+                    new_lines = lines[last_read_line:]
+                    for line in new_lines:
+                        line = line.strip()
+                        if not line:
+                            continue
+
+                        parts = [p.strip() for p in line.split(",")]
+                        if len(parts) >= 3:
+                            filename = parts[0]
+                            start_time = float(parts[1])
+                            end_time = float(parts[2])
+
+                            if filename not in self._processed_segment_filenames:
+                                file_path = os.path.join(camera_dir, filename)
+
+                                if self._validate_segment_file(file_path):
+                                    self._processed_segment_filenames.add(filename)
+                                    segment_info = {
+                                        "camera_id": self.camera_id,
+                                        "camera_name": self.camera_name,
+                                        "filename": filename,
+                                        "file_path": file_path,
+                                        "start_time": start_time,
+                                        "end_time": end_time,
+                                        "duration": round(end_time - start_time, 2),
+                                        "size_bytes": os.path.getsize(file_path),
+                                        "status": "pending",
+                                        "recorded_at": datetime.now().isoformat(sep=" ", timespec="seconds"),
+                                        "completed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    }
+
+                                    with self._completed_segments_lock:
+                                        if filename not in self._segments_state:
+                                            self._segments_state[filename] = segment_info
+                                            self._completed_segments.append(segment_info)
+                                            self._save_state()
+
+                                            if self.auto_process_enabled:
+                                                self._enqueue_segment(segment_info)
+
+                                    print(
+                                        f"[RECORDER] Segmen selesai direkam: {filename} "
+                                        f"({segment_info['duration']}s, {segment_info['size_bytes']} bytes, status=pending)"
+                                    )
+
+                    last_read_line = len(lines)
+
+            except Exception as exc:
+                print(f"[RECORDER MONITOR ERROR] {exc}")
+
+            time.sleep(0.5)
+
+    def _validate_segment_file(self, file_path, max_wait_seconds=2.0):
+        """Memastikan file ada di disk dan ukuran > 1KB."""
+        deadline = time.time() + max_wait_seconds
+        while time.time() < deadline:
+            if os.path.isfile(file_path):
+                try:
+                    size = os.path.getsize(file_path)
+                    if size > 1024:
+                        return True
+                except OSError:
+                    pass
+            time.sleep(0.2)
+        return False
+
+    def _notify_completed(self, segment_info):
+        """Memanggil listener callback."""
+        for cb in self._callbacks:
+            try:
+                cb(segment_info)
+            except Exception as exc:
+                print(f"[RECORDER CALLBACK ERROR] {exc}")

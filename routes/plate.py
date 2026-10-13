@@ -1481,3 +1481,289 @@ def video_snapshot(camera_id):
             "success": False,
             "message": str(exc)
         }), 500
+
+
+# =====================================================================
+# ENDPOINT HYBRID RECORDER (SEGMENTASI VIDEO 10 DETIK)
+# =====================================================================
+
+@plate_bp.route("/recorder/status", methods=["GET"])
+def recorder_status():
+    """Mengambil status sistem perekaman segmen FFmpeg hybrid."""
+    try:
+        from services.camera_recorder_service import CameraRecorderService
+        svc = CameraRecorderService.get_instance()
+        return jsonify({"success": True, "data": svc.get_status()})
+    except Exception as exc:
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+@plate_bp.route("/recorder/segments", methods=["GET"])
+def recorder_segments():
+    """Mengambil daftar segmen video dengan opsi filter status: ?status=pending|processing|completed|failed."""
+    try:
+        status_filter = request.args.get("status")
+        from services.camera_recorder_service import CameraRecorderService
+        svc = CameraRecorderService.get_instance()
+        segments = svc.get_completed_segments(status=status_filter)
+        status_info = svc.get_status()
+        return jsonify({
+            "success": True,
+            "total": len(segments),
+            "status_filter": status_filter or "all",
+            "backlog": status_info.get("backlog"),
+            "data": segments
+        })
+    except Exception as exc:
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+@plate_bp.route("/recorder/start", methods=["POST"])
+def recorder_start():
+    """Memulai perekaman untuk kamera tertentu atau kamera aktif default."""
+    try:
+        data = request.get_json(silent=True) or {}
+        cam_id = data.get("camera_id")
+        from services.camera_recorder_service import CameraRecorderService
+        svc = CameraRecorderService.get_instance()
+        svc.start(camera_id=cam_id)
+        return jsonify({"success": True, "message": "Perekaman dimulai", "data": svc.get_status()})
+    except Exception as exc:
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+@plate_bp.route("/recorder/stop", methods=["POST"])
+def recorder_stop():
+    """Menghentikan perekaman segmen video."""
+    try:
+        from services.camera_recorder_service import CameraRecorderService
+        svc = CameraRecorderService.get_instance()
+        svc.stop()
+        return jsonify({"success": True, "message": "Perekaman dihentikan", "data": svc.get_status()})
+    except Exception as exc:
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+@plate_bp.route("/recorder/process_segment", methods=["POST"])
+def recorder_process_segment():
+    """Memproses SATU segmen yang sudah selesai direkam menggunakan VideoAIService (Tahap 2)."""
+    try:
+        data = request.get_json(silent=True) or {}
+        filename = data.get("filename")
+        save_annotated = bool(data.get("save_annotated", False))
+        from services.camera_recorder_service import CameraRecorderService
+        svc = CameraRecorderService.get_instance()
+        res = svc.process_single_segment(
+            segment_filename=filename,
+            save_annotated=save_annotated
+        )
+        status_code = 200 if res.get("success") else 400
+        return jsonify(res), status_code
+    except Exception as exc:
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+@plate_bp.route("/recorder/evaluate_duplicates", methods=["GET"])
+def recorder_evaluate_duplicates():
+    """Evaluasi deduplikasi prospektif (legacy, Tahap 4). Gunakan /api/dedup/evaluate untuk Tahap 5."""
+    try:
+        time_window = request.args.get("window", 45, type=int)
+        from services.camera_recorder_service import CameraRecorderService
+        svc = CameraRecorderService.get_instance()
+        eval_result = svc.evaluate_duplicates(time_window_seconds=time_window)
+        return jsonify({"success": True, "data": eval_result})
+    except Exception as exc:
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAHAP 5: DEDUPLICATION EVALUATION SERVICE
+# ─────────────────────────────────────────────────────────────────────────────
+
+@plate_bp.route("/dedup/evaluate", methods=["GET"])
+def dedup_evaluate():
+    """
+    [Tahap 5] Evaluasi duplikasi antarpipeline (realtime stream vs segmen video).
+
+    Query params:
+      - camera_id (int, optional): Filter ke satu kamera. Kosong = semua kamera.
+      - lookback  (int, default=600): Jendela waktu ke belakang dalam detik.
+
+    Response: Laporan lengkap duplikasi read-only (tidak ada mutasi database).
+    """
+    try:
+        camera_id = request.args.get("camera_id", None, type=int)
+        lookback = request.args.get("lookback", 600, type=int)
+        lookback = max(30, min(lookback, 86400))  # 30s – 24h
+
+        from services import dedup_service
+        report = dedup_service.evaluate(camera_id=camera_id, lookback_seconds=lookback)
+        return jsonify({"success": True, "data": report})
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+@plate_bp.route("/dedup/report", methods=["GET"])
+def dedup_report():
+    """
+    [Tahap 5] Laporan ringkas deduplikasi untuk ditampilkan di dashboard (tanpa mutasi DB).
+
+    Query params:
+      - camera_id (int, optional)
+      - lookback  (int, default=3600): Jendela 1 jam terakhir.
+    """
+    try:
+        camera_id = request.args.get("camera_id", None, type=int)
+        lookback = request.args.get("lookback", 3600, type=int)
+        lookback = max(30, min(lookback, 86400))
+
+        from services import dedup_service
+        report = dedup_service.evaluate(camera_id=camera_id, lookback_seconds=lookback)
+
+        # Ringkas untuk dashboard
+        summary = {
+            "timestamp": report["timestamp"],
+            "camera_id": report["camera_id"],
+            "lookback_seconds": report["lookback_seconds"],
+            "database_mutated": False,
+            "before_dedup_total": report["before_deduplication"]["total_plate_events"],
+            "after_dedup_total": report["after_deduplication"]["total_plate_events"],
+            "events_removed": report["after_deduplication"]["events_removed"],
+            "duplication_rate_percent": report["after_deduplication"]["duplication_rate_percent"],
+            "cross_path_duplicates": report["cross_path_duplicates"]["count"],
+            "intra_source_duplicates": report["intra_source_duplicates"]["count"],
+            "repeat_passes": report["repeat_passes"]["count"],
+            "data_loss_risk_level": report["data_loss_risk"]["risk_level"],
+            "sample_adequate": report["analysis"]["sample_adequate"],
+            "recommended_action": report["analysis"]["recommended_action"],
+            "cross_path_lag_seconds": report["analysis"]["cross_path_lag_observed_seconds"],
+            "cross_path_samples": report["cross_path_duplicates"]["samples"][:5],
+            "intra_source_samples": report["intra_source_duplicates"]["samples"][:5],
+            "repeat_pass_groups": report["repeat_passes"]["groups"][:5],
+        }
+        return jsonify({"success": True, "data": summary})
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAHAP 6: DEDUP DRY-RUN VALIDATION
+# ─────────────────────────────────────────────────────────────────────────────
+
+@plate_bp.route("/dedup/dry_run", methods=["GET"])
+def dedup_dry_run():
+    """
+    [Tahap 6] Dry-run deduplikasi: jalankan aturan pada data riil DB + skenario
+    terkontrol dan kembalikan verdict KEPT/HELD per event.
+
+    Tidak mengubah database. Tidak mengaktifkan filtering INSERT.
+
+    Query params:
+      - camera_id (int, optional)
+      - lookback  (int, default=86400): Jendela waktu dalam detik.
+    """
+    try:
+        camera_id = request.args.get("camera_id", None, type=int)
+        lookback  = request.args.get("lookback", 86400, type=int)
+        lookback  = max(30, min(lookback, 86400))
+
+        from services import dedup_dryrun
+        report = dedup_dryrun.run_dry_run(
+            camera_id=camera_id,
+            lookback_seconds=lookback,
+        )
+        return jsonify({"success": True, "data": report})
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+@plate_bp.route("/dedup/scenarios", methods=["GET"])
+def dedup_scenarios():
+    """
+    [Tahap 6] Jalankan hanya skenario terkontrol (A–I) tanpa query DB.
+    Berguna untuk memverifikasi logika aturan deduplikasi secara cepat.
+    """
+    try:
+        from services import dedup_dryrun
+        scenarios = dedup_dryrun.run_controlled_scenarios()
+        passed = sum(1 for s in scenarios if s["passed"])
+        return jsonify({
+            "success": True,
+            "data": {
+                "total_scenarios": len(scenarios),
+                "passed": passed,
+                "failed": len(scenarios) - passed,
+                "all_passed": passed == len(scenarios),
+                "results": scenarios,
+            },
+        })
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAHAP 8: SHADOW DEDUPLICATION SERVICE LAYER INTEGRATION
+# ─────────────────────────────────────────────────────────────────────────────
+
+@plate_bp.route("/dedup/shadow/summary", methods=["GET"])
+def dedup_shadow_summary():
+    """
+    [Tahap 8] Ambil ringkasan audit log shadow deduplication service.
+    Menampilkan keputusan KEEP/HOLD tanpa pembatalan INSERT aktual.
+    """
+    try:
+        from services.shadow_dedup_service import ShadowDedupService
+        svc = ShadowDedupService.get_instance()
+        return jsonify({"success": True, "data": svc.get_audit_summary()})
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+@plate_bp.route("/dedup/shadow/evaluate", methods=["POST"])
+def dedup_shadow_evaluate():
+    """
+    [Tahap 8] Evaluasi kandidat deteksi jalur video segmen dalam mode shadow.
+    Mencatat keputusan KEEP atau HOLD beserta alasan tanpa membatalkan INSERT.
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        camera_id = data.get("camera_id", 1)
+        plate_number = data.get("plate_number")
+        timestamp = data.get("timestamp")
+        source_type = data.get("source_type", "video")
+        object_type = data.get("object_type", "vehicle")
+        vehicle_type = data.get("vehicle_type", "unknown")
+        event_key = data.get("event_key")
+        track_id = data.get("track_id")
+        source_name = data.get("source_name", "Segment Video")
+
+        from services.shadow_dedup_service import ShadowDedupService
+        svc = ShadowDedupService.get_instance()
+        result = svc.evaluate_candidate(
+            camera_id=int(camera_id),
+            plate_number=plate_number,
+            timestamp=timestamp,
+            source_type=source_type,
+            object_type=object_type,
+            vehicle_type=vehicle_type,
+            event_key=event_key,
+            track_id=track_id,
+            source_name=source_name,
+        )
+        return jsonify({"success": True, "data": result})
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
