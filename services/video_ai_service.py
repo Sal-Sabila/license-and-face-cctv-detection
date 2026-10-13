@@ -17,9 +17,11 @@ Default input:
 """
 
 import os
+import queue
 import re
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -85,17 +87,22 @@ CAMERA_NAME = "Video CCTV"
 VEHICLE_CLASSES = [0, 2, 3, 5, 7]
 VEHICLE_CONFIDENCE = 0.35
 VEHICLE_IMGSZ = 480
+VEHICLE_MAX_DET = 500
 
 PLATE_CONFIDENCE = 0.25
 PLATE_IMGSZ = 512
-PLATE_MAX_DET = 5
+PLATE_MAX_DET = 40
 PLATE_IOU = 0.45
 PLATE_MIN_WIDTH = 12
 PLATE_MIN_HEIGHT = 4
+PLATE_VEHICLE_MIN_WIDTH = 30
+PLATE_VEHICLE_MIN_HEIGHT = 20
 
 # Video offline: AI berbasis frame, bukan wall-clock.
 # AI memproses tiap frame ketiga, sekitar 8 AI FPS pada video 25 FPS.
 PROCESS_EVERY_N_FRAMES = 3
+VIDEO_AI_QUEUE_SIZE = 1
+VIDEO_TIMING_LOG_EVERY = 10
 
 # PlateTracker OCR setiap 2 match agar voting mempunyai beberapa sampel.
 PLATE_TRACKER_IOU = 0.35
@@ -106,9 +113,11 @@ PLATE_TRACKER_MAX_HISTORY = 5
 
 PLATE_REVIEW_CONFIDENCE = 0.65
 PERSON_CAPTURE_CONFIDENCE = 0.40
-PERSON_CAPTURE_COOLDOWN = 30.0
+VIDEO_EVENT_TRACK_MATCH_IOU = 0.70
+VIDEO_EVENT_TRACK_MATCH_GAP = 1.5
+VIDEO_EVENT_TRACK_REUSE_GAP = 8.0
 
-MAX_PLATE_ROIS_PER_CYCLE = 3
+MAX_PLATE_ROIS_PER_CYCLE = 6
 MAX_PLATES_PER_CYCLE = 5
 
 
@@ -483,12 +492,14 @@ class VideoAIService:
         camera_id=CAMERA_ID,
         show_window=True,
         progress_callback=None,
+        source_name=None,
     ):
         self.video_path = video_path
         self.output_path = output_path
         self.camera_id = camera_id
         self.show_window = show_window
         self.progress_callback = progress_callback
+        self.source_name = str(source_name or "Video offline").strip()[:255]
 
         self.session_id = uuid.uuid4().hex[:12]
         self.track_lifecycle = {}
@@ -499,6 +510,7 @@ class VideoAIService:
         self.last_plate_history = []
         self.person_capture_count = 0
         self.plate_capture_count = 0
+        self.plate_roi_cursor = 0
 
         # Status pencahayaan terbaru untuk overlay/panel.
         self.lighting = {
@@ -530,8 +542,14 @@ class VideoAIService:
         self.plate_ocr = None
         self.person_tracker = None
         self.plate_tracker = None
-
-        self._load_models()
+        self.results_lock = threading.Lock()
+        self.inference_count = 0
+        self.inference_timing_totals = {}
+        self.zone_classifier = None
+        self.zone_points_provider = None
+        self.zone_to_pixels = None
+        self.video_event_groups = {"vehicle": [], "person": []}
+        self.video_track_event_groups = {}
 
     def _get_track_generation(self, track_id, video_time):
         try:
@@ -1132,6 +1150,8 @@ class VideoAIService:
                 classes=VEHICLE_CLASSES,
                 imgsz=VEHICLE_IMGSZ,
                 conf=VEHICLE_CONFIDENCE,
+                max_det=VEHICLE_MAX_DET,
+                device="cpu",
                 verbose=False,
             )[0]
 
@@ -1139,11 +1159,35 @@ class VideoAIService:
             if boxes is None or len(boxes) == 0:
                 raw = sv.Detections.empty()
             else:
-                raw = sv.Detections.from_ultralytics(result)
+                keep_indices = []
+                for index, box in enumerate(boxes.xyxy):
+                    bbox = box.cpu().numpy().astype(int).tolist()
+                    zone = (
+                        self.zone_classifier(
+                            bbox, self.camera_id, frame.shape[1], frame.shape[0]
+                        )
+                        if self.zone_classifier
+                        else "MID"
+                    )
+                    if zone != "FAR":
+                        keep_indices.append(index)
+                filtered_result = result[keep_indices] if keep_indices else None
+                raw = (
+                    sv.Detections.from_ultralytics(filtered_result)
+                    if filtered_result is not None
+                    else sv.Detections.empty()
+                )
             tracked = self.person_tracker.update_with_detections(raw)
 
             for i in range(len(tracked)):
                 bbox = tracked.xyxy[i].astype(int).tolist()
+                zone = (
+                    self.zone_classifier(bbox, self.camera_id, frame.shape[1], frame.shape[0])
+                    if self.zone_classifier
+                    else "MID"
+                )
+                if zone == "FAR":
+                    continue
                 cls_id = (
                     int(tracked.class_id[i])
                     if tracked.class_id is not None
@@ -1165,6 +1209,7 @@ class VideoAIService:
                     "track_id": track_id,
                     "conf": conf,
                     "cls": cls_id,
+                    "distance_zone": zone,
                     "object_type": "vehicle" if cls_id in (2, 3, 5, 7) else "person",
                     "vehicle_type": {2: "car", 3: "motorcycle", 5: "bus", 7: "truck"}.get(cls_id, "unknown"),
                 })
@@ -1183,12 +1228,14 @@ class VideoAIService:
                 continue
 
             track_id = int(item.get("track_id", -1))
+            event_track_id = int(item.get("_event_track_id", track_id))
+            generation = int(item.get("_event_generation", 1))
             conf = safe_float(item.get("conf", 0.0))
-            if track_id < 0 or conf < PERSON_CAPTURE_CONFIDENCE:
+            if event_track_id < 0 or conf < PERSON_CAPTURE_CONFIDENCE:
                 continue
 
-            last = self.person_capture_state.get(track_id)
-            if last is not None and video_time - last < PERSON_CAPTURE_COOLDOWN:
+            event_key = self._build_event_key("person", event_track_id, generation)
+            if event_key in self.person_capture_state:
                 continue
 
             x1, y1, x2, y2 = [int(v) for v in item["box"]]
@@ -1211,20 +1258,17 @@ class VideoAIService:
             if not path or crop.size == 0:
                 continue
 
-            self.person_capture_state[track_id] = video_time
             self.person_capture_count += 1
 
-            generation = self._get_track_generation(track_id, video_time)
             crossing_direction = line_crossing.default_tracker.update(
                 camera_id=self.camera_id,
-                track_id=track_id,
+                track_id=event_track_id,
                 generation=generation,
                 bbox=item["box"],
                 frame_width=w,
                 frame_height=h,
                 camera_direction=db.get_camera_direction(self.camera_id),
             )
-            event_key = self._build_event_key("person", track_id, generation)
             previous_meta = self.person_capture_state.get(f"{event_key}:meta")
             direction_final = (
                 crossing_direction
@@ -1241,11 +1285,14 @@ class VideoAIService:
                     plate_crop=None,
                     face_crop=crop,
                     face_conf=conf,
-                    track_id=track_id,
+                    track_id=event_track_id,
                     object_type="person",
                     direction=direction_final,
                     event_key=event_key,
+                    source_type="video",
+                    source_name=self.source_name,
                 )
+                self.person_capture_state[event_key] = video_time
             except Exception as exc:
                 print(f"[DB PERSON ERROR] {exc}")
 
@@ -1264,6 +1311,95 @@ class VideoAIService:
         area = max(1, (inner_box[2] - inner_box[0]) * (inner_box[3] - inner_box[1]))
         return intersection / area
 
+    @staticmethod
+    def _bbox_iou(box_a, box_b):
+        intersection_width = max(0, min(box_a[2], box_b[2]) - max(box_a[0], box_b[0]))
+        intersection_height = max(0, min(box_a[3], box_b[3]) - max(box_a[1], box_b[1]))
+        intersection = intersection_width * intersection_height
+        area_a = max(0, box_a[2] - box_a[0]) * max(0, box_a[3] - box_a[1])
+        area_b = max(0, box_b[2] - box_b[0]) * max(0, box_b[3] - box_b[1])
+        union = area_a + area_b - intersection
+        return intersection / union if union > 0 else 0.0
+
+    def _update_video_event_identities(self, detections, video_time, frame_number):
+        active_ids = {"vehicle": set(), "person": set()}
+        for item in detections:
+            track_id = int(item.get("track_id", -1))
+            object_type = item.get("object_type")
+            if track_id >= 0 and object_type in active_ids:
+                active_ids[object_type].add(track_id)
+
+        for item in detections:
+            track_id = int(item.get("track_id", -1))
+            object_type = item.get("object_type")
+            if track_id < 0 or object_type not in self.video_event_groups:
+                continue
+
+            key = (object_type, track_id)
+            groups = self.video_event_groups[object_type]
+            group = self.video_track_event_groups.get(key)
+            if group and video_time - group["last_seen"] > VIDEO_EVENT_TRACK_REUSE_GAP:
+                self.video_track_event_groups.pop(key, None)
+                group = None
+
+            if group is None:
+                candidates = [
+                    candidate for candidate in groups
+                    if (
+                        video_time - candidate["last_seen"] <= VIDEO_EVENT_TRACK_MATCH_GAP
+                        and candidate["last_frame"] != frame_number
+                        and candidate["last_track_id"] not in active_ids[object_type]
+                        and candidate["class_id"] == int(item.get("cls", -1))
+                    )
+                ]
+                if candidates:
+                    best = max(
+                        candidates,
+                        key=lambda candidate: self._bbox_iou(
+                            item["box"], candidate["last_bbox"]
+                        ),
+                    )
+                    if self._bbox_iou(item["box"], best["last_bbox"]) >= VIDEO_EVENT_TRACK_MATCH_IOU:
+                        group = best
+                        self.video_track_event_groups[key] = group
+
+            if group is None:
+                group = {
+                    "event_track_id": track_id,
+                    "generation": self._get_track_generation(track_id, video_time),
+                    "last_track_id": track_id,
+                    "last_seen": video_time,
+                    "last_frame": frame_number,
+                    "last_bbox": list(item["box"]),
+                    "class_id": int(item.get("cls", -1)),
+                }
+                groups.append(group)
+                self.video_track_event_groups[key] = group
+            else:
+                group.update({
+                    "last_track_id": track_id,
+                    "last_seen": video_time,
+                    "last_frame": frame_number,
+                    "last_bbox": list(item["box"]),
+                })
+
+            item["_event_track_id"] = group["event_track_id"]
+            item["_event_generation"] = group["generation"]
+
+        for object_type, groups in self.video_event_groups.items():
+            expired = [
+                group for group in groups
+                if video_time - group["last_seen"] > VIDEO_EVENT_TRACK_REUSE_GAP * 4
+            ]
+            if expired:
+                expired_group_ids = {id(group) for group in expired}
+                self.video_event_groups[object_type] = [
+                    group for group in groups if id(group) not in expired_group_ids
+                ]
+                for key, group in list(self.video_track_event_groups.items()):
+                    if id(group) in expired_group_ids:
+                        self.video_track_event_groups.pop(key, None)
+
     def _save_vehicle_events(self, frame, detections, video_time):
         camera_orientation = db.get_camera_direction(self.camera_id)
         h_frame, w_frame = frame.shape[:2]
@@ -1272,13 +1408,14 @@ class VideoAIService:
             if item.get("cls") not in (2, 3, 5, 7):
                 continue
             track_id = int(item.get("track_id", -1))
-            if track_id < 0:
+            event_track_id = int(item.get("_event_track_id", track_id))
+            generation = int(item.get("_event_generation", 1))
+            if track_id < 0 or event_track_id < 0:
                 continue
 
-            generation = self._get_track_generation(track_id, video_time)
             crossing_direction = line_crossing.default_tracker.update(
                 camera_id=self.camera_id,
-                track_id=track_id,
+                track_id=event_track_id,
                 generation=generation,
                 bbox=item["box"],
                 frame_width=w_frame,
@@ -1286,7 +1423,7 @@ class VideoAIService:
                 camera_direction=camera_orientation,
             )
 
-            event_key = self._build_event_key("vehicle", track_id, generation)
+            event_key = self._build_event_key("vehicle", event_track_id, generation)
             meta_key = f"{event_key}:meta"
             previous_meta = self.person_capture_state.get(meta_key) or {}
             previous_direction = previous_meta.get("direction", "unknown")
@@ -1314,13 +1451,15 @@ class VideoAIService:
             try:
                 db.save_detection_event(
                     camera_id=self.camera_id,
-                    track_id=track_id,
+                    track_id=event_track_id,
                     object_type="vehicle",
                     vehicle_type=item.get("vehicle_type", "unknown"),
                     vehicle_confidence=safe_float(item.get("conf", 0.0)),
                     vehicle_crop=crop,
                     direction=direction_final,
                     event_key=event_key,
+                    source_type="video",
+                    source_name=self.source_name,
                 )
             except Exception as exc:
                 print(f"[DB VEHICLE ERROR] {exc}")
@@ -1335,17 +1474,30 @@ class VideoAIService:
             item for item in vehicle_dets
             if item.get("cls") in (2, 3, 5, 7)
         ]
-        vehicles.sort(
-            key=lambda item: (
-                max(1, item["box"][2] - item["box"][0])
-                * max(1, item["box"][3] - item["box"][1])
-            ),
-            reverse=True,
-        )
+
+        def _vehicle_order(item):
+            try:
+                track_id = int(item.get("_event_track_id", item.get("track_id", -1)))
+            except (TypeError, ValueError):
+                track_id = -1
+            return (
+                track_id if track_id >= 0 else 2**31,
+                int(item["box"][1]),
+                int(item["box"][0]),
+            )
+
+        vehicles.sort(key=_vehicle_order)
 
         results = []
 
-        for vehicle in vehicles[:MAX_PLATE_ROIS_PER_CYCLE]:
+        if vehicles:
+            start = self.plate_roi_cursor % len(vehicles)
+            roi_count = min(MAX_PLATE_ROIS_PER_CYCLE, len(vehicles))
+            self.plate_roi_cursor = (start + roi_count) % len(vehicles)
+            vehicles = vehicles[start:] + vehicles[:start]
+            vehicles = vehicles[:roi_count]
+
+        for vehicle in vehicles:
             vx1, vy1, vx2, vy2 = [int(v) for v in vehicle["box"]]
             vx1 = max(0, min(vx1, w - 1))
             vy1 = max(0, min(vy1, h - 1))
@@ -1354,7 +1506,10 @@ class VideoAIService:
 
             if vx2 <= vx1 or vy2 <= vy1:
                 continue
-            if vx2 - vx1 < 50 or vy2 - vy1 < 40:
+            if (
+                vx2 - vx1 < PLATE_VEHICLE_MIN_WIDTH
+                or vy2 - vy1 < PLATE_VEHICLE_MIN_HEIGHT
+            ):
                 continue
 
             vw = vx2 - vx1
@@ -1426,12 +1581,17 @@ class VideoAIService:
                 item["bbox"] = [bx1, by1, bx2, by2]
                 item["crop"] = crop
                 item["vehicle_cls"] = vehicle.get("cls", 0)
-                item["vehicle_track_id"] = vehicle.get("track_id", -1)
+                item["vehicle_track_id"] = vehicle.get(
+                    "_event_track_id", vehicle.get("track_id", -1)
+                )
                 item["vehicle_box"] = [vx1, vy1, vx2, vy2]
                 item["vehicle_crop"] = vehicle_crop
-                item["vehicle_generation"] = self._get_track_generation(
-                    vehicle.get("track_id", -1), video_time
-                )
+                vehicle_generation = vehicle.get("_event_generation")
+                if vehicle_generation is None:
+                    vehicle_generation = self._get_track_generation(
+                        vehicle.get("track_id", -1), video_time
+                    )
+                item["vehicle_generation"] = vehicle_generation
                 results.append(item)
 
         # Deduplikasi center.
@@ -1459,6 +1619,46 @@ class VideoAIService:
                 final.append(candidate)
 
         return final
+
+    def _build_plate_display(self, detections, active_tracks):
+        """Keep raw YOLO boxes visible while OCR tracking is still collecting reads."""
+        plate_display = []
+        for track in active_tracks:
+            item = self._track_to_display(track)
+            if item is not None:
+                plate_display.append(item)
+
+        for detection in detections:
+            bbox = detection.get("bbox") or detection.get("box")
+            if not bbox or len(bbox) != 4:
+                continue
+            if any(
+                self._bbox_iou(bbox, item.get("bbox") or item.get("box")) >= 0.30
+                for item in plate_display
+                if item.get("bbox") or item.get("box")
+            ):
+                continue
+
+            confidence = safe_float(
+                detection.get("confidence", detection.get("conf", 0.0))
+            )
+            plate_display.append({
+                **detection,
+                "box": bbox,
+                "bbox": bbox,
+                "track_id": int(detection.get("vehicle_track_id", -1)),
+                "conf": confidence,
+                "detection_confidence": confidence,
+                "text": "",
+                "formatted": "",
+                "raw_text": "",
+                "ocr_conf": 0.0,
+                "valid": False,
+                "votes": 0,
+                "total_reads": 0,
+                "status": "detected_waiting_for_ocr",
+            })
+        return plate_display
 
     # ------------------------------------------------------------
     # PLATE RESULT
@@ -1552,7 +1752,21 @@ class VideoAIService:
                 bbox,
                 vehicle_dets,
             )
-            vehicle_track_id = found_vid if found_vid is not None else track_id
+            found_vehicle = next(
+                (
+                    vehicle for vehicle in vehicle_dets
+                    if vehicle.get("track_id") == found_vid
+                ),
+                None,
+            )
+            vehicle_track_id = (
+                found_vehicle.get("_event_track_id", found_vid)
+                if found_vehicle else (found_vid if found_vid is not None else track_id)
+            )
+            vehicle_generation = (
+                found_vehicle.get("_event_generation", 1)
+                if found_vehicle else 1
+            )
         else:
             vehicle_score = 0.8
             vehicle_crop = finished.get("vehicle_crop")
@@ -1565,7 +1779,15 @@ class VideoAIService:
 
         vehicle_generation = finished.get("vehicle_generation")
         if vehicle_generation is None:
-            vehicle_generation = self.track_lifecycle.get(vehicle_track_id, {}).get("generation", 1)
+            vehicle_generation = next(
+                (
+                    vehicle.get("_event_generation", 1)
+                    for vehicle in vehicle_dets
+                    if vehicle.get("_event_track_id", vehicle.get("track_id"))
+                    == vehicle_track_id
+                ),
+                self.track_lifecycle.get(vehicle_track_id, {}).get("generation", 1),
+            )
 
         # Event plat SELALU terhubung ke event kendaraan yang sama
         # (event_key sama dengan yang dipakai _save_vehicle_events),
@@ -1589,6 +1811,8 @@ class VideoAIService:
                 vehicle_crop=vehicle_crop,
                 direction=direction,
                 event_key=event_key,
+                source_type="video",
+                source_name=self.source_name,
             )
         except Exception as exc:
             print(f"[DB PLATE ERROR] {exc}")
@@ -1623,69 +1847,98 @@ class VideoAIService:
     # PROCESS FRAME
     # ------------------------------------------------------------
 
-    def process_frame(self, frame, video_time, frame_number):
+    def process_frame(
+        self,
+        frame,
+        video_time,
+        frame_number,
+        *,
+        render=True,
+        queue_wait_ms=0.0,
+    ):
         if frame is None or frame.size == 0:
             return frame
-
-        # AI hanya pada frame yang dipilih.
         if frame_number % PROCESS_EVERY_N_FRAMES != 1 and frame_number != 1:
-            return self._render(frame)
+            return self._render(frame) if render else None
+
+        timings = {}
+        total_start = time.perf_counter()
+        stage_start = total_start
 
         # Analisis cahaya dilakukan dari frame asli. Enhancement hanya untuk
         # jalur AI agar YOLO/PlateDetector/OCR mendapatkan frame yang lebih
         # mudah dibaca. Tampilan utama tetap frame asli + overlay.
         ai_frame = self._prepare_ai_frame(frame)
+        timings["prepare"] = time.perf_counter() - stage_start
 
+        stage_start = time.perf_counter()
         person_dets = self._detect_person_vehicle(ai_frame)
+        timings["vehicle_yolo_tracker"] = time.perf_counter() - stage_start
+
+        self._update_video_event_identities(
+            person_dets,
+            video_time,
+            frame_number,
+        )
 
         # Tahap 1: pilih kendaraan utama setelah YOLO + ByteTrack.
+        stage_start = time.perf_counter()
         self._update_vehicle_focus(ai_frame, person_dets, frame_number)
         target_bbox = self._get_focus_bbox(ai_frame)
         self.lighting = self._analyze_lighting_bbox(ai_frame, target_bbox)
         self.lighting["target_type"] = self.focus_target_type
+        timings["focus_lighting"] = time.perf_counter() - stage_start
 
+        stage_start = time.perf_counter()
         self._save_vehicle_events(ai_frame, person_dets, video_time)
         self._save_person_events(ai_frame, person_dets, video_time)
+        timings["event_capture_db"] = time.perf_counter() - stage_start
 
         plate_display = []
 
-        if self.plate_ocr is not None:
+        if self.plate_detector is not None:
+            stage_start = time.perf_counter()
+            detections = []
             try:
                 detections = self._detect_plates_in_vehicles(
                     ai_frame,
                     person_dets,
                     video_time,
                 )
+                timings["plate_detection"] = time.perf_counter() - stage_start
+                plate_display = self._build_plate_display(detections, [])
 
                 # Tahap 2: jika plat milik target kendaraan ditemukan,
                 # pindahkan focus + beam ke plat tersebut.
+            except Exception as exc:
+                print(f"[PLATE DETECTION ERROR] {exc}")
+
+            if self.plate_ocr is not None and self.plate_tracker is not None and detections:
+                stage_start = time.perf_counter()
                 self._update_plate_focus(ai_frame, detections, frame_number)
                 target_bbox = self._get_focus_bbox(ai_frame)
                 self.lighting = self._analyze_lighting_bbox(ai_frame, target_bbox)
                 self.lighting["target_type"] = self.focus_target_type
-
-                active_tracks = self.plate_tracker.update(
-                    detections,
-                    ai_frame,
-                    self.plate_ocr,
-                )
-
-                for track in active_tracks:
-                    item = self._track_to_display(track)
-                    if item is not None:
-                        plate_display.append(item)
-
-                for finished in self.plate_tracker.consume_finished_captures():
-                    self._save_finished_capture(
-                        finished,
-                        frame,
-                        person_dets,
-                        video_time,
+                try:
+                    active_tracks = self.plate_tracker.update(
+                        detections,
+                        ai_frame,
+                        self.plate_ocr,
                     )
+                    plate_display = self._build_plate_display(detections, active_tracks)
 
-            except Exception as exc:
-                print(f"[PLATE PIPELINE ERROR] {exc}")
+                    for finished in self.plate_tracker.consume_finished_captures():
+                        self._save_finished_capture(
+                            finished,
+                            frame,
+                            person_dets,
+                            video_time,
+                        )
+                except Exception as exc:
+                    print(f"[PLATE OCR/TRACKER ERROR] {exc}")
+                timings["plate_tracking_ocr"] = time.perf_counter() - stage_start
 
+        stage_start = time.perf_counter()
         if (
             not plate_display
             and self.last_results.get("plates")
@@ -1695,12 +1948,32 @@ class VideoAIService:
         elif plate_display:
             self.last_plate_result_frame = frame_number
 
-        self.last_results = {
-            "persons": person_dets,
-            "plates": plate_display,
-        }
+        with self.results_lock:
+            self.last_results = {
+                "persons": person_dets,
+                "plates": plate_display,
+            }
+        timings["result_update"] = time.perf_counter() - stage_start
+        timings["total"] = time.perf_counter() - total_start
 
-        return self._render(frame)
+        self.inference_count += 1
+        for name, duration in timings.items():
+            self.inference_timing_totals[name] = (
+                self.inference_timing_totals.get(name, 0.0) + duration
+            )
+        if self.inference_count % VIDEO_TIMING_LOG_EVERY == 0:
+            timings_ms = " ".join(
+                f"{name}={duration * 1000:.0f}ms"
+                for name, duration in timings.items()
+            )
+            print(
+                f"[VIDEO TIMING] frame={frame_number} "
+                f"queue_wait={queue_wait_ms:.0f}ms "
+                f"{timings_ms} "
+                f"inference_total={(time.perf_counter() - total_start) * 1000:.0f}ms"
+            )
+
+        return self._render(frame) if render else None
 
     # ------------------------------------------------------------
     # FLUSH ACTIVE TRACKS AT EOF
@@ -1796,6 +2069,9 @@ class VideoAIService:
                 color = (0, 230, 118)
             elif text:
                 label = f"Review {text} {conf:.0%}"
+                color = (0, 215, 255)
+            elif p.get("status") == "detected_waiting_for_ocr":
+                label = f"Plat ditemukan YOLO:{yolo_conf:.0%} | OCR menunggu"
                 color = (0, 215, 255)
             else:
                 label = f"Plat YOLO:{yolo_conf:.0%}"
@@ -2006,9 +2282,52 @@ class VideoAIService:
 
     def _render(self, frame):
         output = frame.copy()
-        self._draw_person_vehicle(output)
-        self._draw_plates(output)
+        if self.zone_points_provider and self.zone_to_pixels:
+            overlay = output.copy()
+            for zone_name, color in (
+                ("mid", (235, 145, 35)),
+                ("near", (60, 190, 70)),
+            ):
+                points = self.zone_points_provider(self.camera_id, zone_name)
+                polygon = self.zone_to_pixels(points, output.shape[1], output.shape[0])
+                polygon = np.asarray(polygon, dtype=np.int32)
+                if polygon.ndim != 2 or polygon.shape[0] < 3:
+                    continue
+                polygon = polygon.reshape((-1, 1, 2))
+                cv2.fillPoly(overlay, [polygon], color)
+                cv2.polylines(output, [polygon], True, color, 2, cv2.LINE_AA)
+                label_x = max(5, int(polygon[0][0][0]))
+                label_y = max(20, int(polygon[0][0][1]))
+                cv2.putText(
+                    output,
+                    f"ZONE {zone_name.upper()}",
+                    (label_x, label_y),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    color,
+                    2,
+                    cv2.LINE_AA,
+                )
+            cv2.addWeighted(overlay, 0.06, output, 0.94, 0, output)
+        with self.results_lock:
+            self._draw_person_vehicle(output)
+            self._draw_plates(output)
         return self._resize_tile(output)
+
+    @staticmethod
+    def _log_frame_stage_timings(frame_number, start_time, totals, frame_count):
+        elapsed = max(time.perf_counter() - start_time, 1e-9)
+        timings_ms = " ".join(
+            f"{name}={duration * 1000.0 / frame_count:.1f}ms/frame"
+            for name, duration in totals.items()
+        )
+        print(
+            f"[VIDEO FRAME TIMING] frame={frame_number} "
+            f"fps={frame_number / elapsed:.1f} "
+            f"{timings_ms}"
+        )
+        for name in totals:
+            totals[name] = 0.0
 
     # ------------------------------------------------------------
     # RUN
@@ -2044,22 +2363,70 @@ class VideoAIService:
         print(f"[VIDEO] Frames     : {grabber.frame_count}")
 
         tracker_fps = max(1, int(round(grabber.fps / PROCESS_EVERY_N_FRAMES)))
-        self.person_tracker = sv.ByteTrack(
-            track_activation_threshold=0.35,
-            lost_track_buffer=max(30, int(round(tracker_fps * 3))),
-            minimum_matching_threshold=0.7,
-            frame_rate=tracker_fps,
-        )
+        inference_queue = queue.Queue(maxsize=VIDEO_AI_QUEUE_SIZE)
+        inference_stop = object()
+        inference_error = []
+        inference_stats = {"dropped_frames": 0}
 
-        self.plate_tracker = PlateTracker(
-            iou_threshold=PLATE_TRACKER_IOU,
-            max_frame_gap=PLATE_TRACKER_FRAME_GAP,
-            ocr_every_n_matches=PLATE_TRACKER_OCR_EVERY,
-            min_final_confidence=PLATE_TRACKER_MIN_CONFIDENCE,
-            min_consistent_reads=2,
-            single_read_ocr_confidence=0.72,
-            single_read_detection_confidence=0.55,
-            max_history=PLATE_TRACKER_MAX_HISTORY,
+        def run_inference():
+            model_load_start = time.perf_counter()
+            try:
+                from services.stream_ai_service import (
+                    _camera_zone_points,
+                    _get_distance_zone,
+                    _normalized_polygon_to_pixels,
+                    load_all_zones_from_db,
+                )
+
+                load_all_zones_from_db()
+                self.zone_classifier = _get_distance_zone
+                self.zone_points_provider = _camera_zone_points
+                self.zone_to_pixels = _normalized_polygon_to_pixels
+                self._load_models()
+                self.person_tracker = sv.ByteTrack(
+                    track_activation_threshold=0.35,
+                    lost_track_buffer=max(30, int(round(tracker_fps * 3))),
+                    minimum_matching_threshold=0.7,
+                    frame_rate=tracker_fps,
+                )
+                self.plate_tracker = PlateTracker(
+                    iou_threshold=PLATE_TRACKER_IOU,
+                    max_frame_gap=PLATE_TRACKER_FRAME_GAP,
+                    ocr_every_n_matches=PLATE_TRACKER_OCR_EVERY,
+                    min_final_confidence=PLATE_TRACKER_MIN_CONFIDENCE,
+                    min_consistent_reads=2,
+                    single_read_ocr_confidence=0.72,
+                    single_read_detection_confidence=0.55,
+                    max_history=PLATE_TRACKER_MAX_HISTORY,
+                    min_ocr_width=18,
+                    min_ocr_height=6,
+                )
+                print(
+                    f"[VIDEO TIMING] model_load="
+                    f"{time.perf_counter() - model_load_start:.2f}s"
+                )
+
+                while True:
+                    item = inference_queue.get()
+                    if item is inference_stop:
+                        break
+                    frame, video_time, frame_number, queued_at = item
+                    queue_wait_ms = (time.perf_counter() - queued_at) * 1000.0
+                    self.process_frame(
+                        frame,
+                        video_time,
+                        frame_number,
+                        render=False,
+                        queue_wait_ms=queue_wait_ms,
+                    )
+            except Exception as exc:
+                inference_error.append(exc)
+                print(f"[VIDEO INFERENCE ERROR] {exc}")
+
+        inference_thread = threading.Thread(
+            target=run_inference,
+            name=f"VideoAI-{self.session_id}",
+            daemon=True,
         )
 
         writer = None
@@ -2079,14 +2446,31 @@ class VideoAIService:
 
         frame_number = 0
         processed_frames = 0
-        start_time = time.time()
+        start_time = time.perf_counter()
         last_frame = None
-        last_processed_frame = None
         last_vehicle_dets = []
+        inference_thread.start()
+        frame_period = 1.0 / max(1.0, grabber.fps)
+        next_frame_deadline = time.perf_counter()
+        frame_stage_totals = {
+            "decode": 0.0,
+            "render": 0.0,
+            "writer": 0.0,
+            "callback": 0.0,
+            "display": 0.0,
+            "pacing": 0.0,
+        }
+        frames_since_timing_log = 0
+        callback_every = max(1, int(round(grabber.fps / 8.0)))
 
         try:
             while True:
+                if inference_error:
+                    break
+
+                stage_start = time.perf_counter()
                 ret, frame = grabber.read()
+                frame_stage_totals["decode"] += time.perf_counter() - stage_start
                 if not ret:
                     break
 
@@ -2094,31 +2478,46 @@ class VideoAIService:
                 video_time = max(0.0, (frame_number - 1) / grabber.fps)
                 last_frame = frame
 
-                # Jika bukan frame AI, render hasil AI terakhir.
                 if frame_number % PROCESS_EVERY_N_FRAMES == 1 or frame_number == 1:
-                    processed = self.process_frame(
-                        frame,
+                    queued_item = (
+                        frame.copy(),
                         video_time,
                         frame_number,
+                        time.perf_counter(),
                     )
-                    last_vehicle_dets = list(self.last_results.get("persons", []))
-                else:
-                    processed = self._render(frame)
-                last_processed_frame = processed
+                    try:
+                        inference_queue.put_nowait(queued_item)
+                    except queue.Full:
+                        try:
+                            inference_queue.get_nowait()
+                        except queue.Empty:
+                            pass
+                        else:
+                            inference_stats["dropped_frames"] += 1
+                        inference_queue.put_nowait(queued_item)
 
+                stage_start = time.perf_counter()
+                processed = self._render(frame)
+                frame_stage_totals["render"] += time.perf_counter() - stage_start
+
+                stage_start = time.perf_counter()
                 if writer is not None:
                     writer.write(processed)
+                frame_stage_totals["writer"] += time.perf_counter() - stage_start
 
                 processed_frames += 1
+                frames_since_timing_log += 1
 
                 if self.progress_callback and (
-                    frame_number % 5 == 0 or frame_number == 1
+                    frame_number % callback_every == 0 or frame_number == 1
                 ):
+                    stage_start = time.perf_counter()
                     self.progress_callback(
                         frame_number,
                         grabber.frame_count,
                         processed,
                     )
+                    frame_stage_totals["callback"] += time.perf_counter() - stage_start
 
                 if self.show_window:
                     preview = processed.copy()
@@ -2127,7 +2526,7 @@ class VideoAIService:
                         if grabber.frame_count > 0
                         else 0.0
                     )
-                    elapsed = time.time() - start_time
+                    elapsed = time.perf_counter() - start_time
                     proc_fps = frame_number / elapsed if elapsed > 0 else 0.0
 
                     cv2.putText(
@@ -2141,8 +2540,10 @@ class VideoAIService:
                         cv2.LINE_AA,
                     )
 
+                    stage_start = time.perf_counter()
                     cv2.imshow("Video AI Detection - Q untuk keluar", preview)
                     key = cv2.waitKey(1) & 0xFF
+                    frame_stage_totals["display"] += time.perf_counter() - stage_start
                     if key in (27, ord("q")):
                         print("[VIDEO AI] Dihentikan user.")
                         break
@@ -2157,16 +2558,64 @@ class VideoAIService:
                         f"[PROGRESS] {progress:.1f}% | "
                         f"frame={frame_number}/{grabber.frame_count} | "
                         f"t={video_time:.1f}s | "
+                        f"queue_dropped={inference_stats['dropped_frames']} | "
                         f"person_capture={self.person_capture_count} | "
                         f"plate_capture={self.plate_capture_count} | "
                         f"light={self.lighting.get('score', 0.0):.0f}% "
                         f"({self.lighting.get('status', 'UNKNOWN')})"
                     )
 
+                next_frame_deadline += frame_period
+                wait_seconds = next_frame_deadline - time.perf_counter()
+                if wait_seconds > 0:
+                    stage_start = time.perf_counter()
+                    if self.show_window:
+                        key = cv2.waitKey(max(1, int(wait_seconds * 1000))) & 0xFF
+                        if key in (27, ord("q")):
+                            print("[VIDEO AI] Dihentikan user.")
+                            break
+                    else:
+                        time.sleep(wait_seconds)
+                    frame_stage_totals["pacing"] += time.perf_counter() - stage_start
+                elif wait_seconds < -frame_period:
+                    next_frame_deadline = time.perf_counter()
+
+                if frame_number % 50 == 0:
+                    self._log_frame_stage_timings(
+                        frame_number,
+                        start_time,
+                        frame_stage_totals,
+                        frames_since_timing_log,
+                    )
+                    frames_since_timing_log = 0
+
         except KeyboardInterrupt:
             print("[VIDEO AI] Ctrl+C diterima.")
 
         finally:
+            if inference_thread.is_alive():
+                while inference_thread.is_alive():
+                    try:
+                        inference_queue.put(inference_stop, timeout=0.1)
+                        break
+                    except queue.Full:
+                        if inference_error:
+                            break
+            inference_thread.join()
+
+            if inference_error:
+                grabber.release()
+                if writer is not None:
+                    writer.release()
+                if self.show_window:
+                    cv2.destroyAllWindows()
+                raise RuntimeError(
+                    f"Proses inferensi video gagal: {inference_error[0]}"
+                ) from inference_error[0]
+
+            with self.results_lock:
+                last_vehicle_dets = list(self.last_results.get("persons", []))
+
             # Finalisasi track aktif agar video terakhir tetap masuk voting/history.
             if last_frame is not None and self.plate_tracker is not None:
                 self.flush_plate_tracker(
@@ -2174,15 +2623,19 @@ class VideoAIService:
                     max(0.0, (frame_number - 1) / grabber.fps),
                     last_vehicle_dets,
                 )
-
             if last_frame is not None:
-                last_processed_frame = self._render(last_frame)
+                final_render_start = time.perf_counter()
+                final_frame = self._render(last_frame)
                 if self.progress_callback:
                     self.progress_callback(
                         frame_number,
                         grabber.frame_count,
-                        last_processed_frame,
+                        final_frame,
                     )
+                print(
+                    f"[VIDEO TIMING] final_render_and_callback="
+                    f"{time.perf_counter() - final_render_start:.3f}s"
+                )
 
             grabber.release()
             if writer is not None:
@@ -2190,8 +2643,15 @@ class VideoAIService:
             if self.show_window:
                 cv2.destroyAllWindows()
 
-        elapsed = time.time() - start_time
+        elapsed = time.perf_counter() - start_time
         proc_fps = processed_frames / elapsed if elapsed > 0 else 0.0
+        if frames_since_timing_log:
+            self._log_frame_stage_timings(
+                frame_number,
+                start_time,
+                frame_stage_totals,
+                frames_since_timing_log,
+            )
 
         print()
         print("=" * 75)
@@ -2200,6 +2660,14 @@ class VideoAIService:
         print(f"Frame diproses       : {processed_frames}")
         print(f"Waktu proses         : {elapsed:.2f} detik")
         print(f"Processing FPS       : {proc_fps:.2f}")
+        print(f"Inference frames     : {self.inference_count}")
+        print(f"Dropped AI frames    : {inference_stats['dropped_frames']}")
+        if self.inference_count:
+            timing_averages = " ".join(
+                f"{name}={duration * 1000.0 / self.inference_count:.0f}ms"
+                for name, duration in self.inference_timing_totals.items()
+            )
+            print(f"[VIDEO TIMING] inference_avg ({self.inference_count} frames): {timing_averages}")
         print(f"Person capture       : {self.person_capture_count}")
         print(f"Plate capture        : {self.plate_capture_count}")
         print(f"Capture person       : {CAPTURE_DIR}")

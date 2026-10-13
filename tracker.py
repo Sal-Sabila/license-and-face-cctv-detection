@@ -288,6 +288,8 @@ class PlateTracker:
         single_read_ocr_confidence=0.55,
         single_read_detection_confidence=0.20,
         max_history=5,
+        min_ocr_width=30,
+        min_ocr_height=10,
     ):
         self.iou_threshold = float(iou_threshold)
         self.max_frame_gap = int(max_frame_gap)
@@ -299,6 +301,8 @@ class PlateTracker:
         self.single_read_ocr_confidence = float(single_read_ocr_confidence)
         self.single_read_detection_confidence = float(single_read_detection_confidence)
         self.max_history = int(max_history)
+        self.min_ocr_width = max(1, int(min_ocr_width))
+        self.min_ocr_height = max(1, int(min_ocr_height))
 
         self.tracks = {}
         self.next_track_id = 1
@@ -511,7 +515,7 @@ class PlateTracker:
                 cw = x2 - x1
                 ch = y2 - y1
 
-                if cw < 30 or ch < 10:
+                if cw < self.min_ocr_width or ch < self.min_ocr_height:
                     continue
 
                 pad_x = max(2, int(cw * 0.08))

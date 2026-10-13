@@ -33,7 +33,7 @@ os.makedirs(VIDEO_UPLOAD_DIR, exist_ok=True)
 os.makedirs(VIDEO_OUTPUT_DIR, exist_ok=True)
 
 
-def _video_job(job_id, input_path, output_path, camera_id):
+def _video_job(job_id, input_path, output_path, camera_id, source_name):
     try:
         from services.video_ai_service import VideoAIService
 
@@ -61,7 +61,8 @@ def _video_job(job_id, input_path, output_path, camera_id):
             output_path=output_path,
             camera_id=camera_id,
             show_window=False,
-            progress_callback=update_progress
+            progress_callback=update_progress,
+            source_name=source_name,
         )
         service.run()
 
@@ -114,6 +115,9 @@ def create_video_job():
 
     job_id = uuid.uuid4().hex
     input_path = os.path.join(VIDEO_UPLOAD_DIR, f"{job_id}.{extension}")
+    original_name = os.path.basename(uploaded.filename.replace("\\", "/"))
+    video_label = os.path.splitext(original_name)[0].strip() or "Video offline"
+    source_name = f"Video: {video_label}"[:255]
     export_video = request.form.get("export_video") == "1"
     output_path = (
         os.path.join(VIDEO_OUTPUT_DIR, f"{job_id}.mp4")
@@ -132,7 +136,7 @@ def create_video_job():
 
     worker = threading.Thread(
         target=_video_job,
-        args=(job_id, input_path, output_path, camera_id),
+        args=(job_id, input_path, output_path, camera_id, source_name),
         daemon=True
     )
     worker.start()
@@ -389,12 +393,13 @@ def _get_terbaca_detections_paginated(
                     fd.ocr_confidence AS event_ocr_confidence,
                     fd.person_confidence, fd.face_confidence, fd.direction,
                     fd.driver_track_id, fd.driver_face_path, fd.event_key,
+                    fd.source_type,
                     fd.face_image_path, fd.vehicle_image_path,
                     fd.created_at AS detected_at,
                     p.plate_number, p.detection_status AS plate_status,
                     p.detection_confidence AS plate_confidence,
                     p.ocr_confidence, p.plate_image_path,
-                    COALESCE(c.location, 'CCTV') AS camera_name
+                    COALESCE(fd.source_name, c.location, 'CCTV') AS camera_name
                 FROM full_detection fd
                 LEFT JOIN plate p ON fd.plate_id = p.plate_id
                 LEFT JOIN cameras c ON fd.camera_id = c.camera_id
@@ -433,6 +438,7 @@ def _get_terbaca_detections_paginated(
                     "has_driver": bool(r.get("has_driver")),
                     "direction": r.get("direction") or "unknown",
                     "event_key": r.get("event_key"),
+                    "source_type": r.get("source_type") or "stream",
                     "driver_track_id": r.get("driver_track_id"),
                     "plate": p_num or "-",
                     "camera": r.get("camera_name") or "CCTV",

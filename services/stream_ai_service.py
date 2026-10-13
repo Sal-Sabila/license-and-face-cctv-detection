@@ -73,6 +73,8 @@ os.makedirs(PLATE_CAPTURE_DIR, exist_ok=True)
 VEHICLE_CLASSES = [0, 2, 3, 5, 7]
 VEHICLE_CONFIDENCE = 0.35
 VEHICLE_IMGSZ = 480
+VEHICLE_MAX_DET = 500
+VEHICLE_NMS_IOU = 0.80
 
 # DISTANCE / DETECTION ZONES
 ENABLE_DISTANCE_ZONE = True
@@ -174,13 +176,16 @@ PLATE_VEHICLE_MIN_HEIGHT = 20
 FAKE_VEHICLE_ASPECT_MIN = 0.9
 
 # AI INTERVAL
-BASE_AI_INTERVAL = 0.30
-MIN_AI_INTERVAL = 0.20
-MAX_AI_INTERVAL = 0.60
-TARGET_CPU = 75.0
-HIGH_CPU = 85.0
-LOW_CPU = 55.0
-AI_ADJUST_COOLDOWN = 3.0
+BASE_AI_INTERVAL = 0.35
+MIN_AI_INTERVAL = 0.25
+MAX_AI_INTERVAL = 0.75
+TARGET_CPU = 65.0
+HIGH_CPU = 80.0
+LOW_CPU = 45.0
+AI_ADJUST_COOLDOWN = 2.0
+CPU_INFERENCE_THREADS = 2
+CPU_INTEROP_THREADS = 1
+OPENCV_CPU_THREADS = 1
 
 VEHICLE_TYPES = {
     2: "car",
@@ -192,7 +197,7 @@ VEHICLE_TYPES = {
 # PLATE DETECTION
 PLATE_CONFIDENCE = 0.25
 PLATE_IMGSZ = 512
-PLATE_MAX_DET = 5
+PLATE_MAX_DET = 40
 PLATE_IOU = 0.45
 PLATE_MIN_WIDTH = 12
 PLATE_MIN_HEIGHT = 4
@@ -201,7 +206,7 @@ OCR_MIN_PLATE_WIDTH = 18
 OCR_MIN_PLATE_HEIGHT = 5
 OCR_MIN_PLATE_CONFIDENCE = 0.25
 
-MAX_PLATE_ROI = 3
+MAX_PLATE_ROI = 4
 
 PLATE_DETECT_INTERVAL = 0.60
 OCR_INTERVAL = 0.80
@@ -282,6 +287,22 @@ def _safe_float(value, default=0.0):
         return float(value)
     except Exception:
         return float(default)
+
+
+def _configure_cpu_threads():
+    import torch
+
+    torch.set_num_threads(CPU_INFERENCE_THREADS)
+    try:
+        torch.set_num_interop_threads(CPU_INTEROP_THREADS)
+    except RuntimeError as exc:
+        print(f"[AI CPU WARNING] Tidak dapat mengubah thread interop PyTorch: {exc}")
+    cv2.setNumThreads(OPENCV_CPU_THREADS)
+    print(
+        f"[AI CPU] PyTorch threads={torch.get_num_threads()} "
+        f"interop={torch.get_num_interop_threads()} "
+        f"OpenCV threads={cv2.getNumThreads()}"
+    )
 
 
 def _normalize_text(text):
@@ -824,11 +845,11 @@ class AdaptiveAIController:
             return self.current_interval
         old_interval = self.current_interval
         if self.last_cpu >= self.high_cpu or self.last_ai_time >= 0.50:
-            self.current_interval = min(self.current_interval + 0.05, self.max_interval)
+            self.current_interval = min(self.current_interval + 0.10, self.max_interval)
         elif self.last_cpu >= self.target_cpu or self.last_ai_time >= 0.35:
-            self.current_interval = min(self.current_interval + 0.02, self.max_interval)
+            self.current_interval = min(self.current_interval + 0.05, self.max_interval)
         elif self.last_cpu <= self.low_cpu and self.last_ai_time <= 0.20:
-            self.current_interval = max(self.current_interval - 0.02, self.min_interval)
+            self.current_interval = max(self.current_interval - 0.05, self.min_interval)
         self.current_interval = max(self.min_interval, min(self.current_interval, self.max_interval))
         self.last_adjustment = now
         if abs(self.current_interval - old_interval) >= 0.01:
@@ -862,6 +883,8 @@ class StreamAIService:
             raise FileNotFoundError(f"Model person/vehicle tidak ditemukan: {PERSON_MODEL_PATH}")
         if not os.path.isfile(PLATE_MODEL_PATH):
             raise FileNotFoundError(f"Model plate tidak ditemukan: {PLATE_MODEL_PATH}")
+
+        _configure_cpu_threads()
 
         print(f"[AI STREAM] YOLO    : {PERSON_MODEL_PATH}")
         self.yolo_person = YOLO(PERSON_MODEL_PATH)
@@ -901,6 +924,8 @@ class StreamAIService:
         self._group_counter = 0
 
         self.frame_queue = {}
+        self.frame_queue_times = {}
+        self.frame_queue_coalesced = {}
         self.frame_queue_lock = threading.Lock()
         self.ai_wakeup = threading.Event()
         self.ai_thread = threading.Thread(target=self._ai_loop, name="PlateVision-AI", daemon=True)
@@ -930,6 +955,8 @@ class StreamAIService:
         self.plate_detection_cache = {}
         self.ocr_cache = {}
         self.saved_event_meta = {}
+        self.plate_roi_cursor = {}
+        self.last_pipeline_metrics = {}
 
         self._track_last_event = {}
 
@@ -954,6 +981,7 @@ class StreamAIService:
         status["camera_zone_count"] = len(CAMERA_ZONE_CONFIG)
         status["ocr_min_plate_width"] = OCR_MIN_PLATE_WIDTH
         status["ocr_min_plate_height"] = OCR_MIN_PLATE_HEIGHT
+        status["pipeline_metrics"] = dict(self.last_pipeline_metrics)
         return status
 
     def _camera_state(self, camera_id):
@@ -964,6 +992,8 @@ class StreamAIService:
                 "last_ai_time": 0.0,
                 "last_results_time": 0.0,
                 "last_results": {"persons": [], "plates": []},
+                "last_plate_detection_time": 0.0,
+                "last_plate_results": [],
                 "person_tracker": sv.ByteTrack(
                     track_activation_threshold=TRACKER_ACTIVATION_THRESHOLD,
                     lost_track_buffer=TRACKER_LOST_BUFFER,
@@ -1186,16 +1216,19 @@ class StreamAIService:
             h, w = frame.shape[:2]
             result = self.yolo_person(
                 frame, classes=VEHICLE_CLASSES, imgsz=VEHICLE_IMGSZ,
-                conf=VEHICLE_CONFIDENCE, verbose=False
+                conf=VEHICLE_CONFIDENCE, max_det=VEHICLE_MAX_DET,
+                iou=VEHICLE_NMS_IOU, verbose=False
             )[0]
             boxes = result.boxes
             if boxes is None or len(boxes) == 0:
                 detections_for_tracker = sv.Detections.empty()
             else:
+                boxes_xyxy = boxes.xyxy.cpu().numpy().astype(int)
+                classes = boxes.cls.cpu().numpy().astype(int)
                 keep_indices = []
-                for i, box_tensor in enumerate(boxes.xyxy):
-                    bbox = box_tensor.cpu().numpy().astype(int).tolist()
-                    cls_id = int(boxes.cls[i].item())
+                for i, bbox_array in enumerate(boxes_xyxy):
+                    bbox = bbox_array.tolist()
+                    cls_id = int(classes[i])
                     x1, y1, x2, y2 = bbox
                     bw = max(0, x2 - x1); bh = max(0, y2 - y1)
                     zone = _get_distance_zone(bbox, camera_id, w, h)
@@ -1297,13 +1330,28 @@ class StreamAIService:
             if d.get("cls") in (2, 3, 5, 7)
             and (not ENABLE_DISTANCE_ZONE or d.get("distance_zone") == "NEAR")
         ]
-        candidates.sort(key=lambda d: (
-            1 if d.get("distance_zone") == "NEAR" else 0,
-            max(1, d["box"][2] - d["box"][0]) * max(1, d["box"][3] - d["box"][1]),
-            _safe_float(d.get("conf", 0.0)),
-        ), reverse=True)
+        def _candidate_order(detection):
+            try:
+                track_id = int(detection.get("track_id", -1))
+            except (TypeError, ValueError):
+                track_id = -1
+            box = detection["box"]
+            return (
+                track_id if track_id >= 0 else 2**31,
+                int(box[1]),
+                int(box[0]),
+            )
+
+        candidates.sort(key=_candidate_order)
+        if candidates:
+            camera_id = _normalize_camera_id(camera_id)
+            start = self.plate_roi_cursor.get(camera_id, 0) % len(candidates)
+            candidates = candidates[start:] + candidates[:start]
+            roi_count = min(MAX_PLATE_ROI, len(candidates))
+            self.plate_roi_cursor[camera_id] = (start + roi_count) % len(candidates)
+            candidates = candidates[:roi_count]
         all_plates = []
-        for vehicle in candidates[:MAX_PLATE_ROI]:
+        for vehicle in candidates:
             vx1, vy1, vx2, vy2 = [int(v) for v in vehicle["box"]]
             vx1 = max(0, min(vx1, w - 1)); vy1 = max(0, min(vy1, h - 1))
             vx2 = max(0, min(vx2, w)); vy2 = max(0, min(vy2, h))
@@ -1683,6 +1731,8 @@ class StreamAIService:
                     driver_track_id=(driver or {}).get("track_id"),
                     direction=final_direction,
                     event_key=event_key,
+                    source_type="stream",
+                    source_name=None,
                 )
 
                 self.captured_tracks[event_key] = current_time
@@ -1824,6 +1874,8 @@ class StreamAIService:
                                 vehicle_type="unknown",
                                 direction=camera_orientation,
                                 event_key=matched_key,
+                                source_type="stream",
+                                source_name=None,
                             )
                             matched_meta["person_confidence"] = person_conf_now
                         except Exception as exc:
@@ -1861,6 +1913,8 @@ class StreamAIService:
                     vehicle_type="unknown",
                     direction=final_direction,
                     event_key=event_key,
+                    source_type="stream",
+                    source_name=None,
                 )
 
                 self.captured_tracks[event_key] = current_time
@@ -2503,79 +2557,130 @@ class StreamAIService:
         cv2.putText(frame, text, (10, 22), cv2.FONT_HERSHEY_SIMPLEX, .52, color, 2, cv2.LINE_AA)
 
     # AI PIPELINE
-    def _run_ai_pipeline(self, frame, camera_id):
+    def _run_ai_pipeline(
+        self,
+        frame,
+        camera_id,
+        queue_wait_ms=0.0,
+    ):
         camera_id = _normalize_camera_id(camera_id)
         camera_state = self._camera_state(camera_id)
         now = time.time()
         ai_pipeline_start = time.perf_counter()
+        stage_times = {}
+        stage_times["queue_wait_ms"] = queue_wait_ms
+        stage_times["frames_coalesced_total"] = self.frame_queue_coalesced.get(
+            camera_id, 0
+        )
         person_dets = []
         plate_dets = []
         plate_raw = []
         try:
             h0, w0 = frame.shape[:2]
+            stage_start = time.perf_counter()
             base_box = self.focus_info.get("box") or [
                 int(w0 * 0.20), int(h0 * 0.42), int(w0 * 0.88), int(h0 * 0.96)
             ]
             base_light = _lighting_metrics(frame, base_box)
             ai_frame = _enhance_for_lighting(frame, base_light)
+            stage_times["prepare_ms"] = (time.perf_counter() - stage_start) * 1000
+            stage_start = time.perf_counter()
             person_dets = self._detect_vehicles(ai_frame, camera_id) or []
+            stage_times["vehicle_ms"] = (time.perf_counter() - stage_start) * 1000
 
             # ✅ Panggil object grouping SEBELUM plate detection
+            stage_start = time.perf_counter()
             try:
                 self._assign_object_groups(
                     person_dets, camera_id, current_time=now, frame=ai_frame
                 )
             except Exception as exc:
                 print(f"[AI STREAM WARNING] Object grouping failed: {exc}")
+            stage_times["grouping_ms"] = (time.perf_counter() - stage_start) * 1000
 
             plate_dets = []
             plate_raw = []
             try:
-                plate_raw = self._detect_plates_in_vehicles(
-                    ai_frame, person_dets, camera_id=camera_id, current_time=now
-                ) or []
-                self.latest_raw_plate_detections = plate_raw
-                self._select_dynamic_focus(frame, person_dets, plate_raw, now)
-                plate_tracker = camera_state["plate_tracker"]
-                if self.plate_ocr is not None:
-                    try:
-                        ocr_candidates = [p for p in plate_raw if p.get("ocr_ready", False)]
-                        active_tracks = plate_tracker.update(ocr_candidates, ai_frame, self.plate_ocr) or []
-                    except Exception as exc:
-                        print(f"[AI STREAM WARNING] PlateTracker/OCR failed: {exc}")
-                        active_tracks = []
-                    for track in active_tracks:
-                        result = _track_to_result(track)
-                        if result is not None:
-                            plate_dets.append(result)
-                    finished_items = self._consume_finished_plate(frame, person_dets, camera_id)
-                    if finished_items:
-                        plate_dets.extend(finished_items)
+                should_detect_plates = (
+                    now - camera_state["last_plate_detection_time"]
+                    >= PLATE_DETECT_INTERVAL
+                )
+                stage_times["plate_detection_skipped"] = not should_detect_plates
+                if should_detect_plates:
+                    stage_start = time.perf_counter()
+                    plate_raw = self._detect_plates_in_vehicles(
+                        ai_frame, person_dets, camera_id=camera_id, current_time=now
+                    ) or []
+                    stage_times["plate_detect_ms"] = (
+                        time.perf_counter() - stage_start
+                    ) * 1000
+                    camera_state["last_plate_detection_time"] = now
+                    self.latest_raw_plate_detections = plate_raw
+                    self._select_dynamic_focus(frame, person_dets, plate_raw, now)
+                    plate_tracker = camera_state["plate_tracker"]
+                    if self.plate_ocr is not None:
+                        try:
+                            ocr_candidates = [
+                                p for p in plate_raw if p.get("ocr_ready", False)
+                            ]
+                            stage_start = time.perf_counter()
+                            active_tracks = plate_tracker.update(
+                                ocr_candidates, ai_frame, self.plate_ocr
+                            ) or []
+                            stage_times["ocr_tracker_ms"] = (
+                                time.perf_counter() - stage_start
+                            ) * 1000
+                        except Exception as exc:
+                            print(f"[AI STREAM WARNING] PlateTracker/OCR failed: {exc}")
+                            active_tracks = []
+                        for track in active_tracks:
+                            result = _track_to_result(track)
+                            if result is not None:
+                                plate_dets.append(result)
+                        finished_items = self._consume_finished_plate(
+                            frame, person_dets, camera_id
+                        )
+                        if finished_items:
+                            plate_dets.extend(finished_items)
+                    else:
+                        for item in plate_raw:
+                            bbox = item.get("bbox") or item.get("box")
+                            if not bbox or len(bbox) != 4:
+                                continue
+                            conf = _safe_float(
+                                item.get("confidence", item.get("conf", 0.0))
+                            )
+                            plate_dets.append({
+                                **item,
+                                "id": int(item.get("vehicle_track_id", -1)),
+                                "track_id": int(item.get("vehicle_track_id", -1)),
+                                "box": bbox, "bbox": bbox, "conf": conf,
+                                "detection_confidence": conf,
+                                "text": "", "formatted": "", "raw_text": "",
+                                "ocr_conf": 0.0, "confidence": 0.0,
+                                "valid": False, "votes": 0, "total_reads": 0,
+                                "distance_zone": item.get("distance_zone", "NEAR"),
+                                "ocr_ready": bool(item.get("ocr_ready", False)),
+                            })
                 else:
-                    for item in plate_raw:
-                        bbox = item.get("bbox") or item.get("box")
-                        if not bbox or len(bbox) != 4:
-                            continue
-                        conf = _safe_float(item.get("confidence", item.get("conf", 0.0)))
-                        plate_dets.append({
-                            **item,
-                            "id": int(item.get("vehicle_track_id", -1)),
-                            "track_id": int(item.get("vehicle_track_id", -1)),
-                            "box": bbox, "bbox": bbox, "conf": conf,
-                            "detection_confidence": conf,
-                            "text": "", "formatted": "", "raw_text": "",
-                            "ocr_conf": 0.0, "confidence": 0.0,
-                            "valid": False, "votes": 0, "total_reads": 0,
-                            "distance_zone": item.get("distance_zone", "NEAR"),
-                            "ocr_ready": bool(item.get("ocr_ready", False)),
-                        })
+                    plate_dets = list(camera_state.get("last_plate_results", []))
+                    if self.plate_ocr is not None:
+                        finished_items = self._consume_finished_plate(
+                            frame, person_dets, camera_id
+                        )
+                        if finished_items:
+                            plate_dets.extend(finished_items)
             except Exception as exc:
                 print(f"[AI STREAM ERROR] Plate pipeline failed: {exc}")
 
+            if stage_times.get("plate_detect_ms") is not None:
+                camera_state["last_plate_results"] = list(plate_dets)
             camera_state["last_results"] = {"persons": person_dets, "plates": plate_dets}
             camera_state["last_results_time"] = now
 
+            stage_start = time.perf_counter()
             self._save_consistent_events(frame, person_dets, plate_dets, camera_id, now)
+            stage_times["save_ms"] = (time.perf_counter() - stage_start) * 1000
             self._cleanup_runtime_state(now)
 
             self.ai_cycle_counter += 1
@@ -2584,10 +2689,33 @@ class StreamAIService:
         finally:
             elapsed = time.perf_counter() - ai_pipeline_start
             self.last_ai_time = elapsed
+            stage_times["total_ms"] = elapsed * 1000
+            stage_times["vehicle_count"] = len(person_dets)
+            stage_times["near_vehicle_count"] = sum(
+                item.get("cls") in VEHICLE_TYPES
+                and item.get("distance_zone") == "NEAR"
+                for item in person_dets
+            )
+            stage_times["plate_rois_detected"] = len(plate_raw)
+            stage_times["ocr_ready_count"] = sum(
+                bool(plate.get("ocr_ready")) for plate in plate_raw
+            )
+            self.last_pipeline_metrics[camera_id] = dict(stage_times)
             self.adaptive_ai.update(elapsed)
             if DEBUG_PERFORMANCE and self.ai_cycle_counter % DEBUG_LOG_SAMPLE_EVERY == 0:
                 print(
                     f"[AI PERF] camera={camera_id} elapsed={elapsed * 1000:.0f}ms "
+                    f"prepare={stage_times.get('prepare_ms', 0):.0f}ms "
+                    f"vehicle={stage_times.get('vehicle_ms', 0):.0f}ms "
+                    f"grouping={stage_times.get('grouping_ms', 0):.0f}ms "
+                    f"plate={stage_times.get('plate_detect_ms', 0):.0f}ms "
+                    f"ocr={stage_times.get('ocr_tracker_ms', 0):.0f}ms "
+                    f"save={stage_times.get('save_ms', 0):.0f}ms "
+                    f"queue_wait={stage_times.get('queue_wait_ms', 0):.0f}ms "
+                    f"frames_coalesced_total={stage_times.get('frames_coalesced_total', 0)} "
+                    f"objects={len(person_dets)} "
+                    f"near_vehicles={stage_times['near_vehicle_count']} "
+                    f"plates={len(plate_raw)} "
                     f"groups={len(self.object_groups)} next_interval={self.adaptive_ai.get_interval():.2f}s"
                 )
 
@@ -2612,15 +2740,20 @@ class StreamAIService:
                         due_cameras,
                         key=lambda cam_id: self._camera_state(cam_id)["last_ai_time"],
                     )
-                    item = (self.frame_queue.pop(camera_id), camera_id)
+                    frame = self.frame_queue.pop(camera_id)
+                    queued_at = self.frame_queue_times.pop(
+                        camera_id, time.perf_counter()
+                    )
+                    item = (frame, camera_id, queued_at)
             if item is None:
                 continue
-            frame, camera_id = item
+            frame, camera_id, queued_at = item
             camera_id = _normalize_camera_id(camera_id)
             camera_state = self._camera_state(camera_id)
             now = time.time()
             camera_state["last_ai_time"] = now
-            self._run_ai_pipeline(frame, camera_id)
+            queue_wait_ms = max(0.0, time.perf_counter() - queued_at) * 1000
+            self._run_ai_pipeline(frame, camera_id, queue_wait_ms=queue_wait_ms)
         print("[AI THREAD] Background AI worker stopped")
 
     # PUBLIC API
@@ -2630,7 +2763,12 @@ class StreamAIService:
         camera_id = _normalize_camera_id(camera_id)
         try:
             with self.frame_queue_lock:
+                if camera_id in self.frame_queue:
+                    self.frame_queue_coalesced[camera_id] = (
+                        self.frame_queue_coalesced.get(camera_id, 0) + 1
+                    )
                 self.frame_queue[camera_id] = frame.copy()
+                self.frame_queue_times[camera_id] = time.perf_counter()
             self.ai_wakeup.set()
         except Exception as exc:
             if DEBUG_PERFORMANCE:

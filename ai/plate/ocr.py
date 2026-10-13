@@ -669,12 +669,11 @@ class PlateOCR:
             return empty
 
         candidates = []
-        variants = self.generate_variants(prepared)
 
-        for variant_name, variant_image in variants:
+        def read_variant(variant_name, variant_image):
             result = self._run_ocr(variant_image, variant_name)
             if result is None:
-                continue
+                return None
 
             # ✅ KOREKSI + VALIDASI
             correction = self.correct_plate_text(
@@ -691,8 +690,6 @@ class PlateOCR:
             result["correction_score"] = correction["correction_score"]
             result["region_code"] = correction["region_code"]
 
-            candidates.append(result)
-
             if self.verbose:
                 print(
                     f"[OCR CANDIDATE] {variant_name} -> "
@@ -703,12 +700,38 @@ class PlateOCR:
                     f"region={result['region_code']}"
                 )
 
-            # Early stop: valid + confidence cukup
-            if (
-                result["is_indonesia_pattern"]
-                and result["confidence"] >= 0.55
-            ) or (result["confidence"] >= 0.70):
-                break
+            return result
+
+        for variant_name, variant_image in self.generate_variants(prepared):
+            result = read_variant(variant_name, variant_image)
+            if result is not None:
+                candidates.append(result)
+                if (
+                    result["is_indonesia_pattern"]
+                    and result["confidence"] >= 0.85
+                ):
+                    break
+
+        has_strong_valid_read = any(
+            result["is_indonesia_pattern"] and result["confidence"] >= 0.70
+            for result in candidates
+        )
+        if self.fast_mode and not has_strong_valid_read:
+            fallback_variants = (
+                ("sharpen", self.preprocess_sharpen(prepared)),
+                ("threshold", self.preprocess_threshold(prepared)),
+            )
+            for variant_name, variant_image in fallback_variants:
+                if variant_image is None:
+                    continue
+                result = read_variant(variant_name, variant_image)
+                if result is not None:
+                    candidates.append(result)
+                    if (
+                        result["is_indonesia_pattern"]
+                        and result["confidence"] >= 0.85
+                    ):
+                        break
 
         if not candidates:
             empty["elapsed"] = time.perf_counter() - total_start

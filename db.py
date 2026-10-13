@@ -8,6 +8,7 @@ from pymysql.err import IntegrityError
 from datetime import datetime, timedelta
 import random
 import json
+from typing import Optional, Union
 
 # pHash optional
 try:
@@ -174,6 +175,8 @@ def ensure_event_schema():
                         ("vehicle_hash", "VARCHAR(20) NULL"),
                         ("face_hash", "VARCHAR(20) NULL"),
                         ("best_frame_ts", "TIMESTAMP NULL"),
+                        ("source_type", "VARCHAR(16) NOT NULL DEFAULT 'stream'"),
+                        ("source_name", "VARCHAR(255) NULL"),
                     ],
                     "plate": [
                         ("raw_ocr_text", "VARCHAR(100) NULL"),
@@ -513,7 +516,7 @@ def get_vehicle_occurrence_summary(camera_id=None, limit: int = 50):
                            fd.vehicle_type, fd.created_at, fd.vehicle_image_path,
                            fd.detection_confidence,
                            p.normalized_plate_number, p.plate_number, p.plate_image_path,
-                           COALESCE(c.location, CONCAT('CCTV ', fd.camera_id)) AS camera_name
+                           COALESCE(fd.source_name, c.location, CONCAT('CCTV ', fd.camera_id)) AS camera_name
                     FROM full_detection fd
                     JOIN plate p ON p.plate_id = fd.plate_id
                     LEFT JOIN cameras c ON c.camera_id = fd.camera_id
@@ -627,7 +630,7 @@ def get_person_occurrence_summary(camera_id=None, limit: int = 50):
             cur.execute(
                 f"""
                     SELECT fd.detection_id, fd.camera_id, fd.track_id, fd.event_key, fd.created_at,
-                           COALESCE(c.location, CONCAT('CCTV ', fd.camera_id)) AS camera_name
+                           COALESCE(fd.source_name, c.location, CONCAT('CCTV ', fd.camera_id)) AS camera_name
                     FROM full_detection fd
                     LEFT JOIN cameras c ON c.camera_id = fd.camera_id
                     WHERE {" AND ".join(where_clauses)}
@@ -842,23 +845,25 @@ def delete_plate(plate_id: int) -> bool:
 # SAVE DETECTION EVENT — DENGAN BEST FRAME ONLY
 
 def save_detection_event(
-    camera_id: int,
-    plate_number: str = None,
+    camera_id: Union[int, str],
+    plate_number: Optional[str] = None,
     plate_crop=None,
     plate_conf: float = 0.0,
     ocr_conf: float = 0.0,
     face_crop=None,
     face_conf: float = 0.0,
-    track_id: int = None,
+    track_id: Optional[int] = None,
     object_type: str = "vehicle",
     vehicle_type: str = "unknown",
     vehicle_confidence: float = 0.0,
     has_driver: bool = False,
-    driver_track_id: int = None,
+    driver_track_id: Optional[int] = None,
     direction: str = "unknown",
-    event_key: str = None,
-    raw_ocr_text: str = None,
-    vehicle_crop=None
+    event_key: Optional[str] = None,
+    raw_ocr_text: Optional[str] = None,
+    vehicle_crop=None,
+    source_type: str = "stream",
+    source_name: Optional[str] = None,
 ) -> dict:
     object_type = object_type if object_type in ("vehicle", "person") else "vehicle"
     vehicle_type = (
@@ -868,6 +873,8 @@ def save_detection_event(
     )
     direction = direction if direction in ("entry", "exit", "unknown") else "unknown"
     event_key = str(event_key).strip() if event_key and str(event_key).strip() else None
+    source_type = "video" if str(source_type).lower().strip() == "video" else "stream"
+    source_name = str(source_name).strip()[:255] if source_name and str(source_name).strip() else None
 
     normalized_plate = normalize_plate_number(plate_number)
     has_plate_input = bool(plate_crop is not None or normalized_plate)
@@ -1271,8 +1278,8 @@ def save_detection_event(
                         vehicle_confidence, plate_detection_confidence, ocr_confidence,
                         person_confidence, face_confidence, direction, driver_track_id,
                         face_image_path, vehicle_image_path, event_key,
-                        vehicle_hash, face_hash
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                        vehicle_hash, face_hash, source_type, source_name
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                     (plate_id, camera_id, track_id, object_type, vehicle_type,
                      int(has_plate_input) if object_type == "vehicle" else 0,
                      int(bool(has_driver)) if object_type == "vehicle" else 0,
@@ -1287,7 +1294,7 @@ def save_detection_event(
                      face_rel_path if object_type == "person" else None,
                      vehicle_rel_path if object_type == "vehicle" else None,
                      event_key,
-                     vehicle_hash, face_hash)
+                     vehicle_hash, face_hash, source_type, source_name)
                 )
                 detection_id = cur.lastrowid
                 vehicle_file_referenced = bool(
@@ -1551,7 +1558,7 @@ def get_recent_detections(limit: int = 50):
                     p.plate_number, p.detection_status AS plate_status,
                     p.detection_confidence AS plate_confidence,
                     p.ocr_confidence, p.plate_image_path,
-                    COALESCE(c1.location, 'CCTV') AS camera_name
+                    COALESCE(fd.source_name, c1.location, 'CCTV') AS camera_name
                 FROM full_detection fd
                 LEFT JOIN plate p ON fd.plate_id = p.plate_id
                 LEFT JOIN cameras c1 ON fd.camera_id = c1.camera_id
@@ -1622,7 +1629,7 @@ def _get_dedup_subquery(where_sql):
         SELECT
             fd.detection_id, fd.camera_id, fd.object_type, fd.vehicle_type, fd.has_plate,
             fd.plate_id, fd.detection_confidence, fd.created_at, fd.track_id,
-            fd.event_key, fd.direction, fd.detection_status,
+            fd.event_key, fd.direction, fd.detection_status, fd.source_name,
             fd.vehicle_hash, fd.face_hash,
             CASE
                 WHEN fd.event_key IS NOT NULL AND TRIM(fd.event_key) <> ''
@@ -1659,7 +1666,8 @@ def get_analytics(args=None):
                 CREATE TEMPORARY TABLE temp_analytics_dedup AS
                 SELECT
                     d.detection_id, d.camera_id, d.object_type, d.vehicle_type, d.has_plate,
-                    d.plate_id, d.detection_confidence, d.created_at, d.direction
+                    d.plate_id, d.detection_confidence, d.created_at, d.direction,
+                    d.source_name
                 FROM ({dedup_subquery}) d
                 WHERE d.rn = 1;
             """, params)
@@ -1698,7 +1706,7 @@ def get_analytics(args=None):
 
                 camera_rows = query_rows("""
                     SELECT d.camera_id,
-                        COALESCE(MAX(c.location), CONCAT('CCTV-', d.camera_id)) AS camera_name,
+                        COALESCE(MAX(d.source_name), MAX(c.location), CONCAT('CCTV-', d.camera_id)) AS camera_name,
                         SUM(d.object_type = 'vehicle') AS vehicles,
                         SUM(d.object_type = 'person') AS people,
                         COUNT(DISTINCT CASE WHEN d.object_type = 'vehicle'
@@ -1711,7 +1719,7 @@ def get_analytics(args=None):
                     FROM temp_analytics_dedup d
                     LEFT JOIN plate p ON p.plate_id = d.plate_id
                     LEFT JOIN cameras c ON c.camera_id = d.camera_id
-                    GROUP BY d.camera_id ORDER BY vehicles DESC, people DESC
+                    GROUP BY d.camera_id, d.source_name ORDER BY vehicles DESC, people DESC
                 """)
                 cameras = [{"camera_id": r.get("camera_id"), "camera": r.get("camera_name"),
                             "vehicles": int(r.get("vehicles") or 0), "people": int(r.get("people") or 0),
@@ -1813,7 +1821,8 @@ def get_analytics(args=None):
 
                 top_rows = query_rows("""
                     SELECT p.plate_number, COUNT(*) AS total_seen, AVG(p.ocr_confidence) AS avg_confidence,
-                        MAX(d.created_at) AS last_seen, COALESCE(MAX(c.location), 'CCTV') AS last_camera,
+                        MAX(d.created_at) AS last_seen,
+                        COALESCE(MAX(d.source_name), MAX(c.location), 'CCTV') AS last_camera,
                         MAX(p.detection_status) AS last_status
                     FROM temp_analytics_dedup d
                     JOIN plate p ON p.plate_id = d.plate_id
@@ -1832,7 +1841,8 @@ def get_analytics(args=None):
 
                 recent_rows = query_rows("""
                     SELECT d.detection_id AS id, p.plate_number AS plate, d.created_at AS detected_at,
-                        COALESCE(c.location, 'CCTV') AS camera, d.detection_confidence AS confidence,
+                        COALESCE(d.source_name, c.location, 'CCTV') AS camera,
+                        d.detection_confidence AS confidence,
                         CASE WHEN d.object_type = 'vehicle' THEN 'Kendaraan' ELSE 'Orang' END AS type,
                         CASE WHEN d.direction = 'entry' THEN 'Masuk'
                             WHEN d.direction = 'exit' THEN 'Keluar' ELSE 'Tidak ditentukan' END AS direction
@@ -2007,7 +2017,7 @@ def get_all_detections_paginated(
                     p.plate_number, p.detection_status AS plate_status,
                     p.detection_confidence AS plate_confidence,
                     p.ocr_confidence, p.plate_image_path, p.raw_ocr_text, p.region_code,
-                    COALESCE(c.location, 'CCTV') AS camera_name
+                    COALESCE(fd.source_name, c.location, 'CCTV') AS camera_name
                 FROM full_detection fd
                 LEFT JOIN plate p ON fd.plate_id = p.plate_id
                 LEFT JOIN cameras c ON fd.camera_id = c.camera_id
@@ -2136,7 +2146,7 @@ def get_plate_history_paginated(
                     p.detection_confidence, p.ocr_confidence, p.plate_image_path,
                     p.raw_ocr_text, p.region_code,
                     p.created_at AS detected_at,
-                    COALESCE(c.location, 'CCTV') AS camera_name,
+                    COALESCE(fd.source_name, c.location, 'CCTV') AS camera_name,
                     COALESCE(fd.camera_id, pl.camera_id) AS camera_id,
                     fd.detection_id, fd.event_key
                 FROM plate p
@@ -2207,7 +2217,7 @@ def get_enterprise_statistics(period: str = "today") -> dict:
         SELECT
             fd.detection_id, fd.camera_id, fd.object_type, fd.has_plate,
             fd.plate_id, fd.detection_confidence, fd.created_at, fd.track_id,
-            fd.event_key, fd.direction, fd.detection_status,
+            fd.event_key, fd.direction, fd.detection_status, fd.source_name,
             fd.vehicle_hash, fd.face_hash,
             CASE
                 WHEN fd.event_key IS NOT NULL AND TRIM(fd.event_key) <> ''
@@ -2238,7 +2248,7 @@ def get_enterprise_statistics(period: str = "today") -> dict:
                 SELECT
                     d.detection_id, d.camera_id, d.object_type, d.has_plate,
                     d.plate_id, d.detection_confidence, d.created_at, d.direction,
-                    d.detection_status
+                    d.detection_status, d.source_name
                 FROM ({dedup_subquery}) d
                 WHERE d.rn = 1;
             """)
@@ -2335,13 +2345,13 @@ def get_enterprise_statistics(period: str = "today") -> dict:
                         trend_totals.append(int(r.get("total") or 0))
 
                 cur.execute("""
-                    SELECT COALESCE(c.location, 'CCTV') AS camera_name,
+                    SELECT COALESCE(d.source_name, c.location, 'CCTV') AS camera_name,
                         COUNT(d.detection_id) AS total_count,
                         SUM(d.object_type = 'vehicle' AND (d.has_plate = 1 OR d.plate_id IS NOT NULL)) AS plate_count,
                         SUM(d.object_type = 'person') AS face_count
                     FROM temp_ent_stats_dedup d
                     LEFT JOIN cameras c ON c.camera_id = d.camera_id
-                    GROUP BY d.camera_id, c.location
+                    GROUP BY d.camera_id, d.source_name, c.location
                     ORDER BY total_count DESC;
                 """)
                 camera_distribution = []
