@@ -1526,7 +1526,13 @@ def recorder_start():
         cam_id = data.get("camera_id")
         from services.camera_recorder_service import CameraRecorderService
         svc = CameraRecorderService.get_instance()
-        svc.start(camera_id=cam_id)
+        if not svc.start(camera_id=cam_id):
+            status = svc.get_status()
+            return jsonify({
+                "success": False,
+                "message": status.get("last_error") or "Recorder gagal dimulai",
+                "data": status,
+            }), 503
         return jsonify({"success": True, "message": "Perekaman dimulai", "data": svc.get_status()})
     except Exception as exc:
         return jsonify({"success": False, "message": str(exc)}), 500
@@ -1710,19 +1716,29 @@ def dedup_scenarios():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAHAP 8: SHADOW DEDUPLICATION SERVICE LAYER INTEGRATION
+# TAHAP 9: AUDITABLE SHADOW DEDUPLICATION SUMMARY
 # ─────────────────────────────────────────────────────────────────────────────
 
 @plate_bp.route("/dedup/shadow/summary", methods=["GET"])
 def dedup_shadow_summary():
     """
-    [Tahap 8] Ambil ringkasan audit log shadow deduplication service.
-    Menampilkan keputusan KEEP/HOLD tanpa pembatalan INSERT aktual.
+    Ringkasan KEEP/HOLD shadow, event pipeline nyata, risiko, dan status runtime.
+    Query opsional: camera_id=<id>&limit=<0..100>.
     """
     try:
         from services.shadow_dedup_service import ShadowDedupService
+        camera_id = request.args.get("camera_id", type=int)
+        recent_limit = request.args.get("limit", default=20, type=int)
+        if recent_limit is None:
+            recent_limit = 20
         svc = ShadowDedupService.get_instance()
-        return jsonify({"success": True, "data": svc.get_audit_summary()})
+        return jsonify({
+            "success": True,
+            "data": svc.get_audit_summary(
+                camera_id=camera_id,
+                recent_limit=recent_limit,
+            ),
+        })
     except Exception as exc:
         import traceback
         traceback.print_exc()
@@ -1732,8 +1748,7 @@ def dedup_shadow_summary():
 @plate_bp.route("/dedup/shadow/evaluate", methods=["POST"])
 def dedup_shadow_evaluate():
     """
-    [Tahap 8] Evaluasi kandidat deteksi jalur video segmen dalam mode shadow.
-    Mencatat keputusan KEEP atau HOLD beserta alasan tanpa membatalkan INSERT.
+    Evaluasi kandidat diagnostik dalam mode shadow, bukan event pipeline terverifikasi.
     """
     try:
         data = request.get_json(silent=True) or {}
@@ -1759,6 +1774,11 @@ def dedup_shadow_evaluate():
             event_key=event_key,
             track_id=track_id,
             source_name=source_name,
+            metadata={
+                "event_origin": "api_candidate",
+                "event_time_quality": "caller_supplied" if timestamp else "missing",
+                "event_time_basis": "request_payload",
+            },
         )
         return jsonify({"success": True, "data": result})
     except Exception as exc:

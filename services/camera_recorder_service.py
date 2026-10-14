@@ -18,28 +18,6 @@ DEFAULT_SEGMENTS_DIR = os.path.join(BASE_DIR, "videos", "segments")
 
 
 class CameraRecorderService:
-    """
-    Layanan perekaman CCTV hybrid berbasis FFmpeg dengan segmentasi otomatis 10 detik
-    dan antrean pemrosesan worker tunggal (Tahap 1, 2, & 3).
-
-    Prinsip Arsitektur:
-    1. Hemat CPU: Merekam menggunakan stream copy (`-c:v copy -an`), 0% beban transcode.
-    2. Single Processing Worker: Tepat 1 background worker untuk inferensi AI serial,
-       menghindari konkurensi AI paralel yang dapat membuat CPU 100% jenuh.
-    3. State Tracking & Idempoten: Setiap segmen tercatat statusnya:
-       - 'pending'    : Rekaman selesai & tervalidasi di disk, menunggu giliran proses.
-       - 'processing' : Sedang diproses oleh worker tunggal.
-       - 'completed'  : Berhasil diproses oleh VideoAIService.
-       - 'failed'     : Gagal diproses (error dicatat, tidak menghentikan sistem).
-       Tidak ada segmen yang diproses lebih dari satu kali.
-    4. Bounded Queue & Backlog Monitor: Antrean memori dibatasi (default 50),
-       backlog dipantau tanpa menghilangkan rekaman file di disk.
-    5. Toleransi Restart: Status antrean dipersistensikan ke JSON disk sehingga
-       segmen yang sudah 'completed' tidak diproses ulang saat aplikasi di-restart.
-    6. Isolasi Realtime: Perekaman dan antrean AI berjalan independen dari jalur
-       deteksi realtime CCTV (CameraWorkerManager).
-    """
-
     _instance = None
     _instance_lock = threading.Lock()
 
@@ -65,6 +43,8 @@ class CameraRecorderService:
         self.is_running = False
         self.status = "STOPPED"  # STOPPED, CONNECTING, RECORDING, ERROR
         self.last_error = None
+        self.last_ffmpeg_stderr = []
+        self._stderr_lock = threading.Lock()
         self.started_at = None
 
         # Threading & sinkronisasi perekaman
@@ -109,6 +89,18 @@ class CameraRecorderService:
         Memulai perekaman otomatis dan single processing worker.
         Jika camera_id berbeda dari target aktif, recorder di-restart ke kamera baru.
         """
+        if camera_id is not None:
+            try:
+                camera_id = int(camera_id)
+            except (TypeError, ValueError):
+                self.status = "ERROR"
+                self.last_error = f"ID kamera tidak valid: {camera_id!r}"
+                return False
+            if camera_id <= 0:
+                self.status = "ERROR"
+                self.last_error = f"ID kamera tidak valid: {camera_id}"
+                return False
+
         if self.is_running:
             if camera_id is not None and self.camera_id != camera_id:
                 print(f"[RECORDER] Mengganti target kamera ke {camera_id}, me-restart recorder...")
@@ -234,7 +226,12 @@ class CameraRecorderService:
             "latest_failed_segment": self.latest_failed_segment,
             "uptime_seconds": uptime_seconds,
             "last_error": self.last_error,
+            "ffmpeg_stderr": self._get_ffmpeg_stderr(),
         }
+
+    def _get_ffmpeg_stderr(self):
+        with self._stderr_lock:
+            return list(self.last_ffmpeg_stderr)
 
     # ------------------------------------------------------------------
     # PERSISTENSI STATE (JSON PADA DISK)
@@ -350,6 +347,7 @@ class CameraRecorderService:
                     current_state["detections"] = result.get("detections")
                     current_state["cpu_usage"] = result.get("cpu_usage")
                     current_state["elapsed_seconds"] = result.get("elapsed_seconds")
+                    current_state["processing_ratio"] = result.get("processing_ratio")
                     self._segments_state[filename] = current_state
                     self.latest_completed_segment = dict(current_state)
                     self.latest_processed_segment = dict(current_state)
@@ -447,6 +445,8 @@ class CameraRecorderService:
             camera_id=segment_info.get("camera_id") or self.camera_id or 1,
             show_window=False,
             source_name=f"Segment Cam {segment_info.get('camera_id') or self.camera_id}",
+            segment_processing=True,
+            segment_filename=segment_info.get("filename"),
         )
         ai_service.run()
 
@@ -454,49 +454,142 @@ class CameraRecorderService:
         sys_cpu = psutil.cpu_percent(interval=None)
         proc_cpu = process_obj.cpu_percent(interval=None)
 
-        # Evaluasi shadow deduplication (Tahap 8) untuk audit trail tanpa memblokir INSERT
+        # Evaluasi shadow pasca-inferensi; tidak memblokir alur simpan yang sudah berjalan.
         shadow_evaluations = []
         try:
             from services.shadow_dedup_service import ShadowDedupService
             shadow_svc = ShadowDedupService.get_instance()
             cam_id = segment_info.get("camera_id") or self.camera_id or 1
-            segment_time = self._segment_recorded_at(segment_info) or datetime.now()
-            
-            # Evaluasi untuk setiap event kendaraan
-            for vevent in ai_service.video_event_groups.get("vehicle", []):
+            segment_end = self._segment_recorded_at(segment_info)
+            segment_duration = max(0.0, float(segment_info.get("duration") or 0.0))
+            vehicle_groups = ai_service.video_event_groups.get("vehicle", [])
+            plate_history = list(ai_service.last_plate_history)
+            pre_audited_event_keys = {
+                evaluation.get("event_key")
+                for evaluation in getattr(ai_service, "segment_dedup_evaluations", [])
+                if evaluation.get("event_key")
+            }
+
+            def _event_timestamp(video_time):
+                if segment_end is None:
+                    return None, "unavailable"
+                if video_time is None:
+                    return segment_end - timedelta(seconds=segment_duration / 2.0), "segment_midpoint_estimate"
+                try:
+                    seconds_before_end = max(
+                        0.0,
+                        segment_duration - float(video_time),
+                    )
+                    return segment_end - timedelta(seconds=seconds_before_end), "video_time_estimate"
+                except (TypeError, ValueError):
+                    return segment_end - timedelta(seconds=segment_duration / 2.0), "segment_midpoint_estimate"
+
+            plate_vehicle_ids = {
+                str(event.get("vehicle_track_id"))
+                for event in plate_history
+                if event.get("vehicle_track_id") is not None
+            }
+
+            # Log hanya event kendaraan yang tidak sudah direpresentasikan oleh OCR pelat.
+            for vevent in vehicle_groups:
+                event_track_id = vevent.get("event_track_id")
+                if event_track_id is None:
+                    event_track_id = vevent.get("track_id")
+                if event_track_id is not None and str(event_track_id) in plate_vehicle_ids:
+                    continue
+                generation = vevent.get("generation") or vevent.get("_event_generation") or 1
+                event_key = ai_service._build_event_key(
+                    "vehicle",
+                    event_track_id,
+                    generation,
+                ) if event_track_id is not None else None
+                event_time, time_quality = _event_timestamp(vevent.get("last_seen"))
                 s_eval = shadow_svc.evaluate_candidate(
                     camera_id=cam_id,
                     plate_number=vevent.get("plate_number") or vevent.get("plate"),
-                    timestamp=segment_time,
+                    timestamp=event_time,
                     source_type="video",
                     object_type="vehicle",
                     vehicle_type=vevent.get("vehicle_type", "unknown"),
-                    event_key=vevent.get("event_key"),
-                    track_id=vevent.get("track_id"),
+                    event_key=event_key or vevent.get("event_key"),
+                    track_id=event_track_id,
                     source_name=ai_service.source_name,
+                    metadata={
+                        "event_origin": "segment_pipeline",
+                        "event_time_quality": time_quality,
+                        "event_time_basis": "segment_end_minus_video_relative_time",
+                        "segment_filename": segment_info.get("filename"),
+                        "tracking_generation": generation,
+                    },
                 )
                 shadow_evaluations.append(s_eval)
 
-            # Evaluasi untuk setiap deteksi plat
-            for pevent in list(ai_service.last_plate_history):
+            # Satu audit per event OCR, dengan identitas kendaraan dan sesi tracking.
+            for pevent in plate_history:
                 p_text = pevent.get("plate") or pevent.get("text") or pevent.get("formatted")
+                vehicle_track_id = pevent.get("vehicle_track_id")
+                plate_track_id = pevent.get("track_id")
+                audit_track_id = (
+                    vehicle_track_id
+                    if vehicle_track_id is not None
+                    else plate_track_id
+                )
+                generation = pevent.get("vehicle_generation") or 1
+                event_key = ai_service._build_event_key(
+                    "vehicle",
+                    vehicle_track_id,
+                    generation,
+                ) if vehicle_track_id is not None else pevent.get("event_key")
+                if event_key in pre_audited_event_keys:
+                    continue
+                matching_group = next(
+                    (
+                        group for group in vehicle_groups
+                        if str(group.get("event_track_id", group.get("track_id")))
+                        == str(vehicle_track_id)
+                    ),
+                    None,
+                ) if vehicle_track_id is not None else None
+                video_time = (
+                    matching_group.get("last_seen")
+                    if matching_group is not None
+                    else pevent.get("video_time")
+                )
+                event_time, time_quality = _event_timestamp(video_time)
                 s_eval = shadow_svc.evaluate_candidate(
                     camera_id=cam_id,
                     plate_number=p_text,
-                    timestamp=segment_time,
+                    timestamp=event_time,
                     source_type="video",
                     object_type="vehicle",
                     vehicle_type="unknown",
-                    event_key=pevent.get("event_key"),
-                    track_id=pevent.get("track_id") or pevent.get("vehicle_track_id"),
+                    event_key=event_key or pevent.get("event_key"),
+                    track_id=audit_track_id,
                     source_name=ai_service.source_name,
+                    metadata={
+                        "event_origin": "segment_pipeline",
+                        "event_time_quality": time_quality,
+                        "event_time_basis": "segment_end_minus_vehicle_last_seen",
+                        "segment_filename": segment_info.get("filename"),
+                        "tracking_generation": generation,
+                        "plate_track_id": plate_track_id,
+                    },
                 )
                 shadow_evaluations.append(s_eval)
         except Exception as exc:
-            print(f"[SHADOW EVAL ERROR] {exc}")
+            print(f"[SHADOW EVAL ERROR] Evaluasi/audit gagal (jalur simpan tidak diubah): {exc}")
 
         detections = {
             "inference_frames": ai_service.inference_count,
+            "inference_fps": round(
+                ai_service.inference_count / t_elapsed, 2
+            ) if t_elapsed > 0 else 0.0,
+            "model_load_seconds": round(
+                ai_service.model_load_seconds, 2
+            ),
+            "segment_duration_seconds": round(
+                max(0.0, float(segment_info.get("duration") or 0.0)), 2
+            ),
             "person_and_vehicle_captures": ai_service.person_capture_count,
             "plate_captures": ai_service.plate_capture_count,
             "plate_history": list(ai_service.last_plate_history),
@@ -514,6 +607,13 @@ class CameraRecorderService:
         return {
             "detections": detections,
             "elapsed_seconds": round(t_elapsed, 2),
+            "processing_ratio": round(
+                t_elapsed / max(
+                    0.1,
+                    float(segment_info.get("duration") or self.segment_duration),
+                ),
+                2,
+            ),
             "cpu_usage": {
                 "system_cpu_percent": round(sys_cpu, 1),
                 "process_cpu_percent": round(proc_cpu, 1),
@@ -588,6 +688,7 @@ class CameraRecorderService:
                     "segment": target_segment,
                     "detections": result["detections"],
                     "elapsed_seconds": result["elapsed_seconds"],
+                    "processing_ratio": result.get("processing_ratio"),
                     "cpu_usage": result["cpu_usage"],
                 }
             }
@@ -957,7 +1058,7 @@ class CameraRecorderService:
     # ------------------------------------------------------------------
 
     def _resolve_target_camera(self, specified_camera_id=None):
-        """Mencari kamera aktif yang akan direkam."""
+        """Resolve an active camera; never silently fall back to an inactive one."""
         cameras = db.get_all_cameras()
 
         target_id = specified_camera_id
@@ -967,18 +1068,41 @@ class CameraRecorderService:
                 target_id = int(env_cam)
 
         if target_id is not None:
+            try:
+                target_id = int(target_id)
+            except (TypeError, ValueError):
+                self.last_error = f"ID kamera tidak valid: {target_id!r}"
+                return None
             for cam in cameras:
-                if cam.get("camera_id") == target_id:
-                    return cam
+                try:
+                    camera_id = int(cam.get("camera_id"))
+                except (TypeError, ValueError):
+                    continue
+                if camera_id != target_id:
+                    continue
+                try:
+                    is_active = int(cam.get("status") or 0) == 1
+                except (TypeError, ValueError):
+                    is_active = False
+                if not is_active:
+                    self.last_error = f"Kamera {target_id} tidak aktif di konfigurasi"
+                    return None
+                if not str(cam.get("stream_url") or "").strip():
+                    self.last_error = f"Kamera {target_id} tidak memiliki stream URL"
+                    return None
+                return cam
+            self.last_error = f"Kamera {target_id} tidak ditemukan di database"
+            return None
 
-        # Jika target_id belum ditentukan, pilih kamera aktif pertama (status == 1)
         for cam in cameras:
-            if cam.get("status") == 1 and cam.get("stream_url"):
+            try:
+                is_active = int(cam.get("status") or 0) == 1
+            except (TypeError, ValueError):
+                is_active = False
+            if is_active and str(cam.get("stream_url") or "").strip():
                 return cam
 
-        # Fallback ke kamera pertama
-        if cameras:
-            return cameras[0]
+        self.last_error = "Tidak ada kamera aktif dengan stream URL yang valid"
 
         return None
 
@@ -987,23 +1111,32 @@ class CameraRecorderService:
         retry_delay = 3.0
 
         while self.is_running and not self.stop_event.is_set():
-            if not self.stream_url:
-                cam = self._resolve_target_camera(target_camera_id)
-                if not cam or not cam.get("stream_url"):
-                    self.status = "ERROR"
-                    self.last_error = "Tidak ada kamera aktif untuk direkam"
-                    print(f"[RECORDER] {self.last_error}. Menunggu 5 detik...")
-                    self.stop_event.wait(5.0)
-                    continue
+            try:
+                if not self.stream_url:
+                    cam = self._resolve_target_camera(target_camera_id)
+                    if not cam or not cam.get("stream_url"):
+                        self.status = "ERROR"
+                        if not self.last_error:
+                            self.last_error = "Tidak ada kamera aktif untuk direkam"
+                        print(f"[RECORDER] {self.last_error}. Menunggu 5 detik...")
+                        self.stop_event.wait(5.0)
+                        continue
 
-                self.camera_id = cam["camera_id"]
-                self.camera_name = cam.get("location") or f"Camera_{self.camera_id}"
-                self.stream_url = normalize_stream_url(cam["stream_url"])
-            else:
-                self.camera_id = target_camera_id or self.camera_id or 1
-                self.camera_name = self.camera_name or f"Camera_{self.camera_id}"
+                    self.camera_id = int(cam["camera_id"])
+                    self.camera_name = cam.get("location") or f"Camera_{self.camera_id}"
+                    self.stream_url = normalize_stream_url(cam["stream_url"])
+                else:
+                    self.camera_id = target_camera_id or self.camera_id or 1
+                    self.camera_name = self.camera_name or f"Camera_{self.camera_id}"
 
-            success = self._start_recording_session()
+                success = self._start_recording_session()
+            except Exception as exc:
+                self.status = "ERROR"
+                self.last_error = f"Gagal menyiapkan recorder: {exc}"
+                print(f"[RECORDER ERROR] {self.last_error}")
+                self.stop_event.wait(retry_delay)
+                continue
+
             if not success:
                 self.stop_event.wait(retry_delay)
                 continue
@@ -1022,24 +1155,26 @@ class CameraRecorderService:
 
     def _start_recording_session(self):
         """Inisialisasi direktori, sesi, muat state tersimpan, dan jalankan FFmpeg."""
-        self._terminate_ffmpeg()
-
-        self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.camera_dir = os.path.join(self.segments_dir, f"cam_{self.camera_id}")
-        os.makedirs(self.camera_dir, exist_ok=True)
-
-        self.state_file = os.path.join(self.camera_dir, "segment_queue_state.json")
-        self._load_state()
-
-        self.list_file = os.path.join(self.camera_dir, f"segments_{self.session_id}.csv")
-        segment_pattern = os.path.join(
-            self.camera_dir,
-            f"cam_{self.camera_id}_{self.session_id}_%05d.mp4"
-        )
-
-        command = self._build_ffmpeg_command(self.stream_url, segment_pattern, self.list_file)
-
         try:
+            self._terminate_ffmpeg()
+
+            self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            self.camera_dir = os.path.join(self.segments_dir, f"cam_{self.camera_id}")
+            os.makedirs(self.camera_dir, exist_ok=True)
+
+            self.state_file = os.path.join(self.camera_dir, "segment_queue_state.json")
+            self._load_state()
+
+            self.list_file = os.path.join(self.camera_dir, f"segments_{self.session_id}.csv")
+            segment_pattern = os.path.join(
+                self.camera_dir,
+                f"cam_{self.camera_id}_{self.session_id}_%05d.mp4"
+            )
+
+            command = self._build_ffmpeg_command(self.stream_url, segment_pattern, self.list_file)
+            with self._stderr_lock:
+                self.last_ffmpeg_stderr = []
+
             print(f"[RECORDER] Menjalankan FFmpeg segmenter untuk Kamera {self.camera_id} ({self.camera_name})")
             proc = subprocess.Popen(
                 command,
@@ -1075,11 +1210,15 @@ class CameraRecorderService:
             time.sleep(0.5)
             if proc.poll() is not None:
                 rc = proc.poll()
-                if rc != 0:
-                    self.status = "ERROR"
-                    self.last_error = f"FFmpeg langsung keluar dengan returncode {rc}"
-                    print(f"[RECORDER ERROR] {self.last_error}")
-                    return False
+                self._wait_for_stderr()
+                stderr_text = "\n".join(self._get_ffmpeg_stderr())
+                details = f": {stderr_text}" if stderr_text else ""
+                self.status = "ERROR"
+                self.last_error = (
+                    f"FFmpeg berhenti saat startup (returncode {rc}){details}"
+                )
+                print(f"[RECORDER ERROR] {self.last_error}")
+                return False
 
             return True
 
@@ -1131,14 +1270,27 @@ class CameraRecorderService:
         return cmd
 
     def _drain_stderr(self, proc):
-        """Menguras stderr FFmpeg secara asinkron."""
+        """Drain and retain a bounded tail of FFmpeg diagnostics."""
         try:
             if proc and proc.stderr:
                 for line in iter(proc.stderr.readline, b""):
-                    if not self.is_running or proc.poll() is not None:
-                        break
-        except Exception:
-            pass
+                    if isinstance(line, bytes):
+                        line = line.decode("utf-8", errors="replace")
+                    line = str(line).strip()
+                    if not line:
+                        continue
+                    with self._stderr_lock:
+                        self.last_ffmpeg_stderr.append(line[-1000:])
+                        self.last_ffmpeg_stderr = self.last_ffmpeg_stderr[-30:]
+        except Exception as exc:
+            with self._stderr_lock:
+                self.last_ffmpeg_stderr.append(f"[stderr reader error] {exc}")
+                self.last_ffmpeg_stderr = self.last_ffmpeg_stderr[-30:]
+
+    def _wait_for_stderr(self, timeout=0.5):
+        thread = self.stderr_thread
+        if thread and thread.is_alive():
+            thread.join(timeout=timeout)
 
     def _terminate_ffmpeg(self):
         """Mematikan proses FFmpeg yang sedang berjalan."""

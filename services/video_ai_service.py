@@ -485,6 +485,9 @@ def get_vehicle_crop_for_plate(frame, plate_bbox, vehicle_dets):
 
 
 class VideoAIService:
+    _segment_model_cache = {}
+    _segment_model_cache_lock = threading.Lock()
+
     def __init__(
         self,
         video_path,
@@ -493,6 +496,8 @@ class VideoAIService:
         show_window=True,
         progress_callback=None,
         source_name=None,
+        segment_processing=False,
+        segment_filename=None,
     ):
         self.video_path = video_path
         self.output_path = output_path
@@ -500,6 +505,9 @@ class VideoAIService:
         self.show_window = show_window
         self.progress_callback = progress_callback
         self.source_name = str(source_name or "Video offline").strip()[:255]
+        self.segment_processing = bool(segment_processing)
+        self.segment_filename = segment_filename
+        self.segment_dedup_evaluations = []
 
         self.session_id = uuid.uuid4().hex[:12]
         self.track_lifecycle = {}
@@ -542,6 +550,7 @@ class VideoAIService:
         self.plate_ocr = None
         self.person_tracker = None
         self.plate_tracker = None
+        self.model_load_seconds = 0.0
         self.results_lock = threading.Lock()
         self.inference_count = 0
         self.inference_timing_totals = {}
@@ -1104,11 +1113,30 @@ class VideoAIService:
                 f"Model plate tidak ditemukan:\n{PLATE_MODEL_PATH}"
             )
 
+        cache_key = (PERSON_MODEL_PATH, PLATE_MODEL_PATH)
+        if self.segment_processing:
+            with self._segment_model_cache_lock:
+                models = self._segment_model_cache.get(cache_key)
+                if models is None:
+                    models = self._create_models()
+                    self._segment_model_cache[cache_key] = models
+                else:
+                    print("[VIDEO AI] Menggunakan kembali model worker segmen yang sudah dimuat")
+        else:
+            models = self._create_models()
+
+        self.yolo_person, self.plate_detector, self.plate_ocr = models
+
+        os.makedirs(CAPTURE_DIR, exist_ok=True)
+        os.makedirs(PLATE_CAPTURE_DIR, exist_ok=True)
+
+    @staticmethod
+    def _create_models():
         print(f"[PERSON] {PERSON_MODEL_PATH}")
-        self.yolo_person = YOLO(PERSON_MODEL_PATH)
+        yolo_person = YOLO(PERSON_MODEL_PATH)
 
         print(f"[PLATE] {PLATE_MODEL_PATH}")
-        self.plate_detector = PlateDetector(
+        plate_detector = PlateDetector(
             PLATE_MODEL_PATH,
             confidence=PLATE_CONFIDENCE,
             imgsz=PLATE_IMGSZ,
@@ -1122,20 +1150,19 @@ class VideoAIService:
         )
 
         try:
-            self.plate_ocr = PlateOCR(
+            plate_ocr = PlateOCR(
                 scale=2.5,
                 min_confidence=0.15,
                 verbose=False,
                 fast_mode=True,
             )
-            self.plate_ocr.warmup()
+            plate_ocr.warmup()
             print("[OCR] Siap")
         except Exception as exc:
-            self.plate_ocr = None
+            plate_ocr = None
             print(f"[OCR WARNING] OCR tidak tersedia: {exc}")
 
-        os.makedirs(CAPTURE_DIR, exist_ok=True)
-        os.makedirs(PLATE_CAPTURE_DIR, exist_ok=True)
+        return yolo_person, plate_detector, plate_ocr
 
     # ------------------------------------------------------------
     # PERSON
@@ -1797,23 +1824,77 @@ class VideoAIService:
         previous_meta = self.person_capture_state.get(f"{event_key}:meta") or {}
         direction = previous_meta.get("direction", "unknown")
 
+        dedup_decision = None
+        database_save_skipped = False
+        if self.segment_processing:
+            flag_value = os.environ.get("VIDEO_SEGMENT_DEDUP_ENABLED", "true").strip().lower()
+            if flag_value in ("true", "1", "yes", "on"):
+                blocking_enabled = True
+            elif flag_value in ("false", "0", "no", "off"):
+                blocking_enabled = False
+            else:
+                print(
+                    "[SEGMENT DEDUP WARNING] VIDEO_SEGMENT_DEDUP_ENABLED tidak valid; "
+                    "filter dinonaktifkan untuk keamanan"
+                )
+                blocking_enabled = False
+
+            try:
+                from services.shadow_dedup_service import ShadowDedupService
+
+                dedup_decision = ShadowDedupService.get_instance().evaluate_segment_insert(
+                    camera_id=self.camera_id,
+                    plate_number=text,
+                    event_key=event_key,
+                    track_id=(
+                        int(vehicle_track_id)
+                        if str(vehicle_track_id).lstrip("-").isdigit()
+                        else None
+                    ),
+                    source_name=self.source_name,
+                    timestamp=datetime.now(),
+                    plate_is_valid=valid,
+                    blocking_enabled=blocking_enabled,
+                    segment_filename=self.segment_filename,
+                    tracking_generation=vehicle_generation,
+                )
+                self.segment_dedup_evaluations.append(dedup_decision)
+                database_save_skipped = (
+                    blocking_enabled
+                    and dedup_decision.get("verdict") == "HOLD"
+                    and dedup_decision.get("rule_triggered")
+                    == "SAME_VIDEO_EVENT_DUPLICATE"
+                    and dedup_decision.get("actual_action")
+                    == "SEGMENT_INSERT_BLOCKED"
+                )
+            except Exception as exc:
+                print(
+                    f"[SEGMENT DEDUP ERROR] Evaluasi gagal; INSERT diteruskan: {exc}"
+                )
+
         try:
-            db.save_detection_event(
-                camera_id=self.camera_id,
-                plate_number=text if valid else None,
-                plate_crop=crop,
-                plate_conf=det_conf,
-                ocr_conf=ocr_conf,
-                track_id=int(vehicle_track_id) if str(vehicle_track_id).lstrip("-").isdigit() else None,
-                object_type="vehicle",
-                vehicle_type="unknown",
-                vehicle_confidence=vehicle_score,
-                vehicle_crop=vehicle_crop,
-                direction=direction,
-                event_key=event_key,
-                source_type="video",
-                source_name=self.source_name,
-            )
+            if database_save_skipped:
+                print(
+                    f"[SEGMENT DEDUP HOLD] event_id={event_key} "
+                    f"reason={dedup_decision.get('reason')}"
+                )
+            else:
+                db.save_detection_event(
+                    camera_id=self.camera_id,
+                    plate_number=text if valid else None,
+                    plate_crop=crop,
+                    plate_conf=det_conf,
+                    ocr_conf=ocr_conf,
+                    track_id=int(vehicle_track_id) if str(vehicle_track_id).lstrip("-").isdigit() else None,
+                    object_type="vehicle",
+                    vehicle_type="unknown",
+                    vehicle_confidence=vehicle_score,
+                    vehicle_crop=vehicle_crop,
+                    direction=direction,
+                    event_key=event_key,
+                    source_type="video",
+                    source_name=self.source_name,
+                )
         except Exception as exc:
             print(f"[DB PLATE ERROR] {exc}")
 
@@ -1827,6 +1908,8 @@ class VideoAIService:
             "valid": valid,
             "plate_image_path": path,
             "video_time": video_time,
+            "segment_dedup_decision": dedup_decision,
+            "database_save_skipped": database_save_skipped,
         })
 
         self.last_plate_capture = result
@@ -2401,10 +2484,8 @@ class VideoAIService:
                     min_ocr_width=18,
                     min_ocr_height=6,
                 )
-                print(
-                    f"[VIDEO TIMING] model_load="
-                    f"{time.perf_counter() - model_load_start:.2f}s"
-                )
+                self.model_load_seconds = time.perf_counter() - model_load_start
+                print(f"[VIDEO TIMING] model_load={self.model_load_seconds:.2f}s")
 
                 while True:
                     item = inference_queue.get()
