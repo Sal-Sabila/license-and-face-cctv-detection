@@ -13,7 +13,7 @@ import supervision as sv
 import uuid
 
 from ai.plate.detector import PlateDetector
-from ai.plate.ocr import PlateOCR
+from ai.plate.ocr_worker import get_shared_ocr_lane
 from tracker import PlateTracker
 import db
 
@@ -787,19 +787,25 @@ def _get_distance_zone(box, camera_id, width, height):
     return "FAR"
 
 
-def _plate_ready_for_ocr(plate):
+def _plate_ocr_rejection_reason(plate):
     bbox = plate.get("bbox") or plate.get("box") or []
     if len(bbox) != 4:
-        return False
+        return "invalid_bbox"
     x1, y1, x2, y2 = [int(v) for v in bbox]
     width = x2 - x1
     height = y2 - y1
     confidence = _safe_float(plate.get("confidence", plate.get("conf", 0.0)))
-    return (
-        width >= OCR_MIN_PLATE_WIDTH
-        and height >= OCR_MIN_PLATE_HEIGHT
-        and confidence >= OCR_MIN_PLATE_CONFIDENCE
-    )
+    if width < OCR_MIN_PLATE_WIDTH:
+        return "width_below_ocr_min"
+    if height < OCR_MIN_PLATE_HEIGHT:
+        return "height_below_ocr_min"
+    if confidence < OCR_MIN_PLATE_CONFIDENCE:
+        return "confidence_below_ocr_min"
+    return None
+
+
+def _plate_ready_for_ocr(plate):
+    return _plate_ocr_rejection_reason(plate) is None
 
 
 def _calculate_iou(boxA, boxB):
@@ -898,9 +904,9 @@ class StreamAIService:
         )
 
         try:
-            self.plate_ocr = PlateOCR(scale=2.5, min_confidence=0.15, verbose=False, fast_mode=True)
+            self.plate_ocr = get_shared_ocr_lane("stream")
             self.plate_ocr.warmup()
-            print("[AI STREAM] OCR siap")
+            print("[AI STREAM] OCR lane realtime siap")
         except Exception as exc:
             self.plate_ocr = None
             print(f"[AI STREAM WARNING] OCR tidak tersedia: {exc}")
@@ -954,7 +960,21 @@ class StreamAIService:
         self.last_display_time = {}
         self.plate_detection_cache = {}
         self.ocr_cache = {}
+        self.last_vehicle_detection_metrics = {}
+        self.last_plate_detection_metrics = {}
         self.saved_event_meta = {}
+        self.stream_save_totals = {
+            "db_event_attempted": 0,
+            "db_event_inserted": 0,
+            "db_event_enriched": 0,
+            "db_event_duplicate": 0,
+            "db_event_errors": 0,
+            "plate_event_attempted": 0,
+            "plate_event_persisted": 0,
+            "plate_association_missed": 0,
+            "plate_without_ocr": 0,
+        }
+        self.last_plate_capture_metrics = {}
         self.plate_roi_cursor = {}
         self.last_pipeline_metrics = {}
 
@@ -982,6 +1002,8 @@ class StreamAIService:
         status["ocr_min_plate_width"] = OCR_MIN_PLATE_WIDTH
         status["ocr_min_plate_height"] = OCR_MIN_PLATE_HEIGHT
         status["pipeline_metrics"] = dict(self.last_pipeline_metrics)
+        if self.plate_ocr is not None:
+            status["ocr_metrics"] = self.plate_ocr.stats()
         return status
 
     def _camera_state(self, camera_id):
@@ -1212,6 +1234,15 @@ class StreamAIService:
     def _detect_vehicles(self, frame, camera_id=1):
         camera_id = _normalize_camera_id(camera_id)
         detections = []
+        metrics = {
+            "yolo_boxes": 0,
+            "zone_rejected": 0,
+            "size_rejected": 0,
+            "aspect_rejected": 0,
+            "class_rejected": 0,
+            "tracker_outputs": 0,
+            "returned": 0,
+        }
         try:
             h, w = frame.shape[:2]
             result = self.yolo_person(
@@ -1223,6 +1254,7 @@ class StreamAIService:
             if boxes is None or len(boxes) == 0:
                 detections_for_tracker = sv.Detections.empty()
             else:
+                metrics["yolo_boxes"] = len(boxes)
                 boxes_xyxy = boxes.xyxy.cpu().numpy().astype(int)
                 classes = boxes.cls.cpu().numpy().astype(int)
                 keep_indices = []
@@ -1234,17 +1266,22 @@ class StreamAIService:
                     zone = _get_distance_zone(bbox, camera_id, w, h)
 
                     if ENABLE_DISTANCE_ZONE and zone == "FAR":
+                        metrics["zone_rejected"] += 1
                         continue
                     if cls_id == 0:
                         if bw < MIN_PERSON_WIDTH or bh < MIN_PERSON_HEIGHT:
+                            metrics["size_rejected"] += 1
                             continue
                     elif cls_id in VEHICLE_TYPES:
                         if bw < MIN_VEHICLE_WIDTH or bh < MIN_VEHICLE_HEIGHT:
+                            metrics["size_rejected"] += 1
                             continue
                         aspect = bw / max(1, bh)
                         if aspect < FAKE_VEHICLE_ASPECT_MIN:
+                            metrics["aspect_rejected"] += 1
                             continue
                     else:
+                        metrics["class_rejected"] += 1
                         continue
                     keep_indices.append(i)
 
@@ -1257,6 +1294,7 @@ class StreamAIService:
             tracked = self._camera_state(camera_id)["person_tracker"].update_with_detections(
                 detections_for_tracker
             )
+            metrics["tracker_outputs"] = len(tracked)
 
             for i in range(len(tracked)):
                 bbox = tracked.xyxy[i].astype(int).tolist()
@@ -1321,15 +1359,57 @@ class StreamAIService:
 
         except Exception as exc:
             print(f"[AI STREAM ERROR] Vehicle detection failed: {exc}")
+            metrics["error"] = str(exc)
+        metrics["returned"] = len(detections)
+        self.last_vehicle_detection_metrics = metrics
         return detections
 
     def _detect_plates_in_vehicles(self, frame, vehicle_dets, camera_id=None, current_time=None):
         h, w = frame.shape[:2]
-        candidates = [
+        vehicle_candidates = [
             d for d in vehicle_dets
             if d.get("cls") in (2, 3, 5, 7)
-            and (not ENABLE_DISTANCE_ZONE or d.get("distance_zone") == "NEAR")
         ]
+        candidates = [
+            d for d in vehicle_candidates
+            if not ENABLE_DISTANCE_ZONE or d.get("distance_zone") == "NEAR"
+        ]
+        metrics = {
+            "vehicle_detections": len(vehicle_candidates),
+            "far_vehicles_filtered": len(vehicle_candidates) - len(candidates),
+            "near_vehicle_candidates": len(candidates),
+            "roi_limit_skipped": 0,
+            "rois_selected": 0,
+            "roi_inference_calls": 0,
+            "roi_too_small": 0,
+            "roi_invalid": 0,
+            "roi_empty": 0,
+            "inference_errors": 0,
+            "yolo_boxes": 0,
+            "yolo_class_rejected": 0,
+            "yolo_width_rejected": 0,
+            "yolo_height_rejected": 0,
+            "yolo_aspect_rejected": 0,
+            "yolo_invalid_box": 0,
+            "yolo_empty_crop": 0,
+            "detector_accepted": 0,
+            "service_bbox_rejected": 0,
+            "service_size_rejected": 0,
+            "service_crop_rejected": 0,
+            "ocr_ready": 0,
+            "ocr_not_ready_bbox": 0,
+            "ocr_not_ready_width": 0,
+            "ocr_not_ready_height": 0,
+            "ocr_not_ready_confidence": 0,
+            "duplicate_suppressed": 0,
+            "plate_crop_count": 0,
+            "plate_crop_min_width": None,
+            "plate_crop_min_height": None,
+            "plate_crop_max_width": 0,
+            "plate_crop_max_height": 0,
+            "confidence_min": None,
+            "confidence_max": None,
+        }
         def _candidate_order(detection):
             try:
                 track_id = int(detection.get("track_id", -1))
@@ -1348,8 +1428,10 @@ class StreamAIService:
             start = self.plate_roi_cursor.get(camera_id, 0) % len(candidates)
             candidates = candidates[start:] + candidates[:start]
             roi_count = min(MAX_PLATE_ROI, len(candidates))
+            metrics["roi_limit_skipped"] = len(candidates) - roi_count
             self.plate_roi_cursor[camera_id] = (start + roi_count) % len(candidates)
             candidates = candidates[:roi_count]
+        metrics["rois_selected"] = len(candidates)
         all_plates = []
         for vehicle in candidates:
             vx1, vy1, vx2, vy2 = [int(v) for v in vehicle["box"]]
@@ -1357,36 +1439,105 @@ class StreamAIService:
             vx2 = max(0, min(vx2, w)); vy2 = max(0, min(vy2, h))
             vw = vx2 - vx1; vh = vy2 - vy1
             if vw < PLATE_VEHICLE_MIN_WIDTH or vh < PLATE_VEHICLE_MIN_HEIGHT:
+                metrics["roi_too_small"] += 1
                 continue
             if vx2 <= vx1 or vy2 <= vy1:
+                metrics["roi_invalid"] += 1
                 continue
             pad_x = int(vw * 0.06); pad_y = int(vh * 0.10)
             rx1 = max(0, vx1 - pad_x); ry1 = max(0, vy1 - pad_y)
             rx2 = min(w, vx2 + pad_x); ry2 = min(h, vy2 + pad_y)
             crop = frame[ry1:ry2, rx1:rx2]
             if crop.size == 0:
+                metrics["roi_empty"] += 1
                 continue
             try:
                 local_plates = self.plate_detector.detect(crop) or []
             except Exception as exc:
+                metrics["inference_errors"] += 1
                 print(f"[AI STREAM ERROR] Plate ROI failed: {exc}")
                 continue
+            metrics["roi_inference_calls"] += 1
+            detector_metrics = getattr(self.plate_detector, "last_metrics", {})
+            metrics["yolo_boxes"] += detector_metrics.get("yolo_boxes", 0)
+            metrics["yolo_class_rejected"] += detector_metrics.get(
+                "class_rejected", 0
+            )
+            metrics["yolo_width_rejected"] += detector_metrics.get(
+                "width_rejected", 0
+            )
+            metrics["yolo_height_rejected"] += detector_metrics.get(
+                "height_rejected", 0
+            )
+            metrics["yolo_aspect_rejected"] += detector_metrics.get(
+                "aspect_rejected", 0
+            )
+            metrics["yolo_invalid_box"] += detector_metrics.get(
+                "invalid_box", 0
+            )
+            metrics["yolo_empty_crop"] += detector_metrics.get("empty_crop", 0)
+            metrics["detector_accepted"] += detector_metrics.get(
+                "accepted", len(local_plates)
+            )
+            detected_confidence_min = detector_metrics.get("confidence_min")
+            detected_confidence_max = detector_metrics.get("confidence_max")
+            if detected_confidence_min is not None:
+                current_min = metrics["confidence_min"]
+                metrics["confidence_min"] = (
+                    detected_confidence_min
+                    if current_min is None
+                    else min(current_min, detected_confidence_min)
+                )
+            if detected_confidence_max is not None:
+                current_max = metrics["confidence_max"]
+                metrics["confidence_max"] = (
+                    detected_confidence_max
+                    if current_max is None
+                    else max(current_max, detected_confidence_max)
+                )
+            metrics["inference_errors"] += int(
+                "inference_error" in detector_metrics
+            )
             for plate in local_plates:
                 lb = plate.get("bbox", [])
                 if len(lb) != 4:
+                    metrics["service_bbox_rejected"] += 1
                     continue
                 bx1, by1, bx2, by2 = [int(v) for v in lb]
                 bx1 += rx1; by1 += ry1; bx2 += rx1; by2 += ry1
                 bx1 = max(0, min(bx1, w - 1)); by1 = max(0, min(by1, h - 1))
                 bx2 = max(0, min(bx2, w)); by2 = max(0, min(by2, h))
                 if bx2 <= bx1 or by2 <= by1:
+                    metrics["service_bbox_rejected"] += 1
                     continue
                 plate_width = bx2 - bx1; plate_height = by2 - by1
                 if plate_width < PLATE_MIN_WIDTH or plate_height < PLATE_MIN_HEIGHT:
+                    metrics["service_size_rejected"] += 1
                     continue
-                plate_crop = frame[by1:by2, bx1:bx2]
+                plate_crop = plate.get("crop")
+                if plate_crop is None or getattr(plate_crop, "size", 0) == 0:
+                    plate_crop = frame[by1:by2, bx1:bx2]
                 if plate_crop.size == 0:
+                    metrics["service_crop_rejected"] += 1
                     continue
+                crop_height, crop_width = plate_crop.shape[:2]
+                metrics["plate_crop_count"] += 1
+                metrics["plate_crop_min_width"] = (
+                    crop_width
+                    if metrics["plate_crop_min_width"] is None
+                    else min(metrics["plate_crop_min_width"], crop_width)
+                )
+                metrics["plate_crop_min_height"] = (
+                    crop_height
+                    if metrics["plate_crop_min_height"] is None
+                    else min(metrics["plate_crop_min_height"], crop_height)
+                )
+                metrics["plate_crop_max_width"] = max(
+                    metrics["plate_crop_max_width"], crop_width
+                )
+                metrics["plate_crop_max_height"] = max(
+                    metrics["plate_crop_max_height"], crop_height
+                )
                 item = dict(plate)
                 item["bbox"] = [bx1, by1, bx2, by2]
                 item["box"] = item["bbox"]
@@ -1398,6 +1549,25 @@ class StreamAIService:
                 item["vehicle_crop"] = crop
                 item["distance_zone"] = "NEAR"
                 item["ocr_ready"] = _plate_ready_for_ocr(item)
+                if item["ocr_ready"]:
+                    metrics["ocr_ready"] += 1
+                else:
+                    reason = _plate_ocr_rejection_reason(item)
+                    metric_key = {
+                        "invalid_bbox": "ocr_not_ready_bbox",
+                        "width_below_ocr_min": "ocr_not_ready_width",
+                        "height_below_ocr_min": "ocr_not_ready_height",
+                        "confidence_below_ocr_min": "ocr_not_ready_confidence",
+                    }.get(reason)
+                    if metric_key:
+                        metrics[metric_key] += 1
+                print(
+                    f"[PLATE DETECTION] camera={camera_id} "
+                    f"vehicle_track={item['vehicle_track_id']} "
+                    f"bbox={item['bbox']} conf={_safe_float(item.get('confidence')):.3f} "
+                    f"crop={crop_width}x{crop_height} "
+                    f"ocr_ready={int(item['ocr_ready'])}"
+                )
                 all_plates.append(item)
 
         all_plates.sort(
@@ -1423,6 +1593,9 @@ class StreamAIService:
                     break
             if not duplicate:
                 final.append(candidate)
+        metrics["duplicate_suppressed"] = len(all_plates) - len(final)
+        metrics["final_plate_detections"] = len(final)
+        self.last_plate_detection_metrics = metrics
         return final
 
     def _consume_finished_plate(self, frame, vehicle_dets, camera_id):
@@ -1430,7 +1603,14 @@ class StreamAIService:
         camera_id = _normalize_camera_id(camera_id)
         plate_tracker = self._camera_state(camera_id)["plate_tracker"]
         finished_list = plate_tracker.consume_finished_captures()
+        capture_metrics = {
+            "finalized": len(finished_list),
+            "review_confidence_rejected": 0,
+            "cooldown_suppressed": 0,
+            "ready_for_save": 0,
+        }
         if not finished_list:
+            self.last_plate_capture_metrics = capture_metrics
             return []
 
         processed = []
@@ -1462,11 +1642,13 @@ class StreamAIService:
 
             valid = _valid_indonesian_plate(text)
             if not valid and det_conf < PLATE_REVIEW_CONFIDENCE:
+                capture_metrics["review_confidence_rejected"] += 1
                 continue
 
             plate_key = f"plate:{camera_id}:{text}" if valid and text else f"plate-track:{camera_id}:{track_id}"
             last_saved = self.saved_plate_events.get(plate_key)
             if last_saved is not None and now - last_saved < PLATE_COOLDOWN:
+                capture_metrics["cooldown_suppressed"] += 1
                 continue
             self.saved_plate_events[plate_key] = now
 
@@ -1528,6 +1710,8 @@ class StreamAIService:
             self.last_plate_history = list(plate_tracker.history)
             processed.append(finished)
 
+        capture_metrics["ready_for_save"] = len(processed)
+        self.last_plate_capture_metrics = capture_metrics
         return processed
 
     # SAVE EVENTS (ANTI-DUPLIKAT UTAMA)
@@ -1611,6 +1795,10 @@ class StreamAIService:
                 ),
                 default=None,
             )
+            if plate is None and plate_dets:
+                self.stream_save_totals["plate_association_missed"] += 1
+            elif plate is not None and not _normalize_text(plate.get("text", "")):
+                self.stream_save_totals["plate_without_ocr"] += 1
 
             bx1, by1, bx2, by2 = vehicle_box
             bw = max(1, bx2 - bx1)
@@ -1713,6 +1901,12 @@ class StreamAIService:
             final_direction = camera_orientation
 
             try:
+                self.stream_save_totals["db_event_attempted"] += 1
+                has_plate_input = bool(
+                    plate_text_corrected or (plate or {}).get("crop") is not None
+                )
+                if has_plate_input:
+                    self.stream_save_totals["plate_event_attempted"] += 1
                 result = db.save_detection_event(
                     camera_id=camera_id,
                     plate_number=plate_text_corrected or None,
@@ -1733,6 +1927,33 @@ class StreamAIService:
                     event_key=event_key,
                     source_type="stream",
                     source_name=None,
+                )
+                has_persisted_plate = bool(
+                    result
+                    and (
+                        result.get("has_plate")
+                        or result.get("plate_id") is not None
+                    )
+                )
+                if has_persisted_plate:
+                    self.stream_save_totals["plate_event_persisted"] += 1
+                if result and result.get("duplicate"):
+                    result_key = (
+                        "db_event_enriched"
+                        if result.get("enriched")
+                        else "db_event_duplicate"
+                    )
+                    self.stream_save_totals[result_key] += 1
+                    action = result_key.removeprefix("db_event_")
+                else:
+                    self.stream_save_totals["db_event_inserted"] += 1
+                    action = "inserted"
+                print(
+                    f"[STREAM DB EVENT] camera={camera_id} "
+                    f"event_key={event_key} action={action} "
+                    f"plate_input={int(has_plate_input)} "
+                    f"plate_persisted={int(has_persisted_plate)} "
+                    f"detection_id={(result or {}).get('detection_id')}"
                 )
 
                 self.captured_tracks[event_key] = current_time
@@ -1770,6 +1991,7 @@ class StreamAIService:
                     )
 
             except Exception as exc:
+                self.stream_save_totals["db_event_errors"] += 1
                 print(f"[AI STREAM ERROR] Save vehicle event failed: {exc}")
 
         # PERSON EVENTS
@@ -2565,9 +2787,15 @@ class StreamAIService:
     ):
         camera_id = _normalize_camera_id(camera_id)
         camera_state = self._camera_state(camera_id)
+        plate_tracker = camera_state["plate_tracker"]
+        tracker_counts_before = dict(plate_tracker.pipeline_counts)
+        save_totals_before = dict(self.stream_save_totals)
         now = time.time()
         ai_pipeline_start = time.perf_counter()
         stage_times = {}
+        vehicle_stage_metrics = {}
+        plate_stage_metrics = {}
+        plate_capture_metrics = {}
         stage_times["queue_wait_ms"] = queue_wait_ms
         stage_times["frames_coalesced_total"] = self.frame_queue_coalesced.get(
             camera_id, 0
@@ -2586,6 +2814,9 @@ class StreamAIService:
             stage_times["prepare_ms"] = (time.perf_counter() - stage_start) * 1000
             stage_start = time.perf_counter()
             person_dets = self._detect_vehicles(ai_frame, camera_id) or []
+            vehicle_stage_metrics = dict(
+                self.last_vehicle_detection_metrics
+            )
             stage_times["vehicle_ms"] = (time.perf_counter() - stage_start) * 1000
 
             # ✅ Panggil object grouping SEBELUM plate detection
@@ -2611,13 +2842,15 @@ class StreamAIService:
                     plate_raw = self._detect_plates_in_vehicles(
                         ai_frame, person_dets, camera_id=camera_id, current_time=now
                     ) or []
+                    plate_stage_metrics = dict(
+                        self.last_plate_detection_metrics
+                    )
                     stage_times["plate_detect_ms"] = (
                         time.perf_counter() - stage_start
                     ) * 1000
                     camera_state["last_plate_detection_time"] = now
                     self.latest_raw_plate_detections = plate_raw
                     self._select_dynamic_focus(frame, person_dets, plate_raw, now)
-                    plate_tracker = camera_state["plate_tracker"]
                     if self.plate_ocr is not None:
                         try:
                             ocr_candidates = [
@@ -2639,6 +2872,9 @@ class StreamAIService:
                                 plate_dets.append(result)
                         finished_items = self._consume_finished_plate(
                             frame, person_dets, camera_id
+                        )
+                        plate_capture_metrics = dict(
+                            self.last_plate_capture_metrics
                         )
                         if finished_items:
                             plate_dets.extend(finished_items)
@@ -2668,6 +2904,9 @@ class StreamAIService:
                         finished_items = self._consume_finished_plate(
                             frame, person_dets, camera_id
                         )
+                        plate_capture_metrics = dict(
+                            self.last_plate_capture_metrics
+                        )
                         if finished_items:
                             plate_dets.extend(finished_items)
             except Exception as exc:
@@ -2690,7 +2929,10 @@ class StreamAIService:
             elapsed = time.perf_counter() - ai_pipeline_start
             self.last_ai_time = elapsed
             stage_times["total_ms"] = elapsed * 1000
-            stage_times["vehicle_count"] = len(person_dets)
+            stage_times["vehicle_count"] = sum(
+                item.get("cls") in VEHICLE_TYPES for item in person_dets
+            )
+            stage_times["tracked_object_count"] = len(person_dets)
             stage_times["near_vehicle_count"] = sum(
                 item.get("cls") in VEHICLE_TYPES
                 and item.get("distance_zone") == "NEAR"
@@ -2700,8 +2942,185 @@ class StreamAIService:
             stage_times["ocr_ready_count"] = sum(
                 bool(plate.get("ocr_ready")) for plate in plate_raw
             )
+            tracker_counts_after = dict(plate_tracker.pipeline_counts)
+            tracker_delta = {
+                key: tracker_counts_after.get(key, 0) - tracker_counts_before.get(key, 0)
+                for key in set(tracker_counts_before) | set(tracker_counts_after)
+            }
+            save_delta = {
+                key: self.stream_save_totals.get(key, 0) - save_totals_before.get(key, 0)
+                for key in self.stream_save_totals
+            }
+            ocr_status = (
+                self.plate_ocr.stats()
+                if self.plate_ocr is not None
+                else {}
+            )
+            ocr_manager = getattr(self.plate_ocr, "manager", None)
+            segment_ocr_status = (
+                ocr_manager.stats("segment")
+                if ocr_manager is not None
+                else {}
+            )
+            stage_times.update({
+                f"plate_{key}": value
+                for key, value in plate_stage_metrics.items()
+            })
+            stage_times.update({
+                f"vehicle_{key}": value
+                for key, value in vehicle_stage_metrics.items()
+            })
+            stage_times.update({
+                f"capture_{key}": value
+                for key, value in plate_capture_metrics.items()
+            })
+            stage_times.update({
+                f"tracker_{key}": value
+                for key, value in tracker_delta.items()
+            })
+            stage_times.update({
+                f"save_{key}": value
+                for key, value in save_delta.items()
+            })
+            stage_times["ocr_backlog"] = ocr_status.get("backlog", 0)
+            stage_times["ocr_queue_wait_ms_last"] = ocr_status.get(
+                "queue_wait_ms_last", 0.0
+            )
+            stage_times["ocr_total_seconds_last"] = ocr_status.get(
+                "total_seconds_last", 0.0
+            )
+            stage_times["ocr_completed_total"] = ocr_status.get("completed", 0)
+            stage_times["ocr_submitted_total"] = ocr_status.get("submitted", 0)
+            stage_times["ocr_recognized_total"] = ocr_status.get(
+                "recognized_reads", 0
+            )
+            stage_times["ocr_stale_total"] = ocr_status.get("stale", 0)
+            stage_times["ocr_dropped_total"] = ocr_status.get("dropped", 0)
+            stage_times["ocr_errors_total"] = ocr_status.get("errors", 0)
+            stage_times["ocr_backlog_peak"] = ocr_status.get("backlog_peak", 0)
+            stage_times["ocr_queue_wait_avg_ms"] = ocr_status.get(
+                "queue_wait_ms_avg_recent", 0.0
+            )
+            stage_times["ocr_inference_avg_ms"] = (
+                ocr_status.get("ocr_seconds_avg", 0.0) * 1000
+            )
+            stage_times["ocr_total_avg_ms"] = (
+                ocr_status.get("total_seconds_avg_recent", 0.0) * 1000
+            )
+            stage_times["ocr_cpu_percent"] = ocr_status.get("cpu_percent")
+            stage_times["ocr_process_rss_mb"] = ocr_status.get("process_rss_mb")
+            stage_times["segment_ocr_backlog"] = segment_ocr_status.get(
+                "backlog", 0
+            )
+            stage_times["segment_ocr_completed"] = segment_ocr_status.get(
+                "completed", 0
+            )
+            stage_times["segment_ocr_failed"] = segment_ocr_status.get(
+                "failed", 0
+            )
             self.last_pipeline_metrics[camera_id] = dict(stage_times)
             self.adaptive_ai.update(elapsed)
+            detector_confidence_min = plate_stage_metrics.get(
+                "confidence_min"
+            )
+            detector_confidence_max = plate_stage_metrics.get(
+                "confidence_max"
+            )
+            print(
+                f"[PLATE FLOW] camera={camera_id} "
+                f"vehicles={stage_times['vehicle_count']} "
+                f"vehicle_yolo={vehicle_stage_metrics.get('yolo_boxes', 0)} "
+                f"vehicle_zone_reject={vehicle_stage_metrics.get('zone_rejected', 0)} "
+                f"vehicle_size_reject={vehicle_stage_metrics.get('size_rejected', 0)} "
+                f"vehicle_tracker={vehicle_stage_metrics.get('tracker_outputs', 0)} "
+                f"near={stage_times['near_vehicle_count']} "
+                f"roi_candidates={plate_stage_metrics.get('near_vehicle_candidates', 0)} "
+                f"roi_used={plate_stage_metrics.get('rois_selected', 0)} "
+                f"roi_skipped_limit={plate_stage_metrics.get('roi_limit_skipped', 0)} "
+                f"roi_too_small={plate_stage_metrics.get('roi_too_small', 0)} "
+                f"roi_errors={plate_stage_metrics.get('inference_errors', 0)} "
+                f"yolo_boxes={plate_stage_metrics.get('yolo_boxes', 0)} "
+                f"yolo_accepted={plate_stage_metrics.get('detector_accepted', 0)} "
+                f"yolo_reject_class={plate_stage_metrics.get('yolo_class_rejected', 0)} "
+                f"plate_crop_count={plate_stage_metrics.get('plate_crop_count', 0)} "
+                f"plate_crop_min="
+                f"{plate_stage_metrics.get('plate_crop_min_width') or '-'}x"
+                f"{plate_stage_metrics.get('plate_crop_min_height') or '-'} "
+                f"plate_crop_max="
+                f"{plate_stage_metrics.get('plate_crop_max_width', 0)}x"
+                f"{plate_stage_metrics.get('plate_crop_max_height', 0)} "
+                f"yolo_conf={detector_confidence_min if detector_confidence_min is not None else '-'}:"
+                f"{detector_confidence_max if detector_confidence_max is not None else '-'} "
+                f"yolo_reject_size="
+                f"{plate_stage_metrics.get('yolo_width_rejected', 0) + plate_stage_metrics.get('yolo_height_rejected', 0)} "
+                f"yolo_reject_aspect={plate_stage_metrics.get('yolo_aspect_rejected', 0)} "
+                f"yolo_reject_invalid="
+                f"{plate_stage_metrics.get('yolo_invalid_box', 0) + plate_stage_metrics.get('yolo_empty_crop', 0) + plate_stage_metrics.get('service_bbox_rejected', 0) + plate_stage_metrics.get('service_size_rejected', 0) + plate_stage_metrics.get('service_crop_rejected', 0)} "
+                f"plate_detections={len(plate_raw)} "
+                f"ocr_ready={stage_times['ocr_ready_count']} "
+                f"ocr_not_ready_size="
+                f"{plate_stage_metrics.get('ocr_not_ready_width', 0) + plate_stage_metrics.get('ocr_not_ready_height', 0)} "
+                f"ocr_not_ready_conf="
+                f"{plate_stage_metrics.get('ocr_not_ready_confidence', 0)} "
+                f"plate_track_match_vehicle_id="
+                f"{tracker_delta.get('matched_by_vehicle_track_id', 0)} "
+                f"ocr_submit={tracker_delta.get('ocr_submitted', 0)} "
+                f"ocr_duplicate_crop_skip="
+                f"{tracker_delta.get('ocr_duplicate_crop_skipped', 0)} "
+                f"ocr_candidate_buffered="
+                f"{tracker_delta.get('ocr_candidate_buffered', 0)} "
+                f"ocr_candidate_discarded_stable="
+                f"{tracker_delta.get('ocr_candidate_discarded_stable', 0)} "
+                f"ocr_retry_limit="
+                f"{tracker_delta.get('ocr_retry_limit_reached', 0)} "
+                f"ocr_read={tracker_delta.get('ocr_nonempty', 0)} "
+                f"ocr_recorded={tracker_delta.get('ocr_recorded', 0)} "
+                f"ocr_reject_empty={tracker_delta.get('ocr_empty_text', 0)} "
+                f"ocr_reject_conf={tracker_delta.get('ocr_rejected_confidence', 0)} "
+                f"ocr_reject_format={tracker_delta.get('ocr_rejected_invalid_format', 0)} "
+                f"final_reject_consistency="
+                f"{tracker_delta.get('final_rejected_insufficient_consistency', 0)} "
+                f"final_reject_conf={tracker_delta.get('final_rejected_confidence', 0)} "
+                f"final_reject_format={tracker_delta.get('final_rejected_plate_format', 0)} "
+                f"finalized={tracker_delta.get('finalized', 0)} "
+                f"capture_ready={plate_capture_metrics.get('ready_for_save', 0)} "
+                f"capture_reject_review="
+                f"{plate_capture_metrics.get('review_confidence_rejected', 0)} "
+                f"capture_cooldown="
+                f"{plate_capture_metrics.get('cooldown_suppressed', 0)} "
+                f"plate_results={len(plate_dets)} "
+                f"db_plate_attempt={save_delta.get('plate_event_attempted', 0)} "
+                f"db_plate_persisted={save_delta.get('plate_event_persisted', 0)} "
+                f"db_inserted={save_delta.get('db_event_inserted', 0)} "
+                f"db_enriched={save_delta.get('db_event_enriched', 0)} "
+                f"plate_unmatched_vehicle="
+                f"{save_delta.get('plate_association_missed', 0)} "
+                f"plate_without_ocr={save_delta.get('plate_without_ocr', 0)} "
+                f"db_duplicate={save_delta.get('db_event_duplicate', 0)} "
+                f"db_error={save_delta.get('db_event_errors', 0)} "
+                f"roi_ms={stage_times.get('plate_detect_ms', 0):.1f} "
+                f"tracker_ms={stage_times.get('ocr_tracker_ms', 0):.1f} "
+                f"ocr_queue_ms={stage_times['ocr_queue_wait_ms_last']:.1f} "
+                f"ocr_total_ms={stage_times['ocr_total_seconds_last'] * 1000:.1f} "
+                f"ocr_submitted_total={stage_times['ocr_submitted_total']} "
+                f"ocr_completed={stage_times['ocr_completed_total']} "
+                f"ocr_recognized={stage_times['ocr_recognized_total']} "
+                f"ocr_stale={stage_times['ocr_stale_total']} "
+                f"ocr_dropped={stage_times['ocr_dropped_total']} "
+                f"ocr_errors={stage_times['ocr_errors_total']} "
+                f"ocr_backlog_peak={stage_times['ocr_backlog_peak']} "
+                f"ocr_queue_avg_ms={stage_times['ocr_queue_wait_avg_ms']:.1f} "
+                f"ocr_inference_avg_ms={stage_times['ocr_inference_avg_ms']:.1f} "
+                f"ocr_total_avg_ms={stage_times['ocr_total_avg_ms']:.1f} "
+                f"ocr_cpu_percent={stage_times['ocr_cpu_percent']} "
+                f"ocr_rss_mb={stage_times['ocr_process_rss_mb']} "
+                f"segment_ocr_backlog={stage_times['segment_ocr_backlog']} "
+                f"segment_ocr_completed={stage_times['segment_ocr_completed']} "
+                f"segment_ocr_failed={stage_times['segment_ocr_failed']} "
+                f"save_ms={stage_times.get('save_ms', 0):.1f} "
+                f"cycle_ms={stage_times['total_ms']:.1f} "
+                f"backlog={stage_times['ocr_backlog']}"
+            )
             if DEBUG_PERFORMANCE and self.ai_cycle_counter % DEBUG_LOG_SAMPLE_EVERY == 0:
                 print(
                     f"[AI PERF] camera={camera_id} elapsed={elapsed * 1000:.0f}ms "

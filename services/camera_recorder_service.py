@@ -15,6 +15,75 @@ import db
 # Root directory untuk penyimpanan rekaman segmen
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_SEGMENTS_DIR = os.path.join(BASE_DIR, "videos", "segments")
+_OMIT_JSON_VALUE = object()
+_IMAGE_STATE_KEYS = {
+    "crop",
+    "plate_crop",
+    "vehicle_crop",
+    "face_crop",
+    "frame",
+    "image",
+    "image_data",
+}
+
+
+def _is_numpy_array(value):
+    return (
+        type(value).__module__.split(".", 1)[0] == "numpy"
+        and getattr(value, "ndim", 0) > 0
+        and hasattr(value, "shape")
+    )
+
+
+def _json_safe_state_value(value, omitted_arrays):
+    value_type = type(value)
+    if value_type.__module__.split(".", 1)[0] == "numpy":
+        if getattr(value, "ndim", None) == 0:
+            return value.item()
+        if hasattr(value, "shape"):
+            if getattr(value, "size", 0) <= 256:
+                return _json_safe_state_value(value.tolist(), omitted_arrays)
+            omitted_arrays[0] += 1
+            return _OMIT_JSON_VALUE
+
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            if (
+                isinstance(key, str)
+                and key.lower() in _IMAGE_STATE_KEYS
+                and _is_numpy_array(item)
+            ):
+                omitted_arrays[0] += 1
+                continue
+            safe_key = _json_safe_state_value(key, omitted_arrays)
+            safe_item = _json_safe_state_value(item, omitted_arrays)
+            if safe_key is _OMIT_JSON_VALUE or safe_item is _OMIT_JSON_VALUE:
+                continue
+            if not isinstance(safe_key, (str, int, float, bool)):
+                raise TypeError(
+                    f"Segment state contains unsupported JSON key: "
+                    f"{type(safe_key).__name__}"
+                )
+            result[safe_key] = safe_item
+        return result
+
+    if isinstance(value, (list, tuple, set)):
+        items = value if not isinstance(value, set) else sorted(value, key=repr)
+        result = []
+        for item in items:
+            safe_item = _json_safe_state_value(item, omitted_arrays)
+            if safe_item is not _OMIT_JSON_VALUE:
+                result.append(safe_item)
+        return result
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+
+    raise TypeError(
+        f"Segment state contains unsupported JSON value: "
+        f"{type(value).__name__}"
+    )
 
 
 class CameraRecorderService:
@@ -52,6 +121,8 @@ class CameraRecorderService:
         self.monitor_thread = None
         self.stderr_thread = None
         self.stop_event = threading.Event()
+        self.worker_idle_event = threading.Event()
+        self.worker_idle_event.set()
 
         # Pelacakan direktori & file sesi
         self.session_id = None
@@ -68,8 +139,11 @@ class CameraRecorderService:
         # State storage (filename -> metadata dict)
         self._segments_state = {}
         self._completed_segments = []
-        self._completed_segments_lock = threading.Lock()
+        self._completed_segments_lock = threading.RLock()
         self._processed_segment_filenames = set()
+        self._queued_segment_filenames = set()
+        self._loaded_state_files = set()
+        self._unvalidated_segment_rows = {}
         self._callbacks = []
 
         # Status pemantauan worker
@@ -78,7 +152,6 @@ class CameraRecorderService:
         self.latest_completed_segment = None
         self.latest_failed_segment = None
         self.latest_processed_segment = None
-        self.processing_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # MANAJEMEN SIKLUS HIDUP (LIFECYCLE)
@@ -116,6 +189,17 @@ class CameraRecorderService:
         self.status = "CONNECTING"
         self.last_error = None
 
+        # Restore a known camera's disk backlog before DB/FFmpeg startup. This
+        # lets already-recorded segments drain even if the live stream is down.
+        if camera_id is not None:
+            self.camera_id = camera_id
+            self.camera_dir = os.path.join(self.segments_dir, f"cam_{camera_id}")
+            self.state_file = os.path.join(
+                self.camera_dir,
+                "segment_queue_state.json",
+            )
+            self._load_state()
+
         # 1. Jalankan supervisor perekam FFmpeg
         self.supervisor_thread = threading.Thread(
             target=self._run_supervisor,
@@ -134,7 +218,11 @@ class CameraRecorderService:
                 daemon=True,
             )
             self._worker_thread.start()
-            print("[RECORDER] Worker antrean pemrosesan tunggal dimulai")
+            print(
+                "[RECORDER] Worker antrean pemrosesan tunggal dimulai "
+                f"(alive={self._worker_thread.is_alive()}, "
+                f"auto_process={self.auto_process_enabled})"
+            )
 
         return True
 
@@ -142,6 +230,7 @@ class CameraRecorderService:
         """Menghentikan perekaman dan membersihkan worker background."""
         print("[RECORDER] Menghentikan perekaman dan worker...")
         self.is_running = False
+        self.status = "STOPPING"
         self.stop_event.set()
 
         self._terminate_ffmpeg()
@@ -150,10 +239,30 @@ class CameraRecorderService:
             self.supervisor_thread.join(timeout=3.0)
 
         if self._worker_thread and self._worker_thread.is_alive():
-            self._worker_thread.join(timeout=4.0)
+            if self.worker_is_busy:
+                drain_timeout = max(60.0, self.segment_duration * 6.0)
+                print(
+                    f"[RECORDER] Menunggu segment aktif selesai "
+                    f"({self.current_processing_segment}); timeout={drain_timeout:.0f}s"
+                )
+                self.worker_idle_event.wait(timeout=drain_timeout)
+            self._worker_thread.join(timeout=3.0)
 
-        self.status = "STOPPED"
-        print("[RECORDER] Perekaman dan worker berhasil dihentikan")
+        worker_alive = bool(self._worker_thread and self._worker_thread.is_alive())
+        supervisor_alive = bool(
+            self.supervisor_thread and self.supervisor_thread.is_alive()
+        )
+        if worker_alive or supervisor_alive:
+            self.status = "STOPPING"
+            active_segment = self.current_processing_segment or "-"
+            print(
+                "[RECORDER STOP WARNING] Shutdown belum tuntas: "
+                f"worker_alive={worker_alive}, supervisor_alive={supervisor_alive}, "
+                f"segment={active_segment}"
+            )
+        else:
+            self.status = "STOPPED"
+            print("[RECORDER] Perekaman dan worker berhasil dihentikan")
 
     def register_completed_callback(self, callback):
         """Mendaftarkan callback fungsi saat ada segmen selesai diproses."""
@@ -187,11 +296,13 @@ class CameraRecorderService:
         with self._completed_segments_lock:
             total_recorded = len(self._segments_state)
             count_pending = sum(1 for s in self._segments_state.values() if s.get("status") == "pending")
-            count_processing = 1 if self.worker_is_busy else 0
+            count_processing = sum(1 for s in self._segments_state.values() if s.get("status") == "processing")
             count_completed = sum(1 for s in self._segments_state.values() if s.get("status") == "completed")
             count_failed = sum(1 for s in self._segments_state.values() if s.get("status") == "failed")
             count_stored = sum(1 for s in self._segments_state.values() if s.get("status") == "stored")
             latest_seg = self._completed_segments[-1] if self._completed_segments else None
+            worker_is_busy = self.worker_is_busy
+            current_processing_segment = self.current_processing_segment
 
         uptime_seconds = 0
         if self.started_at and self.is_running:
@@ -206,8 +317,12 @@ class CameraRecorderService:
             "stored": count_stored,
             "queue_size": self._processing_queue.qsize(),
             "max_queue_size": self.max_queue_size,
-            "worker_is_busy": self.worker_is_busy,
-            "current_processing_segment": self.current_processing_segment,
+            "worker_is_busy": worker_is_busy,
+            "worker_thread_alive": bool(
+                self._worker_thread and self._worker_thread.is_alive()
+            ),
+            "queued_segments": self._processing_queue.qsize(),
+            "current_processing_segment": current_processing_segment,
         }
 
         return {
@@ -229,6 +344,30 @@ class CameraRecorderService:
             "ffmpeg_stderr": self._get_ffmpeg_stderr(),
         }
 
+    def _log_segment_progress(self, event, filename=None, elapsed_seconds=None, error=None):
+        with self._completed_segments_lock:
+            counts = {
+                status: sum(
+                    1
+                    for segment in self._segments_state.values()
+                    if segment.get("status") == status
+                )
+                for status in ("pending", "processing", "completed", "failed", "stored")
+            }
+            queue_size = self._processing_queue.qsize()
+
+        fields = [
+            f"[SEGMENT PROGRESS] event={event}",
+            f"segment={filename or '-'}",
+            *(f"{status}={count}" for status, count in counts.items()),
+            f"queue={queue_size}/{self.max_queue_size}",
+        ]
+        if elapsed_seconds is not None:
+            fields.append(f"elapsed={elapsed_seconds:.2f}s")
+        if error:
+            fields.append(f"error={error}")
+        print(" | ".join(fields))
+
     def _get_ffmpeg_stderr(self):
         with self._stderr_lock:
             return list(self.last_ffmpeg_stderr)
@@ -245,6 +384,10 @@ class CameraRecorderService:
         if not self.state_file or not os.path.isfile(self.state_file):
             return
 
+        state_path = os.path.abspath(self.state_file)
+        if state_path in self._loaded_state_files:
+            return
+
         try:
             with open(self.state_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -252,31 +395,59 @@ class CameraRecorderService:
             if isinstance(data, dict):
                 loaded_count = 0
                 requeued_count = 0
+                pending_segments = []
                 with self._completed_segments_lock:
                     for filename, info in data.items():
+                        if not isinstance(info, dict):
+                            print(
+                                f"[RECORDER STATE WARNING] Metadata segmen '{filename}' "
+                                "bukan object; dilewati"
+                            )
+                            continue
                         fpath = info.get("file_path", "")
-                        # Pastikan file fisik segmen masih ada di disk
-                        if os.path.isfile(fpath):
+                        file_exists = os.path.isfile(fpath)
+                        # Completed entries remain authoritative after their
+                        # MP4 has been removed, preventing CSV replay on restart.
+                        if file_exists or info.get("status") == "completed":
                             self._processed_segment_filenames.add(filename)
-                            # Jika segmen sebelumnya terputus saat 'processing', kembalikan ke 'pending'
-                            if info.get("status") == "processing":
+                            if (
+                                info.get("status") == "processing"
+                                and filename != self.current_processing_segment
+                            ):
                                 info["status"] = "pending"
+                                info.pop("error", None)
+                                info["recovered_at"] = datetime.now().strftime(
+                                    "%Y-%m-%d %H:%M:%S"
+                                )
+                                print(
+                                    f"[RECORDER STATE RECOVERY] Segmen '{filename}' "
+                                    "dipulihkan dari processing menjadi pending"
+                                )
+                            if info.get("status") == "pending":
+                                info.pop("completed_at", None)
 
                             self._segments_state[filename] = info
                             self._completed_segments.append(info)
                             loaded_count += 1
 
-                            # Jika statusnya pending, masukkan kembali ke antrean jika muat
-                            if info.get("status") == "pending" and self.auto_process_enabled:
-                                try:
-                                    self._processing_queue.put_nowait(info)
-                                    requeued_count += 1
-                                except queue.Full:
-                                    pass
+                            if (
+                                info.get("status") in ("pending", "stored")
+                                and self.auto_process_enabled
+                                and file_exists
+                            ):
+                                pending_segments.append(info)
+
+                    self._loaded_state_files.add(state_path)
+                    self._save_state()
+
+                for info in pending_segments:
+                    if self._enqueue_segment(info):
+                        requeued_count += 1
 
                 print(
                     f"[RECORDER STATE] Berhasil memuat {loaded_count} segmen dari {os.path.basename(self.state_file)} "
-                    f"({requeued_count} pending dimasukkan ke antrean)"
+                    f"({requeued_count} pending masuk antrean; "
+                    f"backlog tersisa={max(0, len(pending_segments) - requeued_count)})"
                 )
         except Exception as exc:
             print(f"[RECORDER STATE ERROR] Gagal memuat state: {exc}")
@@ -284,15 +455,109 @@ class CameraRecorderService:
     def _save_state(self):
         """Menyimpan status antrean segmen ke file JSON secara atomik."""
         if not self.state_file:
-            return
+            return False
 
         try:
             tmp_file = f"{self.state_file}.tmp"
+            omitted_arrays = [0]
+            serializable_state = _json_safe_state_value(
+                self._segments_state,
+                omitted_arrays,
+            )
             with open(tmp_file, "w", encoding="utf-8") as f:
-                json.dump(self._segments_state, f, indent=2)
+                json.dump(serializable_state, f, indent=2, allow_nan=False)
             os.replace(tmp_file, self.state_file)
+            if omitted_arrays[0]:
+                print(
+                    f"[RECORDER STATE] {omitted_arrays[0]} image array(s) "
+                    "excluded from persisted metadata; retained in memory"
+                )
+            return True
         except Exception as exc:
             print(f"[RECORDER STATE ERROR] Gagal menyimpan state: {exc}")
+            return False
+
+    def _cleanup_completed_segment(self, segment, status_persisted):
+        """Delete only a persisted-completed MP4 located under the segment root."""
+        filename = segment.get("filename")
+        file_path = segment.get("file_path")
+        if not status_persisted:
+            print(
+                f"[RECORDER CLEANUP SKIP] Segment '{filename}' dipertahankan: "
+                "status completed belum berhasil disimpan"
+            )
+            return False
+
+        if not filename or not file_path or os.path.basename(file_path) != filename:
+            print(
+                f"[RECORDER CLEANUP ERROR] Metadata path tidak valid untuk "
+                f"segment '{filename}'; file dipertahankan"
+            )
+            return False
+
+        root_path = os.path.realpath(self.segments_dir)
+        resolved_path = os.path.realpath(file_path)
+        try:
+            inside_segment_root = (
+                os.path.commonpath((root_path, resolved_path)) == root_path
+            )
+        except ValueError:
+            inside_segment_root = False
+
+        if (
+            not inside_segment_root
+            or resolved_path == root_path
+            or os.path.splitext(filename)[1].lower() != ".mp4"
+        ):
+            print(
+                f"[RECORDER CLEANUP ERROR] Path di luar cakupan segment MP4: "
+                f"'{file_path}'; file dipertahankan"
+            )
+            return False
+
+        with self._completed_segments_lock:
+            current_state = self._segments_state.get(filename)
+            if not current_state or current_state.get("status") != "completed":
+                print(
+                    f"[RECORDER CLEANUP SKIP] Segment '{filename}' berstatus "
+                    f"{(current_state or {}).get('status', 'missing')}; file dipertahankan"
+                )
+                return False
+
+            if not os.path.isfile(resolved_path):
+                print(
+                    f"[RECORDER CLEANUP SKIP] File segment '{filename}' "
+                    "sudah tidak ada"
+                )
+                return False
+
+            try:
+                file_size = os.path.getsize(resolved_path)
+                os.remove(resolved_path)
+            except OSError as exc:
+                print(
+                    f"[RECORDER CLEANUP ERROR] Gagal menghapus segment "
+                    f"'{filename}': {exc}"
+                )
+                return False
+
+            current_state["video_file_deleted"] = True
+            current_state["video_file_deleted_at"] = datetime.now().strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            cleanup_state_saved = self._save_state()
+            if cleanup_state_saved:
+                print(
+                    f"[RECORDER CLEANUP] Segment '{filename}' dihapus "
+                    f"({file_size} bytes); status=completed"
+                )
+            else:
+                print(
+                    f"[RECORDER CLEANUP WARNING] Segment '{filename}' sudah "
+                    "dihapus setelah status completed tersimpan, tetapi metadata "
+                    "penghapusan gagal disimpan"
+                )
+            return True
 
     # ------------------------------------------------------------------
     # TAHAP 3: SINGLE WORKER CONSUMER LOOP (INFERENSI SERIAL)
@@ -314,69 +579,167 @@ class CameraRecorderService:
                 self._repopulate_queue_from_backlog()
                 continue
 
-            if not self.is_running or self.stop_event.is_set():
-                break
-
             filename = segment_info.get("filename")
             if not filename:
+                print("[QUEUE WORKER WARNING] Item antrean tanpa filename dilewati")
                 self._processing_queue.task_done()
                 continue
 
-            # Verifikasi status: jangan proses jika sudah completed atau processing
+            claimed_state = None
             with self._completed_segments_lock:
-                current_state = self._segments_state.get(filename, dict(segment_info))
-                if current_state.get("status") == "completed":
-                    self._processing_queue.task_done()
-                    continue
+                self._queued_segment_filenames.discard(filename)
+                current_state = self._segments_state.get(filename)
+                if not self.is_running or self.stop_event.is_set():
+                    print(
+                        f"[QUEUE WORKER] Segmen '{filename}' dikembalikan ke backlog "
+                        "karena worker sedang berhenti"
+                    )
+                elif current_state is None:
+                    print(
+                        f"[QUEUE WORKER WARNING] Segmen '{filename}' tidak ada di state; "
+                        "item antrean dilewati"
+                    )
+                elif current_state.get("status") not in ("pending", "stored"):
+                    print(
+                        f"[QUEUE WORKER] Segmen '{filename}' dilewati "
+                        f"(status={current_state.get('status')!r}, bukan pending)"
+                    )
+                else:
+                    current_state["status"] = "processing"
+                    current_state["started_at"] = datetime.now().strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+                    current_state.pop("completed_at", None)
+                    try:
+                        previous_attempts = int(current_state.get("attempts", 0) or 0)
+                    except (TypeError, ValueError):
+                        previous_attempts = 0
+                        print(
+                            f"[QUEUE WORKER WARNING] attempts rusak pada '{filename}'; "
+                            "menginisialisasi ulang counter"
+                        )
+                    current_state["attempts"] = previous_attempts + 1
+                    self._segments_state[filename] = current_state
+                    self.worker_is_busy = True
+                    self.current_processing_segment = filename
+                    self.worker_idle_event.clear()
+                    self._save_state()
+                    claimed_state = current_state
 
-                # Tandai sebagai processing
-                current_state["status"] = "processing"
-                current_state["started_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                self._segments_state[filename] = current_state
-                self.worker_is_busy = True
-                self.current_processing_segment = filename
-                self._save_state()
+            if claimed_state is None:
+                self._processing_queue.task_done()
+                if not self.is_running or self.stop_event.is_set():
+                    break
+                continue
 
-            print(f"[QUEUE WORKER] Memulai inferensi AI segmen: {filename}")
+            segment_info = claimed_state
+            queued_at = segment_info.get("queued_at")
+            queue_wait_seconds = None
+            if queued_at:
+                try:
+                    queue_wait_seconds = max(
+                        0.0,
+                        (
+                            datetime.now()
+                            - datetime.fromisoformat(queued_at)
+                        ).total_seconds(),
+                    )
+                except (TypeError, ValueError):
+                    print(
+                        f"[QUEUE WORKER WARNING] queued_at invalid untuk '{filename}': "
+                        f"{queued_at!r}"
+                    )
+            if queue_wait_seconds is not None:
+                segment_info["queue_wait_seconds"] = round(queue_wait_seconds, 2)
+            print(
+                f"[QUEUE WORKER] Segmen '{filename}' diklaim; "
+                f"AI mulai (attempt={claimed_state['attempts']}, "
+                f"queue_remaining={self._processing_queue.qsize()})"
+            )
+            self._log_segment_progress("processing", filename)
             try:
                 result = self._execute_segment_ai(segment_info)
+                detection_summary = result.get("detections") or {}
+                persistence_errors = detection_summary.get("persistence_errors") or []
+                elapsed_seconds = result.get("elapsed_seconds")
 
                 with self._completed_segments_lock:
-                    current_state["status"] = "completed"
-                    current_state["completed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    current_state["detections"] = result.get("detections")
-                    current_state["cpu_usage"] = result.get("cpu_usage")
-                    current_state["elapsed_seconds"] = result.get("elapsed_seconds")
-                    current_state["processing_ratio"] = result.get("processing_ratio")
-                    self._segments_state[filename] = current_state
-                    self.latest_completed_segment = dict(current_state)
-                    self.latest_processed_segment = dict(current_state)
-                    self._save_state()
+                    claimed_state["detections"] = detection_summary
+                    claimed_state["cpu_usage"] = result.get("cpu_usage")
+                    claimed_state["elapsed_seconds"] = elapsed_seconds
+                    claimed_state["processing_ratio"] = result.get("processing_ratio")
+                    if persistence_errors:
+                        claimed_state["status"] = "failed"
+                        claimed_state["failed_at"] = datetime.now().strftime(
+                            "%Y-%m-%d %H:%M:%S"
+                        )
+                        claimed_state["error"] = (
+                            f"{len(persistence_errors)} detection persistence error(s)"
+                        )
+                        self.latest_failed_segment = dict(claimed_state)
+                    else:
+                        claimed_state["status"] = "completed"
+                        claimed_state["completed_at"] = datetime.now().strftime(
+                            "%Y-%m-%d %H:%M:%S"
+                        )
+                        claimed_state.pop("error", None)
+                        self.latest_completed_segment = dict(claimed_state)
+                        self.latest_processed_segment = dict(claimed_state)
+                    state_persisted = self._save_state()
 
-                self._notify_completed(current_state)
-                print(
-                    f"[QUEUE WORKER] Segmen '{filename}' sukses diproses "
-                    f"({result.get('elapsed_seconds')}s, "
-                    f"caps={result.get('detections', {}).get('person_and_vehicle_captures', 0)})"
+                if persistence_errors:
+                    print(
+                        f"[QUEUE WORKER ERROR] Segmen '{filename}' inferensi selesai "
+                        f"tetapi penyimpanan {len(persistence_errors)} event gagal; "
+                        "status=failed"
+                    )
+                else:
+                    self._notify_completed(claimed_state)
+                    self._cleanup_completed_segment(
+                        claimed_state,
+                        status_persisted=state_persisted,
+                    )
+                    print(
+                        f"[QUEUE WORKER] Segmen '{filename}' selesai "
+                        f"({elapsed_seconds}s, "
+                        f"vehicles={detection_summary.get('event_groups', {}).get('vehicle', 0)}, "
+                        f"plates={detection_summary.get('plate_captures', 0)}, "
+                        f"queue_remaining={self._processing_queue.qsize()})"
+                    )
+                self._log_segment_progress(
+                    "failed" if persistence_errors else "completed",
+                    filename,
+                    elapsed_seconds=elapsed_seconds,
+                    error=(
+                        f"{len(persistence_errors)} event(s) gagal disimpan"
+                        if persistence_errors
+                        else None
+                    ),
                 )
 
             except Exception as exc:
                 # Catat kegagalan tanpa menghentikan worker atau recorder
                 with self._completed_segments_lock:
-                    current_state["status"] = "failed"
-                    current_state["failed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    current_state["error"] = str(exc)
-                    self._segments_state[filename] = current_state
-                    self.latest_failed_segment = dict(current_state)
+                    claimed_state["status"] = "failed"
+                    claimed_state["failed_at"] = datetime.now().strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+                    claimed_state["error"] = str(exc)
+                    self.latest_failed_segment = dict(claimed_state)
                     self._save_state()
 
                 print(f"[QUEUE WORKER ERROR] Segmen '{filename}' gagal diproses: {exc}")
+                self._log_segment_progress("failed", filename, error=str(exc))
 
             finally:
                 with self._completed_segments_lock:
                     self.worker_is_busy = False
                     self.current_processing_segment = None
+                    self.worker_idle_event.set()
                 self._processing_queue.task_done()
+                # Pump persistent backlog whenever a slot opens, even if the
+                # queue never becomes empty while live recording continues.
+                self._repopulate_queue_from_backlog()
                 # Jeda kooperatif singkat agar CPU tidak 100% saturasi dan jalur realtime lancar
                 time.sleep(0.3)
 
@@ -388,33 +751,64 @@ class CameraRecorderService:
             return
 
         with self._completed_segments_lock:
-            for filename, info in self._segments_state.items():
-                if info.get("status") in ("pending", "stored"):
-                    try:
-                        info["status"] = "pending"
-                        self._processing_queue.put_nowait(info)
-                    except queue.Full:
-                        break
+            pending_segments = [
+                info
+                for info in self._segments_state.values()
+                if info.get("status") in ("pending", "stored")
+                and info.get("filename") not in self._queued_segment_filenames
+            ]
+        for info in pending_segments:
+            if not self._enqueue_segment(info):
+                if self._processing_queue.full():
+                    break
 
     def _enqueue_segment(self, segment_info):
         """Memasukkan segmen ke bounded queue sesuai kebijakan aman backlog (tanpa menghapus file)."""
-        try:
-            self._processing_queue.put_nowait(segment_info)
+        filename = segment_info.get("filename")
+        if not filename:
+            print("[RECORDER QUEUE ERROR] Segmen tanpa filename tidak dapat diantrekan")
+            return False
+
+        with self._completed_segments_lock:
+            current_state = self._segments_state.get(filename, segment_info)
+            if current_state.get("status") not in ("pending", "stored"):
+                print(
+                    f"[RECORDER QUEUE] Segmen '{filename}' tidak diantrekan "
+                    f"(status={current_state.get('status')!r})"
+                )
+                return False
+            if filename in self._queued_segment_filenames:
+                print(f"[RECORDER QUEUE] Segmen '{filename}' sudah ada di antrean")
+                return True
+
+            try:
+                self._processing_queue.put_nowait(current_state)
+            except queue.Full:
+                current_state["status"] = "stored"
+                current_state["note"] = (
+                    "Tersimpan aman di disk (kebijakan batas antrean)"
+                )
+                self._segments_state[filename] = current_state
+                self._save_state()
+                print(
+                    f"[RECORDER QUEUE BACKLOG] Antrean penuh "
+                    f"({self.max_queue_size}); segmen '{filename}' tetap stored"
+                )
+                self._log_segment_progress("stored", filename)
+                return False
+
+            current_state["status"] = "pending"
+            current_state["queued_at"] = datetime.now().isoformat(timespec="seconds")
+            current_state.pop("note", None)
+            self._segments_state[filename] = current_state
+            self._queued_segment_filenames.add(filename)
+            self._save_state()
             print(
-                f"[RECORDER QUEUE] Segmen '{segment_info['filename']}' dimasukkan ke antrean "
+                f"[RECORDER QUEUE] Segmen '{filename}' diantrekan "
                 f"({self._processing_queue.qsize()}/{self.max_queue_size})"
             )
-        except queue.Full:
-            filename = segment_info.get("filename")
-            with self._completed_segments_lock:
-                if filename in self._segments_state:
-                    self._segments_state[filename]["status"] = "stored"
-                    self._segments_state[filename]["note"] = "Tersimpan aman di disk (kebijakan batas antrean)"
-                    self._save_state()
-            print(
-                f"[RECORDER QUEUE BACKLOG] Antrean memori penuh ({self.max_queue_size}). "
-                f"Segmen '{segment_info['filename']}' tetap aman tersimpan di disk dengan status 'stored'."
-            )
+            self._log_segment_progress("pending", filename)
+            return True
 
     def _execute_segment_ai(self, segment_info, save_annotated=False):
         """
@@ -426,6 +820,10 @@ class CameraRecorderService:
         file_path = segment_info["file_path"]
         if not os.path.isfile(file_path) or os.path.getsize(file_path) == 0:
             raise FileNotFoundError(f"File segmen '{file_path}' tidak ditemukan atau kosong di disk.")
+        print(
+            f"[SEGMENT AI] Validasi input berhasil: {segment_info.get('filename')} "
+            f"({os.path.getsize(file_path)} bytes)"
+        )
 
         output_path = None
         if save_annotated or os.environ.get("HYBRID_SAVE_ANNOTATED", "false").lower() in ("true", "1", "yes"):
@@ -448,7 +846,18 @@ class CameraRecorderService:
             segment_processing=True,
             segment_filename=segment_info.get("filename"),
         )
+        print(
+            f"[SEGMENT AI] Menjalankan VideoAIService: "
+            f"camera={segment_info.get('camera_id') or self.camera_id}, "
+            f"segment={segment_info.get('filename')}"
+        )
         ai_service.run()
+        print(
+            f"[SEGMENT AI] Inferensi selesai: segment={segment_info.get('filename')}, "
+            f"frames={ai_service.inference_count}, "
+            f"vehicles={len(ai_service.video_event_groups.get('vehicle', []))}, "
+            f"plates={ai_service.plate_capture_count}"
+        )
 
         t_elapsed = time.perf_counter() - t_start
         sys_cpu = psutil.cpu_percent(interval=None)
@@ -600,6 +1009,9 @@ class CameraRecorderService:
             "vehicle_events": [
                 dict(event) for event in ai_service.video_event_groups.get("vehicle", [])
             ],
+            "persistence_errors": list(
+                getattr(ai_service, "database_save_errors", [])
+            ),
             "shadow_dedup_evaluations": shadow_evaluations,
             "annotated_output": output_path if (output_path and os.path.isfile(output_path)) else None,
         }
@@ -625,15 +1037,17 @@ class CameraRecorderService:
         """
         Metode pemrosesan on-demand untuk 1 segmen (kompatibilitas Tahap 2).
         """
-        with self.processing_lock:
+        with self._completed_segments_lock:
             if self.worker_is_busy:
                 return {
                     "success": False,
-                    "message": "Pemrosesan AI pada worker tunggal sedang aktif. Harap tunggu hingga selesai."
+                    "message": (
+                        "Pemrosesan AI pada worker tunggal sedang aktif. "
+                        "Harap tunggu hingga selesai."
+                    ),
                 }
 
-        target_segment = None
-        with self._completed_segments_lock:
+            target_segment = None
             if segment_filename:
                 target_segment = self._segments_state.get(segment_filename)
                 if target_segment is None:
@@ -655,38 +1069,93 @@ class CameraRecorderService:
                         target_segment = seg
                         break
 
-        if target_segment is None:
-            return {
-                "success": False,
-                "message": "Tidak ada segmen selesai yang siap diproses."
-            }
+            if target_segment is None:
+                return {
+                    "success": False,
+                    "message": "Tidak ada segmen selesai yang siap diproses.",
+                }
 
-        filename = target_segment["filename"]
-        with self._completed_segments_lock:
+            filename = target_segment["filename"]
+            status = target_segment.get("status")
+            if status in ("processing", "completed"):
+                return {
+                    "success": False,
+                    "message": f"Segmen '{filename}' tidak dapat diproses ulang (status={status}).",
+                }
+
             target_segment["status"] = "processing"
-            target_segment["started_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            target_segment["started_at"] = datetime.now().strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            try:
+                previous_attempts = int(target_segment.get("attempts", 0) or 0)
+            except (TypeError, ValueError):
+                previous_attempts = 0
+                print(
+                    f"[SEGMENT MANUAL WARNING] attempts rusak pada '{filename}'; "
+                    "menginisialisasi ulang counter"
+                )
+            target_segment["attempts"] = previous_attempts + 1
+            target_segment.pop("completed_at", None)
             self.worker_is_busy = True
             self.current_processing_segment = filename
+            self.worker_idle_event.clear()
             self._save_state()
 
+        print(
+            f"[SEGMENT MANUAL] Segmen '{filename}' diklaim untuk inferensi "
+            f"(attempt={target_segment['attempts']})"
+        )
         try:
             result = self._execute_segment_ai(target_segment, save_annotated=save_annotated)
+            detections = result.get("detections") or {}
+            persistence_errors = detections.get("persistence_errors") or []
             with self._completed_segments_lock:
-                target_segment["status"] = "completed"
-                target_segment["completed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                target_segment["detections"] = result["detections"]
+                target_segment["detections"] = detections
                 target_segment["cpu_usage"] = result["cpu_usage"]
                 target_segment["elapsed_seconds"] = result["elapsed_seconds"]
-                self.latest_completed_segment = dict(target_segment)
-                self.latest_processed_segment = dict(target_segment)
-                self._save_state()
+                target_segment["processing_ratio"] = result.get("processing_ratio")
+                if persistence_errors:
+                    target_segment["status"] = "failed"
+                    target_segment["failed_at"] = datetime.now().strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+                    target_segment["error"] = (
+                        f"{len(persistence_errors)} detection persistence error(s)"
+                    )
+                    self.latest_failed_segment = dict(target_segment)
+                else:
+                    target_segment["status"] = "completed"
+                    target_segment["completed_at"] = datetime.now().strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+                    target_segment.pop("error", None)
+                    self.latest_completed_segment = dict(target_segment)
+                    self.latest_processed_segment = dict(target_segment)
+                state_persisted = self._save_state()
 
+            if persistence_errors:
+                return {
+                    "success": False,
+                    "message": (
+                        f"AI selesai, tetapi {len(persistence_errors)} event "
+                        "gagal disimpan."
+                    ),
+                    "data": {
+                        "segment": target_segment,
+                        "detections": detections,
+                    },
+                }
+            self._cleanup_completed_segment(
+                target_segment,
+                status_persisted=state_persisted,
+            )
             return {
                 "success": True,
                 "message": f"Segmen '{filename}' berhasil diproses.",
                 "data": {
                     "segment": target_segment,
-                    "detections": result["detections"],
+                    "detections": detections,
                     "elapsed_seconds": result["elapsed_seconds"],
                     "processing_ratio": result.get("processing_ratio"),
                     "cpu_usage": result["cpu_usage"],
@@ -695,9 +1164,13 @@ class CameraRecorderService:
         except Exception as exc:
             with self._completed_segments_lock:
                 target_segment["status"] = "failed"
+                target_segment["failed_at"] = datetime.now().strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
                 target_segment["error"] = str(exc)
                 self.latest_failed_segment = dict(target_segment)
                 self._save_state()
+            print(f"[SEGMENT MANUAL ERROR] Segmen '{filename}' gagal: {exc}")
             return {
                 "success": False,
                 "message": f"Gagal memproses segmen: {str(exc)}"
@@ -706,6 +1179,7 @@ class CameraRecorderService:
             with self._completed_segments_lock:
                 self.worker_is_busy = False
                 self.current_processing_segment = None
+                self.worker_idle_event.set()
 
     def evaluate_duplicates(self, time_window_seconds=45):
         """
@@ -1329,8 +1803,12 @@ class CameraRecorderService:
                 with open(list_file, "r", encoding="utf-8", errors="ignore") as f:
                     lines = f.readlines()
 
-                if len(lines) > last_read_line:
-                    new_lines = lines[last_read_line:]
+                complete_line_count = len(lines)
+                if lines and not lines[-1].endswith(("\n", "\r")):
+                    complete_line_count -= 1
+
+                if complete_line_count > last_read_line:
+                    new_lines = lines[last_read_line:complete_line_count]
                     for line in new_lines:
                         line = line.strip()
                         if not line:
@@ -1339,53 +1817,87 @@ class CameraRecorderService:
                         parts = [p.strip() for p in line.split(",")]
                         if len(parts) >= 3:
                             filename = parts[0]
-                            start_time = float(parts[1])
-                            end_time = float(parts[2])
-
-                            if filename not in self._processed_segment_filenames:
-                                file_path = os.path.join(camera_dir, filename)
-
-                                if self._validate_segment_file(file_path):
-                                    self._processed_segment_filenames.add(filename)
-                                    segment_info = {
-                                        "camera_id": self.camera_id,
-                                        "camera_name": self.camera_name,
-                                        "filename": filename,
-                                        "file_path": file_path,
-                                        "start_time": start_time,
-                                        "end_time": end_time,
-                                        "duration": round(end_time - start_time, 2),
-                                        "size_bytes": os.path.getsize(file_path),
-                                        "status": "pending",
-                                        "recorded_at": datetime.now().isoformat(sep=" ", timespec="seconds"),
-                                        "completed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                    }
-
-                                    with self._completed_segments_lock:
-                                        if filename not in self._segments_state:
-                                            self._segments_state[filename] = segment_info
-                                            self._completed_segments.append(segment_info)
-                                            self._save_state()
-
-                                            if self.auto_process_enabled:
-                                                self._enqueue_segment(segment_info)
-
+                            if (
+                                filename not in self._processed_segment_filenames
+                                and filename not in self._unvalidated_segment_rows
+                            ):
+                                try:
+                                    start_time = float(parts[1])
+                                    end_time = float(parts[2])
+                                except ValueError as exc:
                                     print(
-                                        f"[RECORDER] Segmen selesai direkam: {filename} "
-                                        f"({segment_info['duration']}s, {segment_info['size_bytes']} bytes, status=pending)"
+                                        f"[RECORDER MONITOR ERROR] CSV row invalid "
+                                        f"('{filename}'): {exc}"
                                     )
+                                    continue
+                                self._unvalidated_segment_rows[filename] = {
+                                    "start_time": start_time,
+                                    "end_time": end_time,
+                                }
+                                print(
+                                    f"[RECORDER SCAN] CSV menemukan segmen '{filename}' "
+                                    f"(start={start_time:.2f}s, end={end_time:.2f}s)"
+                                )
 
-                    last_read_line = len(lines)
+                for filename, row_info in list(self._unvalidated_segment_rows.items()):
+                    file_path = os.path.join(camera_dir, filename)
+                    if not self._validate_segment_file(file_path):
+                        print(
+                            f"[RECORDER SCAN] Segmen '{filename}' belum tervalidasi; "
+                            "akan diperiksa kembali"
+                        )
+                        continue
+
+                    segment_info = {
+                        "camera_id": self.camera_id,
+                        "camera_name": self.camera_name,
+                        "filename": filename,
+                        "file_path": file_path,
+                        "start_time": row_info["start_time"],
+                        "end_time": row_info["end_time"],
+                        "duration": round(
+                            row_info["end_time"] - row_info["start_time"], 2
+                        ),
+                        "size_bytes": os.path.getsize(file_path),
+                        "status": "pending",
+                        "recorded_at": datetime.now().isoformat(
+                            sep=" ",
+                            timespec="seconds",
+                        ),
+                    }
+
+                    should_enqueue = False
+                    with self._completed_segments_lock:
+                        existing_state = self._segments_state.get(filename)
+                        self._processed_segment_filenames.add(filename)
+                        if existing_state is None:
+                            self._segments_state[filename] = segment_info
+                            self._completed_segments.append(segment_info)
+                            self._save_state()
+                            should_enqueue = self.auto_process_enabled
+                        else:
+                            segment_info = existing_state
+
+                    self._unvalidated_segment_rows.pop(filename, None)
+                    print(
+                        f"[RECORDER SCAN] Segmen tervalidasi: '{filename}' "
+                        f"({segment_info.get('duration')}s, "
+                        f"{segment_info.get('size_bytes')} bytes, "
+                        f"status={segment_info.get('status')})"
+                    )
+                    if should_enqueue:
+                        self._enqueue_segment(segment_info)
+                last_read_line = complete_line_count
 
             except Exception as exc:
                 print(f"[RECORDER MONITOR ERROR] {exc}")
 
             time.sleep(0.5)
 
-    def _validate_segment_file(self, file_path, max_wait_seconds=2.0):
+    def _validate_segment_file(self, file_path, max_wait_seconds=0.0):
         """Memastikan file ada di disk dan ukuran > 1KB."""
         deadline = time.time() + max_wait_seconds
-        while time.time() < deadline:
+        while True:
             if os.path.isfile(file_path):
                 try:
                     size = os.path.getsize(file_path)
@@ -1393,8 +1905,9 @@ class CameraRecorderService:
                         return True
                 except OSError:
                     pass
+            if time.time() >= deadline:
+                return False
             time.sleep(0.2)
-        return False
 
     def _notify_completed(self, segment_info):
         """Memanggil listener callback."""

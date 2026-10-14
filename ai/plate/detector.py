@@ -34,6 +34,7 @@ class PlateDetector:
         self.min_aspect_ratio = min_aspect_ratio
         self.max_aspect_ratio = max_aspect_ratio
         self.small_roi_scale = max(1.0, float(small_roi_scale))
+        self.last_metrics = {}
 
         print("=" * 60)
         print("[PLATE] Detector siap")
@@ -47,9 +48,25 @@ class PlateDetector:
         print("=" * 60)
 
     def detect(self, frame):
+        metrics = {
+            "yolo_boxes": 0,
+            "class_rejected": 0,
+            "invalid_box": 0,
+            "width_rejected": 0,
+            "height_rejected": 0,
+            "aspect_rejected": 0,
+            "empty_crop": 0,
+            "accepted": 0,
+            "confidence_min": None,
+            "confidence_max": None,
+        }
         if frame is None:
+            metrics["input_rejected"] = "none"
+            self.last_metrics = metrics
             return []
         if frame.size == 0:
+            metrics["input_rejected"] = "empty"
+            self.last_metrics = metrics
             return []
 
         try:
@@ -80,6 +97,8 @@ class PlateDetector:
                 stream=False
             )
         except Exception as e:
+            metrics["inference_error"] = str(e)
+            self.last_metrics = metrics
             print(f"[PLATE ERROR] YOLO inference failed: {e}")
             return []
 
@@ -90,16 +109,32 @@ class PlateDetector:
             if result.boxes is None:
                 continue
 
+            metrics["yolo_boxes"] += len(result.boxes)
             for box in result.boxes:
                 try:
                     class_id = int(box.cls[0])
                     confidence = float(box.conf[0])
+                    if class_id == 0:
+                        current_min = metrics["confidence_min"]
+                        current_max = metrics["confidence_max"]
+                        metrics["confidence_min"] = (
+                            confidence
+                            if current_min is None
+                            else min(current_min, confidence)
+                        )
+                        metrics["confidence_max"] = (
+                            confidence
+                            if current_max is None
+                            else max(current_max, confidence)
+                        )
 
                     if class_id != 0:
+                        metrics["class_rejected"] += 1
                         continue
 
                     x1, y1, x2, y2 = [value / scale for value in box.xyxy[0].tolist()]
                 except Exception:
+                    metrics["invalid_box"] += 1
                     continue
 
                 x1 = max(0, min(int(x1), frame_width - 1))
@@ -111,17 +146,22 @@ class PlateDetector:
                 height = y2 - y1
 
                 if width < self.min_width:
+                    metrics["width_rejected"] += 1
                     continue
                 if height < self.min_height:
+                    metrics["height_rejected"] += 1
                     continue
                 if x2 <= x1 or y2 <= y1:
+                    metrics["invalid_box"] += 1
                     continue
 
                 aspect_ratio = width / max(height, 1)
 
                 if aspect_ratio < self.min_aspect_ratio:
+                    metrics["aspect_rejected"] += 1
                     continue
                 if aspect_ratio > self.max_aspect_ratio:
+                    metrics["aspect_rejected"] += 1
                     continue
 
                 pad_w = max(2, int(width * 0.08))
@@ -133,6 +173,7 @@ class PlateDetector:
                 crop = frame[cy1:cy2, cx1:cx2]
 
                 if crop is None or crop.size == 0:
+                    metrics["empty_crop"] += 1
                     continue
 
                 center_x = int((x1 + x2) / 2)
@@ -156,4 +197,6 @@ class PlateDetector:
                 })
 
         detections.sort(key=lambda x: x["confidence"], reverse=True)
+        metrics["accepted"] = len(detections)
+        self.last_metrics = metrics
         return detections

@@ -69,7 +69,7 @@ class VideoSegmentDedupTests(unittest.TestCase):
                 return_value=object(),
             ) as plate_detector, patch.object(
                 video_module,
-                "PlateOCR",
+                "get_shared_ocr_lane",
                 return_value=FakeOCR(),
             ) as plate_ocr:
                 segment_services = []
@@ -81,7 +81,7 @@ class VideoSegmentDedupTests(unittest.TestCase):
 
                 self.assertEqual(yolo.call_count, 1)
                 self.assertEqual(plate_detector.call_count, 1)
-                self.assertEqual(plate_ocr.call_count, 1)
+                plate_ocr.assert_called_once_with("segment")
                 self.assertIs(segment_services[0].yolo_person, segment_services[2].yolo_person)
                 self.assertIs(segment_services[0].plate_detector, segment_services[1].plate_detector)
                 self.assertIs(segment_services[0].plate_ocr, segment_services[2].plate_ocr)
