@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -17,6 +18,8 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
 from services.camera_recorder_service import CameraRecorderService
+from services.camera_worker_manager import CameraWorkerManager
+from services.stream_ai_service import StreamAIService
 from services.video_ai_service import VideoAIService
 from tracker import PlateTracker
 
@@ -101,6 +104,104 @@ class CameraRecorderReliabilityTests(unittest.TestCase):
         ):
             self.assertIsNone(self.recorder._resolve_target_camera())
         self.assertIn("Tidak ada kamera aktif", self.recorder.last_error)
+
+    def test_segment_worker_waits_for_realtime_stream_without_claiming_backlog(self):
+        segment = {
+            "filename": "archived.mp4",
+            "file_path": os.path.join(self.temp_dir.name, "archived.mp4"),
+            "camera_id": 6,
+            "status": "pending",
+        }
+        with open(segment["file_path"], "wb") as segment_file:
+            segment_file.write(b"recorded segment")
+        self.recorder.is_running = True
+        with self.recorder._completed_segments_lock:
+            self.recorder._segments_state[segment["filename"]] = segment
+        self.recorder._enqueue_segment(segment)
+        executed = []
+        self.recorder._execute_segment_ai = lambda item: executed.append(item)
+
+        with patch.object(
+            self.recorder,
+            "_stream_inference_active",
+            return_value=True,
+        ):
+            worker = threading.Thread(
+                target=self.recorder._run_processing_worker,
+                daemon=True,
+            )
+            worker.start()
+            time.sleep(0.1)
+            self.assertFalse(self.recorder.worker_is_busy)
+            self.assertEqual(self.recorder._processing_queue.qsize(), 1)
+            self.assertEqual(executed, [])
+            self.recorder.stop_event.set()
+            worker.join(timeout=2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(
+            self.recorder._segments_state["archived.mp4"]["status"],
+            "pending",
+        )
+
+    def test_manual_segment_processing_is_deferred_while_stream_is_active(self):
+        with patch.object(
+            self.recorder,
+            "_stream_inference_active",
+            return_value=True,
+        ):
+            result = self.recorder.process_single_segment("archive.mp4")
+
+        self.assertFalse(result["success"])
+        self.assertIn("stream realtime aktif", result["message"])
+        self.assertFalse(self.recorder.worker_is_busy)
+
+    def test_camera_manager_treats_initial_sync_and_worker_presence_as_active(self):
+        manager = CameraWorkerManager()
+        manager.running = True
+        self.assertTrue(manager.is_realtime_stream_active())
+
+        manager.initial_sync_complete.set()
+        self.assertFalse(manager.is_realtime_stream_active())
+        manager.workers[1] = object()
+        self.assertTrue(manager.is_realtime_stream_active())
+        manager.workers.clear()
+        manager.ai_service = SimpleNamespace(
+            frame_queue_lock=threading.Lock(),
+            frame_queue={1: object()},
+            ai_processing=False,
+        )
+        self.assertTrue(manager.is_realtime_stream_active())
+        manager.ai_service.frame_queue.clear()
+        manager.ai_service.ai_processing = True
+        self.assertTrue(manager.is_realtime_stream_active())
+
+    def test_segment_reuses_loaded_stream_models(self):
+        stream_yolo = object()
+        stream_plate_detector = object()
+        stream_service = SimpleNamespace(
+            yolo_person=stream_yolo,
+            plate_detector=stream_plate_detector,
+        )
+        segment_ocr = SimpleNamespace(warmup=lambda: None)
+        segment_service = VideoAIService(
+            video_path="unused.mp4",
+            show_window=False,
+            segment_processing=True,
+        )
+
+        with patch.object(StreamAIService, "_instance", stream_service), patch(
+            "services.video_ai_service.os.path.isfile",
+            return_value=True,
+        ), patch(
+            "services.video_ai_service.get_shared_ocr_lane",
+            return_value=segment_ocr,
+        ):
+            segment_service._load_models()
+
+        self.assertIs(segment_service.yolo_person, stream_yolo)
+        self.assertIs(segment_service.plate_detector, stream_plate_detector)
+        self.assertIs(segment_service.plate_ocr, segment_ocr)
 
     def test_ffmpeg_startup_error_contains_stderr_diagnostic(self):
         self.recorder.camera_id = 1

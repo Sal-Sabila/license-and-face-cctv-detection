@@ -131,7 +131,10 @@ class CameraRecorderService:
         self.state_file = None
 
         # Tahap 3: Antrean bounded & Single Worker AI
-        self.max_queue_size = int(os.environ.get("HYBRID_MAX_QUEUE_SIZE", "50"))
+        self.max_queue_size = max(
+            1,
+            int(os.environ.get("HYBRID_MAX_QUEUE_SIZE", "2")),
+        )
         self.auto_process_enabled = os.environ.get("ENABLE_AUTO_PROCESS", "true").lower() in ("true", "1", "yes")
         self._processing_queue = queue.Queue(maxsize=self.max_queue_size)
         self._worker_thread = None
@@ -320,6 +323,9 @@ class CameraRecorderService:
             "worker_is_busy": worker_is_busy,
             "worker_thread_alive": bool(
                 self._worker_thread and self._worker_thread.is_alive()
+            ),
+            "inference_paused_for_stream": (
+                self.auto_process_enabled and self._stream_inference_active()
             ),
             "queued_segments": self._processing_queue.qsize(),
             "current_processing_segment": current_processing_segment,
@@ -563,14 +569,38 @@ class CameraRecorderService:
     # TAHAP 3: SINGLE WORKER CONSUMER LOOP (INFERENSI SERIAL)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _stream_inference_active():
+        from services.camera_worker_manager import CameraWorkerManager
+
+        manager = CameraWorkerManager._instance
+        return bool(manager and manager.is_realtime_stream_active())
+
     def _run_processing_worker(self):
         """
         Background worker tunggal yang memproses antrean segmen secara serial.
         Inferensi AI tidak pernah berjalan paralel antar-segmen.
         """
         print("[QUEUE WORKER] Worker pemrosesan segmen tunggal aktif")
+        stream_pause_logged = False
 
         while self.is_running and not self.stop_event.is_set():
+            if self._stream_inference_active():
+                if not stream_pause_logged:
+                    print(
+                        "[QUEUE WORKER] Inferensi segment dijeda; "
+                        "stream realtime mendapat prioritas"
+                    )
+                    stream_pause_logged = True
+                self.stop_event.wait(1.0)
+                continue
+            if stream_pause_logged:
+                print(
+                    "[QUEUE WORKER] Stream realtime tidak aktif; "
+                    "melanjutkan backlog segment"
+                )
+                stream_pause_logged = False
+
             try:
                 # Ambil segmen berikutnya dari bounded queue dengan timeout
                 segment_info = self._processing_queue.get(timeout=1.0)
@@ -578,6 +608,27 @@ class CameraRecorderService:
                 # Periksa apakah ada pending backlog di _segments_state yang belum masuk queue
                 self._repopulate_queue_from_backlog()
                 continue
+
+            while (
+                self.is_running
+                and not self.stop_event.is_set()
+                and self._stream_inference_active()
+            ):
+                if not stream_pause_logged:
+                    print(
+                        "[QUEUE WORKER] Inferensi segment dijeda; "
+                        "stream realtime mendapat prioritas"
+                    )
+                    stream_pause_logged = True
+                self.stop_event.wait(1.0)
+
+            if not self.is_running or self.stop_event.is_set():
+                with self._completed_segments_lock:
+                    self._queued_segment_filenames.discard(
+                        segment_info.get("filename")
+                    )
+                self._processing_queue.task_done()
+                break
 
             filename = segment_info.get("filename")
             if not filename:
@@ -1037,6 +1088,15 @@ class CameraRecorderService:
         """
         Metode pemrosesan on-demand untuk 1 segmen (kompatibilitas Tahap 2).
         """
+        if self._stream_inference_active():
+            return {
+                "success": False,
+                "message": (
+                    "Inferensi segment dijeda selama stream realtime aktif. "
+                    "Segmen tetap tersimpan untuk diproses saat stream berhenti."
+                ),
+            }
+
         with self._completed_segments_lock:
             if self.worker_is_busy:
                 return {

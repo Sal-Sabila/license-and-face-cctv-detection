@@ -1116,13 +1116,33 @@ class VideoAIService:
 
         cache_key = (PERSON_MODEL_PATH, PLATE_MODEL_PATH)
         if self.segment_processing:
-            with self._segment_model_cache_lock:
-                models = self._segment_model_cache.get(cache_key)
-                if models is None:
-                    models = self._create_models()
-                    self._segment_model_cache[cache_key] = models
-                else:
-                    print("[VIDEO AI] Menggunakan kembali model worker segmen yang sudah dimuat")
+            from services.stream_ai_service import StreamAIService
+
+            stream_service = StreamAIService._instance
+            if (
+                stream_service is not None
+                and stream_service.yolo_person is not None
+                and stream_service.plate_detector is not None
+            ):
+                plate_ocr = get_shared_ocr_lane("segment")
+                plate_ocr.warmup()
+                models = (
+                    stream_service.yolo_person,
+                    stream_service.plate_detector,
+                    plate_ocr,
+                )
+                print("[VIDEO AI] Memakai ulang model AI stream untuk backlog segment")
+            else:
+                with self._segment_model_cache_lock:
+                    models = self._segment_model_cache.get(cache_key)
+                    if models is None:
+                        models = self._create_models()
+                        self._segment_model_cache[cache_key] = models
+                    else:
+                        print(
+                            "[VIDEO AI] Menggunakan kembali model worker segmen "
+                            "yang sudah dimuat"
+                        )
         else:
             models = self._create_models()
 

@@ -188,12 +188,15 @@ class CameraWorkerManager:
         self.sync_lock = threading.Lock()
         self.supervisor_thread = None
         self.running = False
+        self.initial_sync_complete = threading.Event()
+        self.ai_service = None
 
     def start(self):
         """Mulai supervisor loop. Aman dipanggil lebih dari sekali."""
         if self.running:
             return
 
+        self.initial_sync_complete.clear()
         self.running = True
         self.supervisor_thread = threading.Thread(
             target=self._supervisor_loop,
@@ -214,12 +217,28 @@ class CameraWorkerManager:
         with self.workers_lock:
             return self.workers.get(camera_id)
 
+    def is_realtime_stream_active(self):
+        """Return whether live-camera workers are active or being initialized."""
+        if self.running and not self.initial_sync_complete.is_set():
+            return True
+        with self.workers_lock:
+            if self.workers:
+                return True
+
+        ai_service = self.ai_service
+        if ai_service is None:
+            return False
+        with ai_service.frame_queue_lock:
+            return bool(ai_service.frame_queue) or ai_service.ai_processing
+
     def sync_now(self):
         """Segera sinkronkan worker dengan database tanpa menunggu interval polling supervisor."""
         try:
             from services.stream_ai_service import StreamAIService
             ai_service = StreamAIService.get_instance()
+            self.ai_service = ai_service
             self._sync_workers_with_db(ai_service)
+            self.initial_sync_complete.set()
         except Exception as exc:
             print(f"[CAMERA SUPERVISOR SYNC ERROR] {exc}")
 
@@ -235,10 +254,12 @@ class CameraWorkerManager:
         from services.stream_ai_service import StreamAIService
 
         ai_service = StreamAIService.get_instance()
+        self.ai_service = ai_service
 
         while self.running:
             try:
                 self._sync_workers_with_db(ai_service)
+                self.initial_sync_complete.set()
             except Exception as exc:
                 print(f"[CAMERA SUPERVISOR ERROR] {exc}")
 
@@ -286,7 +307,10 @@ class CameraWorkerManager:
 
     def _stop_worker(self, camera_id):
         with self.workers_lock:
-            worker = self.workers.pop(camera_id, None)
+            worker = self.workers.get(camera_id)
         if worker is not None:
             worker.stop()
+            with self.workers_lock:
+                if self.workers.get(camera_id) is worker:
+                    self.workers.pop(camera_id, None)
             print(f"[CAMERA SUPERVISOR] Kamera {camera_id}: worker dihentikan")

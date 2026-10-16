@@ -176,12 +176,12 @@ PLATE_VEHICLE_MIN_HEIGHT = 20
 FAKE_VEHICLE_ASPECT_MIN = 0.9
 
 # AI INTERVAL
-BASE_AI_INTERVAL = 0.35
-MIN_AI_INTERVAL = 0.25
-MAX_AI_INTERVAL = 0.75
-TARGET_CPU = 65.0
-HIGH_CPU = 80.0
-LOW_CPU = 45.0
+BASE_AI_INTERVAL = 0.40
+MIN_AI_INTERVAL = 0.30
+MAX_AI_INTERVAL = 0.90
+TARGET_CPU = 55.0
+HIGH_CPU = 70.0
+LOW_CPU = 40.0
 AI_ADJUST_COOLDOWN = 2.0
 CPU_INFERENCE_THREADS = 2
 CPU_INTEROP_THREADS = 1
@@ -208,7 +208,7 @@ OCR_MIN_PLATE_CONFIDENCE = 0.25
 
 MAX_PLATE_ROI = 4
 
-PLATE_DETECT_INTERVAL = 0.60
+PLATE_DETECT_INTERVAL = 0.70
 OCR_INTERVAL = 0.80
 
 PLATE_TRACKER_IOU = 0.35
@@ -933,6 +933,7 @@ class StreamAIService:
         self.frame_queue_times = {}
         self.frame_queue_coalesced = {}
         self.frame_queue_lock = threading.Lock()
+        self.ai_processing = False
         self.ai_wakeup = threading.Event()
         self.ai_thread = threading.Thread(target=self._ai_loop, name="PlateVision-AI", daemon=True)
 
@@ -3164,15 +3165,24 @@ class StreamAIService:
                         camera_id, time.perf_counter()
                     )
                     item = (frame, camera_id, queued_at)
+                    self.ai_processing = True
             if item is None:
                 continue
             frame, camera_id, queued_at = item
-            camera_id = _normalize_camera_id(camera_id)
-            camera_state = self._camera_state(camera_id)
-            now = time.time()
-            camera_state["last_ai_time"] = now
-            queue_wait_ms = max(0.0, time.perf_counter() - queued_at) * 1000
-            self._run_ai_pipeline(frame, camera_id, queue_wait_ms=queue_wait_ms)
+            try:
+                camera_id = _normalize_camera_id(camera_id)
+                camera_state = self._camera_state(camera_id)
+                now = time.time()
+                camera_state["last_ai_time"] = now
+                queue_wait_ms = max(0.0, time.perf_counter() - queued_at) * 1000
+                self._run_ai_pipeline(
+                    frame,
+                    camera_id,
+                    queue_wait_ms=queue_wait_ms,
+                )
+            finally:
+                with self.frame_queue_lock:
+                    self.ai_processing = False
         print("[AI THREAD] Background AI worker stopped")
 
     # PUBLIC API

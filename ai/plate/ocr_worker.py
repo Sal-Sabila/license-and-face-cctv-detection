@@ -10,8 +10,8 @@ import psutil
 from ai.plate.ocr import PlateOCR
 
 
-STREAM_QUEUE_SIZE = max(1, int(os.environ.get("PLATE_OCR_STREAM_QUEUE_SIZE", "8")))
-SEGMENT_QUEUE_SIZE = max(1, int(os.environ.get("PLATE_OCR_SEGMENT_QUEUE_SIZE", "16")))
+STREAM_QUEUE_SIZE = max(1, int(os.environ.get("PLATE_OCR_STREAM_QUEUE_SIZE", "4")))
+SEGMENT_QUEUE_SIZE = max(1, int(os.environ.get("PLATE_OCR_SEGMENT_QUEUE_SIZE", "2")))
 STREAM_MAX_AGE_SECONDS = max(
     0.1, float(os.environ.get("PLATE_OCR_STREAM_MAX_AGE_SECONDS", "5.0"))
 )
