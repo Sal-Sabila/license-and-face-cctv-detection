@@ -1,10 +1,94 @@
+import glob
+import os
 import cv2
 import json
 import re
 import time
 from collections import Counter
+import numpy as np
 
 from paddleocr import PaddleOCR
+
+DEBUG_OCR_DIR = os.path.join("static", "captures", "debug_ocr")
+
+
+def deskew_plate(image):
+    """Koreksi kemiringan sudut plat nomor menggunakan kontur/minAreaRect."""
+    if image is None or image.size == 0:
+        return image
+    try:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        coords = np.column_stack(np.where(thresh > 0))
+        if len(coords) < 20:
+            return image
+        rect = cv2.minAreaRect(coords)
+        angle = rect[-1]
+        if angle < -45:
+            angle = -(90 + angle)
+        elif angle > 45:
+            angle = 90 - angle
+        else:
+            angle = -angle
+        if abs(angle) < 1.5 or abs(angle) > 32.0:
+            return image
+        (h, w) = image.shape[:2]
+        center = (w // 2, h // 2)
+        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+        rotated = cv2.warpAffine(
+            image, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE
+        )
+        return rotated
+    except Exception:
+        return image
+
+
+def save_debug_crop_pair(
+    raw_crop, prep_crop, text, conf, valid, max_keep=50, context=None
+):
+    """Menyimpan perbandingan crop plat sebelum vs sesudah preprocessing untuk evaluasi."""
+    try:
+        os.makedirs(DEBUG_OCR_DIR, exist_ok=True)
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        stamp = time.time_ns()
+        clean_text = re.sub(r"[^A-Z0-9]", "", str(text or "EMPTY").upper())[:10]
+        status = "VALID" if valid else "INVALID"
+        context_label = re.sub(r"[^A-Z0-9_-]", "", str(context or "").upper())[:40]
+        context_suffix = f"_{context_label}" if context_label else ""
+        base_name = (
+            f"{ts}_{stamp % 1_000_000_000:09d}{context_suffix}_"
+            f"{status}_{clean_text}_c{int(conf * 100)}"
+        )
+
+        saved_paths = []
+        if raw_crop is not None and hasattr(raw_crop, "size") and raw_crop.size > 0:
+            raw_path = os.path.join(DEBUG_OCR_DIR, f"{base_name}_1raw.jpg")
+            if cv2.imwrite(raw_path, raw_crop):
+                saved_paths.append(raw_path)
+            else:
+                print(f"[OCR DEBUG WARNING] Gagal menulis crop mentah: {raw_path}")
+        if prep_crop is not None and hasattr(prep_crop, "size") and prep_crop.size > 0:
+            prep_path = os.path.join(DEBUG_OCR_DIR, f"{base_name}_2prep.jpg")
+            if cv2.imwrite(prep_path, prep_crop):
+                saved_paths.append(prep_path)
+            else:
+                print(f"[OCR DEBUG WARNING] Gagal menulis crop preprocessing: {prep_path}")
+
+        if saved_paths:
+            print(
+                f"[OCR DEBUG] Crop sebelum/sesudah preprocessing disimpan: "
+                f"{', '.join(saved_paths)}"
+            )
+
+        files = sorted(glob.glob(os.path.join(DEBUG_OCR_DIR, "*.jpg")))
+        if len(files) > max_keep * 2:
+            for old_f in files[:len(files) - max_keep * 2]:
+                try:
+                    os.remove(old_f)
+                except OSError as exc:
+                    print(f"[OCR DEBUG WARNING] Gagal menghapus sampel lama {old_f}: {exc}")
+    except (OSError, cv2.error) as exc:
+        print(f"[OCR DEBUG ERROR] Gagal menyimpan crop OCR: {exc}")
 
 # ✅ IMPORT VALIDATOR BARU
 try:
@@ -109,7 +193,10 @@ class PlateOCR:
         print(f"[OCR] Min confidence : {self.min_confidence}")
         print(f"[OCR] Fast mode      : {self.fast_mode}")
         print(f"[OCR] Validator      : {'AKTIF (kode wilayah)' if HAS_PLATE_VALIDATOR else 'FALLBACK REGEX'}")
-        print("[OCR] Variants       : clahe + original" + (" + sharpen" if not fast_mode else ""))
+        print(
+            "[OCR] Variants       : adaptive + original fallback"
+            + (" + sharpen" if not fast_mode else "")
+        )
         print("=" * 65)
 
     # ------------------------------------------------------------------
@@ -189,8 +276,10 @@ class PlateOCR:
 
     def prepare_image(self, image):
         """
-        Menyiapkan crop plat tanpa mengubah aspect ratio.
-        Ukuran dibatasi supaya OCR CPU tetap masuk akal.
+        Menyiapkan crop plat:
+        1. Koreksi kemiringan (deskew).
+        2. Resize proporsional dengan Lanczos-4 ke tinggi optimal pengenalan.
+        3. Tambah border padding seragam.
         """
         if image is None or image.size == 0:
             return None
@@ -201,41 +290,34 @@ class PlateOCR:
             elif len(image.shape) == 3 and image.shape[2] == 4:
                 image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
 
+            # 1. Koreksi kemiringan
+            deskewed = deskew_plate(image)
+            if deskewed is not None and deskewed.size > 0:
+                image = deskewed
+
             h, w = image.shape[:2]
             if h <= 0 or w <= 0:
                 return None
 
-            pad_y = max(2, int(h * 0.08))
-            pad_x = max(3, int(w * 0.06))
+            # Upscale tiny detections while preserving their original aspect ratio.
+            scale = max(96.0 / float(h), 192.0 / float(w))
+            scale = min(scale, 480.0 / float(w))
+            target_w = max(1, int(round(w * scale)))
+            target_h = max(1, int(round(h * scale)))
 
+            resized = cv2.resize(
+                image,
+                (target_w, target_h),
+                interpolation=cv2.INTER_CUBIC if scale > 1.0 else cv2.INTER_LANCZOS4,
+            )
+
+            # 3. Tambahkan border padding bersih
+            pad_y = 6
+            pad_x = 10
             padded = cv2.copyMakeBorder(
-                image, pad_y, pad_y, pad_x, pad_x, cv2.BORDER_REPLICATE,
+                resized, pad_y, pad_y, pad_x, pad_x, cv2.BORDER_REPLICATE,
             )
-
-            ph, pw = padded.shape[:2]
-
-            effective_scale = max(
-                self.scale,
-                64.0 / max(1, ph),
-                240.0 / max(1, pw),
-            )
-            target_w = max(1, int(pw * effective_scale))
-            target_h = max(1, int(ph * effective_scale))
-
-            max_w = 420
-            max_h = 140
-            scale_down = min(
-                max_w / max(1, target_w),
-                max_h / max(1, target_h),
-                1.0,
-            )
-
-            new_w = max(1, int(target_w * scale_down))
-            new_h = max(1, int(target_h * scale_down))
-
-            return cv2.resize(
-                padded, (new_w, new_h), interpolation=cv2.INTER_LINEAR,
-            )
+            return padded
 
         except Exception as exc:
             if self.verbose:
@@ -250,31 +332,48 @@ class PlateOCR:
         return image.copy() if image is not None else None
 
     def preprocess_clahe(self, image):
+        """CLAHE pada kanal Luminance (LAB) untuk mempertajam teks tanpa artefak warna."""
         if image is None or image.size == 0:
             return None
         try:
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8))
-            enhanced = clahe.apply(gray)
-            return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+            lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(lab)
+            clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 4))
+            l_clahe = clahe.apply(l)
+            blurred = cv2.GaussianBlur(l_clahe, (0, 0), 0.8)
+            l_clahe = cv2.addWeighted(l_clahe, 1.35, blurred, -0.35, 0)
+            merged = cv2.merge([l_clahe, a, b])
+            return cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
         except Exception as exc:
             if self.verbose:
                 print(f"[OCR CLAHE ERROR] {exc}")
             return None
 
     def preprocess_sharpen(self, image):
+        """Unsharp masking untuk mempertegas garis karakter plat."""
         if image is None or image.size == 0:
             return None
         try:
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            clahe = cv2.createCLAHE(clipLimit=1.8, tileGridSize=(8, 8))
-            gray = clahe.apply(gray)
-            blur = cv2.GaussianBlur(gray, (0, 0), 1.0)
-            sharp = cv2.addWeighted(gray, 1.45, blur, -0.45, 0)
-            return cv2.cvtColor(sharp, cv2.COLOR_GRAY2BGR)
+            clahe_img = self.preprocess_clahe(image)
+            base = clahe_img if clahe_img is not None else image
+            blur = cv2.GaussianBlur(base, (0, 0), 1.0)
+            sharp = cv2.addWeighted(base, 1.5, blur, -0.5, 0)
+            return sharp
         except Exception as exc:
             if self.verbose:
                 print(f"[OCR SHARPEN ERROR] {exc}")
+            return None
+
+    def preprocess_inverted(self, image):
+        """Inversi untuk plat berlatar gelap / hitam (TNKB standar lama) agar DBNet dapat mendeteksi teks."""
+        if image is None or image.size == 0:
+            return None
+        try:
+            inv = cv2.bitwise_not(image)
+            return self.preprocess_clahe(inv)
+        except Exception as exc:
+            if self.verbose:
+                print(f"[OCR INVERT ERROR] {exc}")
             return None
 
     def preprocess_threshold(self, image):
@@ -296,13 +395,30 @@ class PlateOCR:
             return None
 
     def generate_variants(self, prepared):
-        """Urutan variant: CLAHE dulu (kontras CCTV), lalu original."""
-        variants = [
-            ("clahe", self.preprocess_clahe(prepared)),
-            ("original", self.preprocess_original(prepared)),
-        ]
+        """
+        Urutan varian cerdas:
+        - Jika plat gelap (latar hitam): prioritaskan varian inversi CLAHE agar DBNet deteksi teks putih.
+        - Jika plat terang (latar putih): prioritaskan CLAHE lalu original.
+        """
+        if prepared is None:
+            return []
+
+        gray = cv2.cvtColor(prepared, cv2.COLOR_BGR2GRAY)
+        is_dark_bg = bool(np.mean(gray) < 118.0)
+
+        if is_dark_bg:
+            primary = self.preprocess_inverted(prepared)
+            primary_name = "inv_clahe"
+        else:
+            primary = self.preprocess_clahe(prepared)
+            primary_name = "clahe"
+
+        variants = [(primary_name, primary)]
         if not self.fast_mode:
-            variants.append(("sharpen", self.preprocess_sharpen(prepared)))
+            variants.extend((
+                ("original", self.preprocess_original(prepared)),
+                ("sharpen", self.preprocess_sharpen(prepared)),
+            ))
         return [(name, img) for name, img in variants if img is not None]
 
     # ------------------------------------------------------------------
@@ -357,19 +473,23 @@ class PlateOCR:
                 box = raw_boxes[i] if i < len(raw_boxes) else [0, 0, 0, 0]
                 if hasattr(box, "tolist"):
                     box = box.tolist()
-                texts.append(str(txt))
-                boxes.append(box)
-                scores.append(score)
+                clean_txt = re.sub(r"[^\x20-\x7E]", "", str(txt)).strip()
+                if clean_txt:
+                    texts.append(clean_txt)
+                    boxes.append(box)
+                    scores.append(score)
 
             if texts:
                 return texts, boxes, scores
 
             if "text" in data:
-                texts.append(str(data.get("text") or ""))
-                scores.append(
-                    self._safe_float(data.get("confidence", data.get("score", 0.0)))
-                )
-                boxes.append([0, 0, 0, 0])
+                clean_txt = re.sub(r"[^\x20-\x7E]", "", str(data.get("text") or "")).strip()
+                if clean_txt:
+                    texts.append(clean_txt)
+                    scores.append(
+                        self._safe_float(data.get("confidence", data.get("score", 0.0)))
+                    )
+                    boxes.append([0, 0, 0, 0])
                 return texts, boxes, scores
 
         if hasattr(data, "rec_texts"):
@@ -384,9 +504,11 @@ class PlateOCR:
                 box = raw_boxes[i] if i < len(raw_boxes) else [0, 0, 0, 0]
                 if hasattr(box, "tolist"):
                     box = box.tolist()
-                texts.append(str(txt))
-                boxes.append(box)
-                scores.append(score)
+                clean_txt = re.sub(r"[^\x20-\x7E]", "", str(txt)).strip()
+                if clean_txt:
+                    texts.append(clean_txt)
+                    boxes.append(box)
+                    scores.append(score)
 
         return texts, boxes, scores
 
@@ -401,10 +523,12 @@ class PlateOCR:
         try:
             started = time.perf_counter()
 
+            paddle_started = time.perf_counter()
             if hasattr(self.ocr, "predict"):
                 results = self.ocr.predict(image)
             else:
                 results = self.ocr.ocr(image)
+            paddle_inference_elapsed = time.perf_counter() - paddle_started
 
             texts, boxes, scores = self.extract_result(results)
 
@@ -440,7 +564,11 @@ class PlateOCR:
                     }
 
             if combined is None:
-                return None
+                return {
+                    "text": "",
+                    "paddle_inference_elapsed": paddle_inference_elapsed,
+                    "no_text": True,
+                }
 
             raw_text = combined.get("text", "")
             confidence = self._safe_float(combined.get("confidence", 0.0))
@@ -454,6 +582,7 @@ class PlateOCR:
                 "is_indonesia_pattern": False,  # akan di-set setelah koreksi
                 "variant": variant,
                 "elapsed": elapsed,
+                "paddle_inference_elapsed": paddle_inference_elapsed,
             }
 
         except Exception as exc:
@@ -644,7 +773,7 @@ class PlateOCR:
     # PUBLIC READ
     # ------------------------------------------------------------------
 
-    def read(self, image):
+    def read(self, image, context=None):
         total_start = time.perf_counter()
 
         empty = {
@@ -655,6 +784,7 @@ class PlateOCR:
             "is_indonesia_pattern": False,
             "variant": "none",
             "elapsed": 0.0,
+            "paddle_inference_elapsed": 0.0,
             "variants_tried": 0,
             "correction_applied": False,
             "region_code": None,
@@ -669,10 +799,21 @@ class PlateOCR:
             return empty
 
         candidates = []
+        paddle_inference_elapsed = 0.0
+        attempted_variants = 0
 
         def read_variant(variant_name, variant_image):
+            nonlocal paddle_inference_elapsed, attempted_variants
+            attempted_variants += 1
+            variant_started = time.perf_counter()
             result = self._run_ocr(variant_image, variant_name)
-            if result is None:
+            variant_elapsed = time.perf_counter() - variant_started
+            paddle_inference_elapsed += (
+                self._safe_float(result.get("paddle_inference_elapsed"), variant_elapsed)
+                if result is not None
+                else variant_elapsed
+            )
+            if result is None or result.get("no_text"):
                 return None
 
             # ✅ KOREKSI + VALIDASI
@@ -708,7 +849,7 @@ class PlateOCR:
                 candidates.append(result)
                 if (
                     result["is_indonesia_pattern"]
-                    and result["confidence"] >= 0.85
+                    and result["confidence"] >= 0.70
                 ):
                     break
 
@@ -717,10 +858,7 @@ class PlateOCR:
             for result in candidates
         )
         if self.fast_mode and not has_strong_valid_read:
-            fallback_variants = (
-                ("sharpen", self.preprocess_sharpen(prepared)),
-                ("threshold", self.preprocess_threshold(prepared)),
-            )
+            fallback_variants = (("original", self.preprocess_original(prepared)),)
             for variant_name, variant_image in fallback_variants:
                 if variant_image is None:
                     continue
@@ -735,6 +873,11 @@ class PlateOCR:
 
         if not candidates:
             empty["elapsed"] = time.perf_counter() - total_start
+            empty["paddle_inference_elapsed"] = paddle_inference_elapsed
+            empty["variants_tried"] = attempted_variants
+            save_debug_crop_pair(
+                image, prepared, "", 0.0, False, context=context
+            )
             return empty
 
         # Pilih hasil terbaik
@@ -762,11 +905,22 @@ class PlateOCR:
             best["cross_variant_votes"] = 1
 
         best["elapsed"] = time.perf_counter() - total_start
-        best["variants_tried"] = len(candidates)
+        best["paddle_inference_elapsed"] = paddle_inference_elapsed
+        best["variants_tried"] = attempted_variants
         best["formatted"] = self._format_plate(best.get("text", ""))
         best["text"] = self.normalize_text(best.get("text", ""))
         best["is_indonesia_pattern"] = self.is_valid_indonesian_plate(best["text"])
         best["region_code"] = self._extract_region_code(best["text"])
+
+        # Simpan sampel perbandingan crop mentah vs prep untuk evaluasi
+        save_debug_crop_pair(
+            image,
+            prepared,
+            best.get("text", ""),
+            best.get("confidence", 0.0),
+            best.get("is_indonesia_pattern", False),
+            context=context,
+        )
 
         if self.verbose:
             print(

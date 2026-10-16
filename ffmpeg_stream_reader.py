@@ -52,7 +52,7 @@ def normalize_stream_url(url):
 
     # Perbaiki typo nama stream:
     # GSMasukViewLuarstream -> GSMasukViewLuar.stream
-    if url.startswith("rtmp://") and url.endswith("stream"):
+    if url.startswith("rtmp://") and url.endswith("stream") and not url.endswith(".stream"):
         url = url[:-6] + ".stream"
 
     # Jika menggunakan Wowza RTMP dan stream name belum berekstensi .stream,
