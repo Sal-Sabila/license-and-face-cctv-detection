@@ -32,7 +32,7 @@ import supervision as sv
 from ultralytics import YOLO
 
 from ai.plate.detector import PlateDetector
-from ai.plate.ocr import PlateOCR
+from ai.plate.ocr_worker import get_shared_ocr_lane
 from tracker import PlateTracker
 import db
 import line_crossing
@@ -519,6 +519,7 @@ class VideoAIService:
         self.person_capture_count = 0
         self.plate_capture_count = 0
         self.plate_roi_cursor = 0
+        self.database_save_errors = []
 
         # Status pencahayaan terbaru untuk overlay/panel.
         self.lighting = {
@@ -1115,13 +1116,33 @@ class VideoAIService:
 
         cache_key = (PERSON_MODEL_PATH, PLATE_MODEL_PATH)
         if self.segment_processing:
-            with self._segment_model_cache_lock:
-                models = self._segment_model_cache.get(cache_key)
-                if models is None:
-                    models = self._create_models()
-                    self._segment_model_cache[cache_key] = models
-                else:
-                    print("[VIDEO AI] Menggunakan kembali model worker segmen yang sudah dimuat")
+            from services.stream_ai_service import StreamAIService
+
+            stream_service = StreamAIService._instance
+            if (
+                stream_service is not None
+                and stream_service.yolo_person is not None
+                and stream_service.plate_detector is not None
+            ):
+                plate_ocr = get_shared_ocr_lane("segment")
+                plate_ocr.warmup()
+                models = (
+                    stream_service.yolo_person,
+                    stream_service.plate_detector,
+                    plate_ocr,
+                )
+                print("[VIDEO AI] Memakai ulang model AI stream untuk backlog segment")
+            else:
+                with self._segment_model_cache_lock:
+                    models = self._segment_model_cache.get(cache_key)
+                    if models is None:
+                        models = self._create_models()
+                        self._segment_model_cache[cache_key] = models
+                    else:
+                        print(
+                            "[VIDEO AI] Menggunakan kembali model worker segmen "
+                            "yang sudah dimuat"
+                        )
         else:
             models = self._create_models()
 
@@ -1150,14 +1171,9 @@ class VideoAIService:
         )
 
         try:
-            plate_ocr = PlateOCR(
-                scale=2.5,
-                min_confidence=0.15,
-                verbose=False,
-                fast_mode=True,
-            )
+            plate_ocr = get_shared_ocr_lane("segment")
             plate_ocr.warmup()
-            print("[OCR] Siap")
+            print("[VIDEO AI] OCR lane segment siap")
         except Exception as exc:
             plate_ocr = None
             print(f"[OCR WARNING] OCR tidak tersedia: {exc}")
@@ -1321,6 +1337,11 @@ class VideoAIService:
                 )
                 self.person_capture_state[event_key] = video_time
             except Exception as exc:
+                self.database_save_errors.append({
+                    "operation": "save_person_event",
+                    "track_id": event_track_id,
+                    "error": str(exc),
+                })
                 print(f"[DB PERSON ERROR] {exc}")
 
             print(
@@ -1489,6 +1510,11 @@ class VideoAIService:
                     source_name=self.source_name,
                 )
             except Exception as exc:
+                self.database_save_errors.append({
+                    "operation": "save_vehicle_event",
+                    "track_id": event_track_id,
+                    "error": str(exc),
+                })
                 print(f"[DB VEHICLE ERROR] {exc}")
 
     # ------------------------------------------------------------
@@ -1590,18 +1616,12 @@ class VideoAIService:
                 if bx2 <= bx1 or by2 <= by1:
                     continue
 
-                # Crop OCR memakai frame yang benar-benar dipakai detector.
-                # Untuk target kendaraan, detector_crop sudah mendapat enhancement lokal.
-                crop_source = detector_crop if int(vehicle.get("track_id", -1)) == int(self.focus_target_track_id) else frame
-                local_bx1 = bx1 - rx1
-                local_by1 = by1 - ry1
-                local_bx2 = bx2 - rx1
-                local_by2 = by2 - ry1
-                if crop_source is detector_crop:
-                    crop = detector_crop[local_by1:local_by2, local_bx1:local_bx2]
-                else:
+                # PlateDetector returns the padded crop from the exact ROI it
+                # inferred on (including local enhancement when focus is active).
+                crop = plate.get("crop")
+                if crop is None or getattr(crop, "size", 0) == 0:
                     crop = frame[by1:by2, bx1:bx2]
-                if crop.size == 0:
+                if crop is None or crop.size == 0:
                     continue
 
                 item = dict(plate)
@@ -1896,6 +1916,11 @@ class VideoAIService:
                     source_name=self.source_name,
                 )
         except Exception as exc:
+            self.database_save_errors.append({
+                "operation": "save_plate_event",
+                "track_id": vehicle_track_id,
+                "error": str(exc),
+            })
             print(f"[DB PLATE ERROR] {exc}")
 
         result = dict(finished)
@@ -1925,6 +1950,35 @@ class VideoAIService:
         )
 
         return result
+
+    @staticmethod
+    def _enqueue_inference_frame(
+        inference_queue,
+        queued_item,
+        inference_stats,
+        block,
+        should_abort=None,
+    ):
+        if block:
+            while True:
+                try:
+                    inference_queue.put(queued_item, timeout=0.1)
+                    return True
+                except queue.Full:
+                    if should_abort and should_abort():
+                        return False
+
+        try:
+            inference_queue.put_nowait(queued_item)
+        except queue.Full:
+            try:
+                inference_queue.get_nowait()
+            except queue.Empty:
+                pass
+            else:
+                inference_stats["dropped_frames"] += 1
+            inference_queue.put_nowait(queued_item)
+        return True
 
     # ------------------------------------------------------------
     # PROCESS FRAME
@@ -2065,6 +2119,16 @@ class VideoAIService:
     def flush_plate_tracker(self, last_frame, video_time, vehicle_dets):
         if self.plate_tracker is None or last_frame is None:
             return
+
+        if self.plate_ocr is not None:
+            self.plate_tracker.flush_ocr(self.plate_ocr, timeout=45.0)
+            for finished in self.plate_tracker.consume_finished_captures():
+                self._save_finished_capture(
+                    finished,
+                    last_frame,
+                    vehicle_dets,
+                    video_time,
+                )
 
         # Tracker finalizes track setelah gap > max_frame_gap.
         for _ in range(PLATE_TRACKER_FRAME_GAP + 1):
@@ -2566,16 +2630,13 @@ class VideoAIService:
                         frame_number,
                         time.perf_counter(),
                     )
-                    try:
-                        inference_queue.put_nowait(queued_item)
-                    except queue.Full:
-                        try:
-                            inference_queue.get_nowait()
-                        except queue.Empty:
-                            pass
-                        else:
-                            inference_stats["dropped_frames"] += 1
-                        inference_queue.put_nowait(queued_item)
+                    self._enqueue_inference_frame(
+                        inference_queue,
+                        queued_item,
+                        inference_stats,
+                        block=self.segment_processing,
+                        should_abort=lambda: bool(inference_error),
+                    )
 
                 stage_start = time.perf_counter()
                 processed = self._render(frame)
@@ -2751,6 +2812,34 @@ class VideoAIService:
             print(f"[VIDEO TIMING] inference_avg ({self.inference_count} frames): {timing_averages}")
         print(f"Person capture       : {self.person_capture_count}")
         print(f"Plate capture        : {self.plate_capture_count}")
+        if self.plate_ocr is not None:
+            ocr_metrics = self.plate_ocr.stats()
+            print(
+                "[OCR METRICS] "
+                f"source=segment backlog={ocr_metrics['backlog']}/"
+                f"{ocr_metrics['queue_limit']} "
+                f"pending={ocr_metrics['pending']} "
+                f"processing={ocr_metrics['processing']} "
+                f"peak={ocr_metrics['backlog_peak']} "
+                f"submitted={ocr_metrics['submitted']} "
+                f"completed={ocr_metrics['completed']} "
+                f"failed={ocr_metrics['failed']} "
+                f"recognized_reads={ocr_metrics['recognized_reads']} "
+                f"dropped={ocr_metrics['dropped']} retries={ocr_metrics['retries']} "
+                f"avg_ocr={ocr_metrics['ocr_seconds_avg']:.3f}s "
+                f"last_ocr={ocr_metrics['ocr_seconds_last']:.3f}s "
+                f"avg_task={ocr_metrics['task_seconds_avg']:.3f}s "
+                f"queue_wait_avg_recent="
+                f"{ocr_metrics['queue_wait_ms_avg_recent']:.1f}ms "
+                f"queue_wait_last={ocr_metrics['queue_wait_ms_last']:.1f}ms "
+                f"queue_wait_max={ocr_metrics['queue_wait_ms_max']:.1f}ms "
+                f"total_avg_recent="
+                f"{ocr_metrics['total_seconds_avg_recent']:.3f}s "
+                f"total_last={ocr_metrics['total_seconds_last']:.3f}s "
+                f"total_max={ocr_metrics['total_seconds_max']:.3f}s "
+                f"cpu={ocr_metrics['cpu_percent']}% "
+                f"rss={ocr_metrics['process_rss_mb']}MB"
+            )
         print(f"Capture person       : {CAPTURE_DIR}")
         print(f"Capture plate        : {PLATE_CAPTURE_DIR}")
         print(f"Output video         : {self.output_path}")

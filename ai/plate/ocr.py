@@ -396,7 +396,11 @@ class PlateOCR:
 
     def _run_ocr(self, image, variant="original"):
         if image is None or image.size == 0:
-            return None
+            return {
+                "text": "",
+                "confidence": 0.0,
+                "rejection_reason": "empty_preprocessed_image",
+            }
 
         try:
             started = time.perf_counter()
@@ -440,7 +444,19 @@ class PlateOCR:
                     }
 
             if combined is None:
-                return None
+                if not texts:
+                    reason = "no_text_detected"
+                elif scores and max(scores) < self.min_confidence:
+                    reason = "below_internal_confidence"
+                else:
+                    reason = "spatial_or_text_filter_rejected"
+                return {
+                    "text": "",
+                    "confidence": max(scores, default=0.0),
+                    "variant": variant,
+                    "elapsed": time.perf_counter() - started,
+                    "rejection_reason": reason,
+                }
 
             raw_text = combined.get("text", "")
             confidence = self._safe_float(combined.get("confidence", 0.0))
@@ -457,9 +473,14 @@ class PlateOCR:
             }
 
         except Exception as exc:
-            if self.verbose:
-                print(f"[OCR ERROR] variant={variant}: {exc}")
-            return None
+            print(f"[OCR INFERENCE ERROR] variant={variant} error={exc}")
+            return {
+                "text": "",
+                "confidence": 0.0,
+                "variant": variant,
+                "elapsed": time.perf_counter() - started,
+                "rejection_reason": "inference_error",
+            }
 
     # ------------------------------------------------------------------
     # CHARACTER CORRECTION
@@ -645,6 +666,17 @@ class PlateOCR:
     # ------------------------------------------------------------------
 
     def read(self, image):
+        return self._read(image)
+
+    def read_fast(self, image, variant_index=0):
+        """Run one preprocessing variant so realtime work can preempt between segment samples."""
+        return self._read(
+            image,
+            variant_limit=1,
+            variant_index=variant_index,
+        )
+
+    def _read(self, image, variant_limit=None, variant_index=0):
         total_start = time.perf_counter()
 
         empty = {
@@ -658,21 +690,35 @@ class PlateOCR:
             "variants_tried": 0,
             "correction_applied": False,
             "region_code": None,
+            "rejection_reason": "not_processed",
         }
 
         if image is None or image.size == 0:
+            empty["rejection_reason"] = "empty_input_crop"
             return empty
 
         prepared = self.prepare_image(image)
         if prepared is None:
             empty["elapsed"] = time.perf_counter() - total_start
+            empty["rejection_reason"] = "preprocessing_failed"
             return empty
 
         candidates = []
+        rejection_reasons = []
 
         def read_variant(variant_name, variant_image):
             result = self._run_ocr(variant_image, variant_name)
-            if result is None:
+            if not result or not result.get("text"):
+                reason = (
+                    result.get("rejection_reason", "empty_ocr_result")
+                    if result
+                    else "empty_ocr_result"
+                )
+                rejection_reasons.append(f"{variant_name}:{reason}")
+                print(
+                    f"[OCR REJECT] variant={variant_name} reason={reason} "
+                    f"confidence={float((result or {}).get('confidence', 0.0) or 0.0):.3f}"
+                )
                 return None
 
             # ✅ KOREKSI + VALIDASI
@@ -702,7 +748,14 @@ class PlateOCR:
 
             return result
 
-        for variant_name, variant_image in self.generate_variants(prepared):
+        variants = self.generate_variants(prepared)
+        if variants and variant_limit:
+            variant_index = int(variant_index) % len(variants)
+            variants = (
+                variants[variant_index:] + variants[:variant_index]
+            )[:max(1, int(variant_limit))]
+
+        for variant_name, variant_image in variants:
             result = read_variant(variant_name, variant_image)
             if result is not None:
                 candidates.append(result)
@@ -716,7 +769,11 @@ class PlateOCR:
             result["is_indonesia_pattern"] and result["confidence"] >= 0.70
             for result in candidates
         )
-        if self.fast_mode and not has_strong_valid_read:
+        if (
+            variant_limit is None
+            and self.fast_mode
+            and not has_strong_valid_read
+        ):
             fallback_variants = (
                 ("sharpen", self.preprocess_sharpen(prepared)),
                 ("threshold", self.preprocess_threshold(prepared)),
@@ -735,6 +792,9 @@ class PlateOCR:
 
         if not candidates:
             empty["elapsed"] = time.perf_counter() - total_start
+            empty["rejection_reason"] = (
+                ";".join(rejection_reasons) if rejection_reasons else "no_variant"
+            )
             return empty
 
         # Pilih hasil terbaik

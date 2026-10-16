@@ -1,4 +1,6 @@
 import collections
+import concurrent.futures
+import hashlib
 import re
 import time
 from collections import Counter
@@ -163,6 +165,15 @@ class Track:
         self.best_bbox = bbox
         self.finalized = False
         self.is_stable = False
+        self.ocr_requests = []
+        self.ocr_candidates = []
+        self.ocr_candidates_submitted = False
+        self.ocr_attempts = 0
+        self.ocr_sampling_count = 0
+        self.ocr_crop_fingerprints = set()
+        self.max_ocr_attempts = 3
+        self.finalize_requested = False
+        self.ocr_retry_limit_logged = False
 
     # TAMBAH OCR
 
@@ -312,6 +323,11 @@ class PlateTracker:
         self.latest_capture = None
         self.latest_finished_capture = None
         self.finished_captures = collections.deque(maxlen=100)
+        self.ocr_lane_key = f"plate-tracker-{id(self)}"
+        self.pipeline_counts = collections.Counter()
+
+    def _count_pipeline(self, stage):
+        self.pipeline_counts[stage] += 1
 
     def consume_finished_captures(self):
         results = list(self.finished_captures)
@@ -335,27 +351,39 @@ class PlateTracker:
 
     def _hasil_layak_ditampilkan(self, hasil, track):
         if hasil is None:
+            self._count_pipeline("final_rejected_no_usable_readings")
+            print(
+                f"[OCR FINAL REJECT] Track #{track.id} "
+                "reason=no_usable_readings"
+            )
             return False
 
         text = normalisasi_plat(hasil.get("text", ""))
         if not text:
+            self._count_pipeline("final_rejected_empty_voted_text")
+            print(
+                f"[OCR FINAL REJECT] Track #{track.id} "
+                "reason=empty_voted_text"
+            )
             return False
 
         # OCR confidence
         confidence = float(hasil.get("confidence_rata2", 0.0) or 0.0)
         if confidence < self.min_final_confidence:
+            self._count_pipeline("final_rejected_confidence")
             print(
-                f"[FILTER] Track #{track.id} "
-                f"OCR confidence terlalu rendah: {confidence:.1%}"
+                f"[OCR FINAL REJECT] Track #{track.id} "
+                f"reason=confidence_below_final_min confidence={confidence:.3f} "
+                f"threshold={self.min_final_confidence:.3f}"
             )
             return False
 
         # ✅ Validasi format pakai validator baru
         if not validasi_format_plat(text):
+            self._count_pipeline("final_rejected_plate_format")
             print(
-                f"[FILTER] Track #{track.id} "
-                f"format tidak valid: '{text}' "
-                f"(kode wilayah tidak dikenal)"
+                f"[OCR FINAL REJECT] Track #{track.id} "
+                f"reason=invalid_plate_format text='{text}'"
             )
             return False
 
@@ -377,8 +405,10 @@ class PlateTracker:
             if hasil.get("is_valid"):
                 return True
 
+        self._count_pipeline("final_rejected_insufficient_consistency")
         print(
-            f"[FILTER] Track #{track.id} "
+            f"[OCR FINAL REJECT] Track #{track.id} reason=insufficient_consistency "
+            f"text='{text}' "
             f"tidak konsisten: {jumlah_muncul}/{total_bacaan} bacaan "
             f"| OCR={confidence:.1%} "
             f"| YOLO={track.detection_confidence:.1%}"
@@ -392,6 +422,7 @@ class PlateTracker:
 
         if not self._hasil_layak_ditampilkan(hasil, track):
             return None
+        self._count_pipeline("finalized")
 
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -443,32 +474,305 @@ class PlateTracker:
 
     # UPDATE
 
+    def _record_ocr_result(self, track, result, crop, bbox, detection_confidence):
+        if not result:
+            self._count_pipeline("ocr_rejected_empty_result")
+            print(
+                f"[OCR REJECT] Track #{track.id} reason=empty_worker_result"
+            )
+            return
+
+        raw_text = result.get("text", "")
+        text = normalisasi_plat(raw_text)
+        ocr_confidence = float(result.get("confidence", 0.0) or 0.0)
+        if not text:
+            self._count_pipeline("ocr_empty_text")
+            self._count_pipeline(
+                f"ocr_rejected_{result.get('rejection_reason', 'no_read')}"
+            )
+            print(
+                f"[OCR REJECT] Track #{track.id} "
+                f"reason={result.get('rejection_reason', 'no_read')} "
+                f"variant={result.get('variant', 'unknown')} "
+                f"elapsed={float(result.get('elapsed', 0.0) or 0.0):.3f}s"
+            )
+            return
+        self._count_pipeline("ocr_nonempty")
+        print(
+            f"[OCR READ] Track #{track.id} raw='{result.get('raw_text') or raw_text}' "
+            f"text='{text or '-'}' confidence={ocr_confidence:.3f} "
+            f"variant={result.get('variant', 'unknown')} "
+            f"elapsed={float(result.get('elapsed', 0.0) or 0.0):.3f}s"
+        )
+
+        if ocr_confidence < self.min_ocr_confidence:
+            self._count_pipeline("ocr_rejected_confidence")
+            print(
+                f"[OCR REJECT] Track #{track.id} "
+                f"reason=confidence_below_tracker_min confidence={ocr_confidence:.3f} "
+                f"threshold={self.min_ocr_confidence:.3f}"
+            )
+            return
+
+        corrected_text, is_valid, _ = koreksi_plat(text)
+        if not is_valid:
+            print(
+                f"[OCR CANDIDATE] Track #{track.id} "
+                f"reason=invalid_plate_format raw='{text}' "
+                f"corrected='{corrected_text}' confidence={ocr_confidence:.3f} "
+                f"retained={int(ocr_confidence >= 0.60)}"
+            )
+            if ocr_confidence < 0.60:
+                self._count_pipeline("ocr_rejected_invalid_format")
+                return
+
+        track.tambah_bacaan_ocr(
+            text=text,
+            confidence=ocr_confidence,
+            formatted=result.get("formatted", corrected_text),
+            crop=crop,
+            bbox=bbox,
+        )
+        self._count_pipeline("ocr_recorded")
+        if is_valid:
+            self._count_pipeline("ocr_validated")
+        else:
+            self._count_pipeline("ocr_recorded_unvalidated")
+
+        vote = track.hasil_voting()
+        has_consistent_reads = bool(
+            vote
+            and vote.get("is_valid")
+            and vote.get("confidence_rata2", 0.0) >= self.min_final_confidence
+            and vote.get("jumlah_muncul", 0) >= self.min_consistent_reads
+        )
+        has_accepted_single_read = bool(
+            vote
+            and vote.get("is_valid")
+            and vote.get("total_bacaan") == 1
+            and vote.get("confidence_rata2", 0.0)
+            >= self.single_read_ocr_confidence
+            and detection_confidence >= self.single_read_detection_confidence
+        )
+        if is_valid and (has_consistent_reads or has_accepted_single_read):
+            track.is_stable = True
+
+    def _submit_stream_candidate(self, track, ocr_reader):
+        if (
+            not track.ocr_candidates
+            or track.is_stable
+            or track.ocr_attempts >= track.max_ocr_attempts
+            or any(not item["future"].done() for item in track.ocr_requests)
+        ):
+            return
+
+        candidate = track.ocr_candidates.pop(0)
+        future = ocr_reader.submit(
+            candidate["crop"],
+            coalesce_key=(self.ocr_lane_key, track.id),
+        )
+        if future is None:
+            print(
+                f"[OCR STREAM SAMPLE SKIP] Track #{track.id} "
+                "reason=invalid_crop"
+            )
+            return
+
+        track.ocr_attempts += 1
+        self._count_pipeline("ocr_submitted")
+        track.ocr_requests.append({
+            "future": future,
+            "crop": candidate["crop"],
+            "bbox": candidate["bbox"],
+            "detection_confidence": candidate["detection_confidence"],
+        })
+        print(
+            f"[OCR STREAM SAMPLE] Track #{track.id} "
+            f"attempt={track.ocr_attempts}/{track.max_ocr_attempts} "
+            f"buffered={len(track.ocr_candidates)}"
+        )
+
+    def _drain_ocr_results(self, track, ocr_reader=None):
+        pending = []
+        for request in track.ocr_requests:
+            future = request["future"]
+            if not future.done():
+                pending.append(request)
+                continue
+            try:
+                result = future.result()
+            except concurrent.futures.CancelledError:
+                track.ocr_attempts = max(0, track.ocr_attempts - 1)
+                print(
+                    f"[OCR SUPERSEDED] Track #{track.id} "
+                    "reason=queued_request_cancelled"
+                )
+                continue
+            except Exception as exc:
+                print(f"[OCR ERROR] Track #{track.id}: {exc}")
+                continue
+            self._record_ocr_result(
+                track,
+                result,
+                request["crop"],
+                request["bbox"],
+                request["detection_confidence"],
+            )
+        if track.is_stable:
+            retained = []
+            cancelled = 0
+            for request in pending:
+                if request["future"].cancel():
+                    cancelled += 1
+                    track.ocr_attempts = max(0, track.ocr_attempts - 1)
+                else:
+                    retained.append(request)
+            if cancelled:
+                print(
+                    f"[OCR SEGMENT EARLY STOP] Track #{track.id} "
+                    f"reason=stable_vote cancelled={cancelled}"
+                )
+            pending = retained
+        track.ocr_requests = pending
+        if track.is_stable and track.ocr_candidates:
+            self._count_pipeline("ocr_candidate_discarded_stable")
+            track.ocr_candidates.clear()
+        elif (
+            ocr_reader is not None
+            and getattr(ocr_reader, "source", None) == "stream"
+            and not pending
+        ):
+            self._submit_stream_candidate(track, ocr_reader)
+
+    @staticmethod
+    def _crop_fingerprint(crop):
+        shape = tuple(int(value) for value in getattr(crop, "shape", ()))
+        digest = hashlib.blake2b(digest_size=12)
+        digest.update(repr(shape).encode("ascii"))
+        digest.update(crop.tobytes())
+        return digest.digest()
+
+    @staticmethod
+    def _candidate_quality(crop, detection_confidence):
+        shape = getattr(crop, "shape", ())
+        if len(shape) < 2:
+            return float(detection_confidence)
+        area = max(1, int(shape[0]) * int(shape[1]))
+        size_score = min(1.0, area / 2500.0)
+        sharpness_score = 1.0
+        try:
+            import cv2
+
+            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if len(shape) == 3 else crop
+            sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+            sharpness_score = min(1.0, max(0.25, sharpness / 180.0))
+        except (ImportError, TypeError, ValueError):
+            pass
+        return (
+            float(detection_confidence)
+            * (0.55 + 0.45 * size_score)
+            * sharpness_score
+        )
+
+    def _submit_segment_candidates(self, track, ocr_reader):
+        if track.ocr_candidates_submitted:
+            return
+        track.ocr_candidates_submitted = True
+        candidates = sorted(
+            track.ocr_candidates,
+            key=lambda item: item["quality"],
+            reverse=True,
+        )
+        selected = candidates[:track.max_ocr_attempts]
+        for index, candidate in enumerate(selected):
+            future = ocr_reader.submit(candidate["crop"], retry=index > 0)
+            if future is None:
+                print(
+                    f"[OCR SEGMENT SAMPLE SKIP] Track #{track.id} "
+                    "reason=invalid_crop"
+                )
+                continue
+            track.ocr_attempts += 1
+            self._count_pipeline("ocr_submitted")
+            track.ocr_requests.append({
+                "future": future,
+                "crop": candidate["crop"],
+                "bbox": candidate["bbox"],
+                "detection_confidence": candidate["detection_confidence"],
+                "retry": index > 0,
+            })
+        print(
+            f"[OCR SEGMENT SAMPLES] Track #{track.id} "
+            f"selected={len(selected)} unique={len(candidates)} "
+            f"queued={len(track.ocr_requests)}"
+        )
+
     def update(self, detections, frame, ocr_reader):
         self.frame_number += 1
         track_id_yang_match = set()
+
+        for existing_track in self.tracks.values():
+            self._drain_ocr_results(existing_track, ocr_reader)
 
         for deteksi in detections:
             bbox_baru = deteksi["bbox"]
             detection_confidence = float(
                 deteksi.get("confidence", deteksi.get("conf", 0.0)) or 0.0
             )
+            try:
+                vehicle_track_id = int(deteksi.get("vehicle_track_id"))
+            except (TypeError, ValueError):
+                vehicle_track_id = None
+            if vehicle_track_id is not None and vehicle_track_id < 0:
+                vehicle_track_id = None
 
             if detection_confidence < self.min_detection_confidence:
                 continue
 
             track_terbaik = None
             iou_terbaik = 0.0
+            vehicle_track_match = False
+            eligible_tracks = [
+                track
+                for track in self.tracks.values()
+                if not track.finalized
+                and not track.finalize_requested
+                and track.id not in track_id_yang_match
+                and self.frame_number - track.last_seen_frame <= self.max_frame_gap
+            ]
 
-            for track in self.tracks.values():
-                if track.finalized:
-                    continue
-                iou = hitung_iou(track.bbox, bbox_baru)
-                if iou > iou_terbaik:
-                    iou_terbaik = iou
-                    track_terbaik = track
+            if vehicle_track_id is not None:
+                matching_tracks = []
+                for track in eligible_tracks:
+                    try:
+                        track_vehicle_id = int(track.vehicle_track_id)
+                    except (TypeError, ValueError):
+                        continue
+                    if track_vehicle_id == vehicle_track_id:
+                        matching_tracks.append(track)
+
+                if matching_tracks:
+                    track_terbaik = max(
+                        matching_tracks,
+                        key=lambda track: (
+                            track.last_seen_frame,
+                            hitung_iou(track.bbox, bbox_baru),
+                        ),
+                    )
+                    iou_terbaik = hitung_iou(track_terbaik.bbox, bbox_baru)
+                    vehicle_track_match = True
+
+            if not vehicle_track_match:
+                for track in eligible_tracks:
+                    iou = hitung_iou(track.bbox, bbox_baru)
+                    if iou > iou_terbaik:
+                        iou_terbaik = iou
+                        track_terbaik = track
 
             # Match track
-            if iou_terbaik >= self.iou_threshold and track_terbaik is not None:
+            if track_terbaik is not None and (
+                vehicle_track_match or iou_terbaik >= self.iou_threshold
+            ):
                 track = track_terbaik
                 track.bbox = bbox_baru
                 track.last_seen_frame = self.frame_number
@@ -483,6 +787,15 @@ class PlateTracker:
 
                 if detection_confidence > track.detection_confidence:
                     track.detection_confidence = detection_confidence
+                if track.finalize_requested:
+                    track.finalize_requested = False
+                if vehicle_track_match:
+                    self._count_pipeline("matched_by_vehicle_track_id")
+                    print(
+                        f"[PLATE TRACK MATCH] Track #{track.id} "
+                        f"method=vehicle_track_id vehicle_track_id={vehicle_track_id} "
+                        f"iou={iou_terbaik:.3f}"
+                    )
             else:
                 # Track baru
                 track = Track(
@@ -506,7 +819,26 @@ class PlateTracker:
                 not track.is_stable
                 and track.matches_since_last_ocr >= self.ocr_every_n_matches
             ):
-                track.matches_since_last_ocr = 0
+                is_segment_lane = (
+                    getattr(ocr_reader, "source", None) == "segment"
+                )
+                has_pending_ocr = False
+                if not is_segment_lane:
+                    has_pending_ocr = any(
+                        not item["future"].done()
+                        for item in track.ocr_requests
+                    )
+                    if track.ocr_attempts >= track.max_ocr_attempts:
+                        track.matches_since_last_ocr = 0
+                        if not track.ocr_retry_limit_logged:
+                            track.ocr_retry_limit_logged = True
+                            self._count_pipeline("ocr_retry_limit_reached")
+                            print(
+                                f"[OCR RETRY LIMIT] Track #{track.id} "
+                                f"attempts={track.ocr_attempts}"
+                            )
+                        continue
+
                 x1, y1, x2, y2 = track.bbox
                 x1 = max(0, int(x1))
                 y1 = max(0, int(y1))
@@ -524,63 +856,147 @@ class PlateTracker:
                 cy1 = max(0, y1 - pad_y)
                 cx2 = min(frame.shape[1], x2 + pad_x)
                 cy2 = min(frame.shape[0], y2 + pad_y)
-                crop = frame[cy1:cy2, cx1:cx2]
+                detection_crop = deteksi.get("crop")
+                if (
+                    detection_crop is not None
+                    and getattr(detection_crop, "size", 0) > 0
+                    and len(getattr(detection_crop, "shape", ())) >= 2
+                ):
+                    crop = detection_crop
+                    crop_source = "plate_detection"
+                else:
+                    crop = frame[cy1:cy2, cx1:cx2]
+                    crop_source = "frame_fallback"
 
-                try:
-                    hasil_ocr = ocr_reader.read(crop)
-                except Exception as exc:
-                    print(f"[OCR ERROR] Track #{track.id}: {exc}")
-                    hasil_ocr = None
-
-                if hasil_ocr is None:
-                    continue
-
-                raw_text = hasil_ocr.get("text", "")
-                text = normalisasi_plat(raw_text)
-                ocr_confidence = float(hasil_ocr.get("confidence", 0.0) or 0.0)
-
-                if ocr_confidence < self.min_ocr_confidence:
+                if crop is None or getattr(crop, "size", 0) == 0:
                     print(
-                        f"[FILTER OCR] Track #{track.id} "
-                        f"OCR={ocr_confidence:.1%} < {self.min_ocr_confidence:.1%}"
+                        f"[OCR INPUT ERROR] Track #{track.id} crop kosong "
+                        f"(bbox={tuple(bbox_baru)})"
                     )
                     continue
 
-                # ✅ Koreksi + validasi
-                corrected_text, is_valid, penalty = koreksi_plat(text)
-
-                if not is_valid:
+                crop_fingerprint = self._crop_fingerprint(crop)
+                if crop_fingerprint in track.ocr_crop_fingerprints:
+                    self._count_pipeline("ocr_duplicate_crop_skipped")
                     print(
-                        f"[FILTER FORMAT] Track #{track.id}: "
-                        f"raw='{text}' corrected='{corrected_text}' (tidak valid)"
+                        f"[OCR SAMPLE SKIP] Track #{track.id} "
+                        "reason=duplicate_crop"
                     )
-                    # Tetap simpan kalau OCR confidence tinggi (buat review nanti)
-                    # Tapi jangan tandai sebagai stable
-                    if ocr_confidence < 0.60:
-                        continue
+                    track.matches_since_last_ocr = 0
+                    continue
+                track.ocr_crop_fingerprints.add(crop_fingerprint)
 
-                # ✅ Simpan bacaan (yang terkoreksi)
-                track.tambah_bacaan_ocr(
-                    text=text,  # raw, akan dikoreksi di dalam
-                    confidence=ocr_confidence,
-                    formatted=hasil_ocr.get("formatted", corrected_text),
-                    crop=crop,
-                    bbox=(x1, y1, x2, y2),
+                crop_shape = getattr(crop, "shape", ())
+                print(
+                    f"[OCR INPUT] Track #{track.id} source={crop_source} "
+                    f"bbox={tuple(bbox_baru)} "
+                    f"crop={crop_shape[1]}x{crop_shape[0]} "
+                    f"yolo_confidence={detection_confidence:.3f}"
                 )
 
-                # ✅ Stabil hanya kalau valid & confidence tinggi
-                if is_valid and ocr_confidence >= 0.58:
-                    track.is_stable = True
+                bbox = (x1, y1, x2, y2)
+                if is_segment_lane:
+                    track.matches_since_last_ocr = 0
+                if hasattr(ocr_reader, "submit"):
+                    track.ocr_sampling_count += 1
+                    candidate = {
+                        "crop": crop.copy(),
+                        "bbox": bbox,
+                        "detection_confidence": detection_confidence,
+                        "quality": self._candidate_quality(
+                            crop, detection_confidence
+                        ),
+                        "frame_number": self.frame_number,
+                    }
+                    if is_segment_lane:
+                        track.ocr_candidates.append(candidate)
+                        track.ocr_candidates.sort(
+                            key=lambda item: item["quality"],
+                            reverse=True,
+                        )
+                        track.ocr_candidates = track.ocr_candidates[
+                            :track.max_ocr_attempts
+                        ]
+                    elif has_pending_ocr:
+                        candidate_capacity = max(
+                            0, track.max_ocr_attempts - track.ocr_attempts
+                        )
+                        track.ocr_candidates.append(candidate)
+                        track.ocr_candidates.sort(
+                            key=lambda item: item["quality"],
+                            reverse=True,
+                        )
+                        track.ocr_candidates = track.ocr_candidates[
+                            :candidate_capacity
+                        ]
+                        if any(
+                            item["frame_number"] == candidate["frame_number"]
+                            for item in track.ocr_candidates
+                        ):
+                            self._count_pipeline("ocr_candidate_buffered")
+                            print(
+                                f"[OCR STREAM BUFFER] Track #{track.id} "
+                                f"buffered={len(track.ocr_candidates)} "
+                                f"attempts={track.ocr_attempts}/"
+                                f"{track.max_ocr_attempts}"
+                            )
+                        track.matches_since_last_ocr = 0
+                    elif (
+                        not track.is_stable
+                        and not any(
+                            not item["future"].done()
+                            for item in track.ocr_requests
+                        )
+                    ):
+                        future = ocr_reader.submit(
+                            crop,
+                            coalesce_key=(self.ocr_lane_key, track.id),
+                        )
+                        if future is not None:
+                            track.ocr_attempts += 1
+                            track.matches_since_last_ocr = 0
+                            self._count_pipeline("ocr_submitted")
+                            track.ocr_requests.append({
+                                "future": future,
+                                "crop": crop.copy(),
+                                "bbox": bbox,
+                                "detection_confidence": detection_confidence,
+                            })
+                        else:
+                            track.matches_since_last_ocr = 0
+                else:
+                    track.matches_since_last_ocr = 0
+                    track.ocr_attempts += 1
+                    try:
+                        result = ocr_reader.read(crop)
+                    except Exception as exc:
+                        print(f"[OCR ERROR] Track #{track.id}: {exc}")
+                        result = None
+                    self._record_ocr_result(
+                        track,
+                        result,
+                        crop,
+                        bbox,
+                        detection_confidence,
+                    )
 
         # Expired tracks
         track_id_untuk_dihapus = []
         for track_id, track in list(self.tracks.items()):
             gap = self.frame_number - track.last_seen_frame
             if gap > self.max_frame_gap:
-                if not track.finalized:
-                    track.finalized = True
-                    self._finalize_track(track)
-                track_id_untuk_dihapus.append(track_id)
+                if (
+                    getattr(ocr_reader, "source", None) == "segment"
+                    and not track.ocr_candidates_submitted
+                ):
+                    self._submit_segment_candidates(track, ocr_reader)
+                track.finalize_requested = True
+                self._drain_ocr_results(track, ocr_reader)
+                if not track.ocr_requests:
+                    if not track.finalized:
+                        track.finalized = True
+                        self._finalize_track(track)
+                    track_id_untuk_dihapus.append(track_id)
 
         for track_id in track_id_untuk_dihapus:
             if track_id in self.tracks:
@@ -591,3 +1007,48 @@ class PlateTracker:
             for tid in track_id_yang_match
             if tid in self.tracks
         ]
+
+    def flush_ocr(self, ocr_reader, timeout=30.0):
+        """Wait for bounded OCR requests, then finalize the remaining video tracks."""
+        if ocr_reader is None:
+            return
+
+        for track in self.tracks.values():
+            if (
+                getattr(ocr_reader, "source", None) == "segment"
+                and not track.ocr_candidates_submitted
+            ):
+                self._submit_segment_candidates(track, ocr_reader)
+            track.finalize_requested = True
+
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while time.monotonic() < deadline:
+            for track in self.tracks.values():
+                self._drain_ocr_results(track, ocr_reader)
+            pending = [
+                request["future"]
+                for track in self.tracks.values()
+                for request in track.ocr_requests
+                if not request["future"].done()
+            ]
+            if not pending:
+                break
+            try:
+                pending[0].result(timeout=min(0.1, max(0.0, deadline - time.monotonic())))
+            except concurrent.futures.TimeoutError:
+                continue
+            except Exception:
+                continue
+
+        for track_id, track in list(self.tracks.items()):
+            self._drain_ocr_results(track, ocr_reader)
+            if track.ocr_requests:
+                print(
+                    f"[OCR FLUSH TIMEOUT] Track #{track.id} "
+                    f"pending={len(track.ocr_requests)}; finalization deferred"
+                )
+                continue
+            if not track.finalized:
+                track.finalized = True
+                self._finalize_track(track)
+            del self.tracks[track_id]
