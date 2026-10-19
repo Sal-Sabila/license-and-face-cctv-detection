@@ -14,6 +14,7 @@ from routes.settings import settings_bp
 from routes.zones import zones_bp
 from routes.zones_page import zones_page_bp
 from services.camera_worker_manager import CameraWorkerManager
+from services.background_plate_ocr import BackgroundPlateOCR
 
 
 app = Flask(__name__)
@@ -65,6 +66,7 @@ app.register_blueprint(zones_page_bp)
 
 if not app.debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
     CameraWorkerManager.get_instance().start()
+    BackgroundPlateOCR.get_instance().start()
 
 # HEALTH CHECK
 
