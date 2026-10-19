@@ -1,4 +1,3 @@
-<<<<<<< Updated upstream
 import os
 import re
 import time
@@ -2566,7 +2565,6 @@ def get_all_camera_zones():
     except Exception as exc:
         print(f"[DB ZONE LIST ERROR] {exc}")
         return []
-=======
 import os
 import re
 import time
@@ -5203,4 +5201,4 @@ def ensure_vehicle_event_key(detection_id: int, camera_id: int = 1) -> str:
     except Exception as exc:
         print(f"[DB BACKGROUND OCR ERROR] ensure_vehicle_event_key ID {detection_id}: {exc}")
         return f"vehicle:{camera_id}:det_{detection_id}"
->>>>>>> Stashed changes
+
