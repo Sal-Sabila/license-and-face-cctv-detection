@@ -3,7 +3,6 @@ import cv2
 import re
 import threading
 import time
-from collections import Counter
 
 # ✅ IMPORT VALIDATOR BARU
 try:
@@ -176,6 +175,8 @@ class Track:
         self.ocr_readings = []
         self.best_crop = None
         self.best_ocr_confidence = 0.0
+        self.best_crop_quality = 0.0
+        self.best_text = ""
         self.best_bbox = bbox
         self.finalized = False
         self.is_stable = False
@@ -190,6 +191,7 @@ class Track:
         formatted=None,
         crop=None,
         bbox=None,
+        crop_quality=0.5,
     ):
         """
         Tambah bacaan OCR. Text yang disimpan adalah hasil KOREKSI.
@@ -201,6 +203,7 @@ class Track:
             return
 
         confidence = float(confidence or 0.0)
+        crop_quality = max(0.0, min(1.0, float(crop_quality or 0.0)))
 
         # ✅ Turunkan confidence proporsional dengan penalty koreksi
         adjusted_confidence = confidence * (1.0 - penalty * 0.5)
@@ -221,103 +224,147 @@ class Track:
                 "formatted": display_text,
                 "is_valid": is_valid,
                 "penalty": penalty,
+                "crop_quality": crop_quality,
+                "crop": crop.copy() if crop is not None else None,
+                "bbox": tuple(int(v) for v in bbox) if bbox is not None else None,
             })
 
-            # Simpan crop terbaik (hanya kalau lebih baik dari sebelumnya)
-            if crop is not None and adjusted_confidence >= self.best_ocr_confidence:
-                try:
-                    self.best_crop = crop.copy()
-                except Exception:
-                    self.best_crop = crop
-
-                self.best_ocr_confidence = adjusted_confidence
-
-                if bbox is not None:
-                    self.best_bbox = tuple(int(v) for v in bbox)
-
-            valid_readings = [r for r in self.ocr_readings if r.get("is_valid")]
-            valid_counts = Counter(r["text"] for r in valid_readings)
-            if valid_counts:
-                top_text, top_count = valid_counts.most_common(1)[0]
-                top_readings = [r for r in valid_readings if r["text"] == top_text]
-                self.is_stable = top_count >= 2 or (
-                    len(valid_readings) == 1
-                    and top_readings[0]["confidence"] >= self.single_read_ocr_confidence
-                    and self.detection_confidence >= self.single_read_detection_confidence
-                )
+            vote = self._weighted_vote(self.ocr_readings)
+            self.is_stable = bool(vote and vote["is_stable"])
+            if vote:
+                self.best_text = vote["text"]
+                self.best_ocr_confidence = vote["confidence_rata2"]
+                best_reading = vote["best_reading"]
+                if best_reading is not None and best_reading.get("crop") is not None:
+                    try:
+                        self.best_crop = best_reading["crop"].copy()
+                    except Exception:
+                        self.best_crop = best_reading["crop"]
+                    self.best_crop_quality = best_reading["crop_quality"]
+                    if best_reading.get("bbox") is not None:
+                        self.best_bbox = tuple(int(v) for v in best_reading["bbox"])
 
     # VOTING — PRIORITASKAN YANG VALID
 
-    def hasil_voting(self):
-        """
-        Voting: pilih teks yang paling sering muncul.
+    @staticmethod
+    def _weighted_vote(readings):
+        if not readings:
+            return None
 
-        Kalau ada kandidat yang valid (kode wilayah Indonesia),
-        prioritaskan yang valid. Kalau tidak ada, ambil yang paling sering.
-        """
-        with self.lock:
-            readings = list(self.ocr_readings)
-            is_stable = self.is_stable
-            if not readings:
-                return None
-
-            # PILIH KANDIDAT TERBAIK
-
-            # Filter: hanya readings yang valid
-            valid_readings = [r for r in readings if r.get("is_valid")]
-
-        # Kalau ada yang valid, pakai itu
-        if valid_readings:
-            counts = Counter(r["text"] for r in valid_readings)
-            teks_terbanyak = max(
-                counts,
-                key=lambda text: (
-                    counts[text],
-                    sum(r["confidence"] for r in valid_readings if r["text"] == text)
-                    / counts[text],
-                    max(r["confidence"] for r in valid_readings if r["text"] == text),
-                ),
+        groups = {}
+        for reading in readings:
+            text = reading.get("text") or ""
+            if not text:
+                continue
+            weight = max(0.05, reading["confidence"]) * (
+                0.5 + 0.5 * reading.get("crop_quality", 0.5)
             )
-            jumlah_muncul = counts[teks_terbanyak]
-            readings_menang = [r for r in valid_readings if r["text"] == teks_terbanyak]
-        else:
-            # Kalau tidak ada yang valid, fallback ke semua readings
-            counts = Counter(r["text"] for r in readings)
-            teks_terbanyak = max(
-                counts,
-                key=lambda text: (
-                    counts[text],
-                    sum(r["confidence"] for r in readings if r["text"] == text)
-                    / counts[text],
-                    max(r["confidence"] for r in readings if r["text"] == text),
-                ),
-            )
-            jumlah_muncul = counts[teks_terbanyak]
-            readings_menang = [r for r in readings if r["text"] == teks_terbanyak]
+            group = groups.setdefault(len(text), {"weight": 0.0, "readings": []})
+            group["weight"] += weight
+            group["readings"].append((reading, weight))
 
-        # HITUNG CONFIDENCE
+        if not groups:
+            return None
 
-        confidence_rata2 = (
-            sum(r["confidence"] for r in readings_menang)
-            / max(len(readings_menang), 1)
+        candidates = []
+        for group in groups.values():
+            aligned = group["readings"]
+            text_chars = []
+            position_agreement = []
+            for index in range(len(aligned[0][0]["text"])):
+                weights = {}
+                for reading, weight in aligned:
+                    char = reading["text"][index]
+                    weights[char] = weights.get(char, 0.0) + weight
+                winner = max(weights, key=lambda char: (
+                    weights[char],
+                    max(
+                        (r["confidence"] for r, _ in aligned if r["text"][index] == char),
+                        default=0.0,
+                    ),
+                ))
+                text_chars.append(winner)
+                position_agreement.append(weights[winner] / group["weight"])
+
+            text = "".join(text_chars)
+            consensus = sum(position_agreement) / len(position_agreement)
+            exact_count = sum(reading["text"] == text for reading, _ in aligned)
+            valid = validasi_format_plat(text)
+            candidates.append((
+                group["weight"] * (1.08 if valid else 1.0),
+                text,
+                consensus,
+                exact_count,
+                valid,
+                aligned,
+            ))
+
+        _, text, consensus, exact_count, valid, aligned = max(
+            candidates, key=lambda candidate: (candidate[0], candidate[4])
         )
+        supporters = []
+        for reading, weight in aligned:
+            if len(reading["text"]) != len(text):
+                continue
+            agreement = sum(
+                a == b for a, b in zip(reading["text"], text)
+            ) / len(text)
+            if agreement >= 0.75:
+                supporters.append((reading, weight, agreement))
+        if not supporters:
+            supporters = [
+                (reading, weight, 1.0)
+                for reading, weight in aligned
+                if len(reading["text"]) == len(text)
+            ]
 
-        bacaan_terbaik = max(readings_menang, key=lambda r: r["confidence"])
-
+        total_weight = sum(weight for _, weight, _ in supporters) or 1.0
+        confidence = sum(
+            reading["confidence"] * weight * agreement
+            for reading, weight, agreement in supporters
+        ) / total_weight
+        confidence *= consensus
+        best_reading, _, _ = max(
+            supporters,
+            key=lambda item: (
+                item[2],
+                0.55 * item[0].get("crop_quality", 0.5)
+                + 0.45 * item[0]["confidence"],
+            ),
+        )
+        # Bukti kuat: format valid Indonesia, minimal 2 bacaan konsisten, consensus >= 70%, confidence >= 65%
+        stable = (
+            valid
+            and len(aligned) >= 2
+            and consensus >= 0.70
+            and confidence >= 0.65
+            and (exact_count >= 2 or consensus >= 0.85)
+        )
+        formatted = (
+            format_plate_for_display(text)
+            if valid and HAS_PLATE_VALIDATOR
+            else best_reading.get("formatted", text)
+        )
         return {
-            "text": teks_terbanyak,
-            "formatted": bacaan_terbaik.get("formatted", teks_terbanyak),
-            "jumlah_muncul": jumlah_muncul,
+            "text": text,
+            "formatted": formatted,
+            "jumlah_muncul": exact_count,
             "total_bacaan": len(readings),
-            "confidence_rata2": float(confidence_rata2),
-            "confidence_best": float(max(r["confidence"] for r in readings_menang)),
-            "is_valid": bool(bacaan_terbaik.get("is_valid", False)),
-            "has_valid_candidate": bool(valid_readings),
-            # Audit trail
+            "confidence_rata2": float(confidence),
+            "confidence_best": float(best_reading["confidence"]),
+            "consensus": float(consensus),
+            "crop_quality": float(best_reading.get("crop_quality", 0.5)),
+            "best_reading": best_reading,
+            "is_valid": bool(valid),
+            "has_valid_candidate": any(r.get("is_valid") for r in readings),
             "raw_texts": [r.get("raw_text", "") for r in readings],
             "corrected_texts": [r["text"] for r in readings],
-            "is_stable": is_stable,
+            "is_stable": bool(stable),
         }
+
+    def hasil_voting(self):
+        with self.lock:
+            return self._weighted_vote(list(self.ocr_readings))
 
 
 # PLATE TRACKER V2
@@ -405,12 +452,23 @@ class PlateTracker:
 
     @staticmethod
     def _ocr_crop_quality(crop):
+        if crop is None or not hasattr(crop, "shape") or crop.size == 0:
+            return 0.0
         height, width = crop.shape[:2]
+        if height < 6 or width < 12:
+            return 0.0
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if len(crop.shape) == 3 else crop
         sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        focus_score = min(1.0, sharpness / 180.0)
         resolution_score = min(1.0, (width * height) / float(192 * 64))
-        focus_score = min(1.0, sharpness / 150.0)
-        return 0.55 * resolution_score + 0.45 * focus_score
+        mean_val, std_val = cv2.meanStdDev(gray)
+        contrast_score = min(1.0, float(std_val[0][0]) / 40.0)
+        aspect = width / float(max(1, height))
+        aspect_score = 1.0 if 1.8 <= aspect <= 4.8 else 0.75
+        # Prioritas utama: ketajaman fokus (crop paling tajam) 45%, resolusi 30%, kontras 15%, proporsi 10%
+        return float(
+            0.45 * focus_score + 0.30 * resolution_score + 0.15 * contrast_score + 0.10 * aspect_score
+        )
 
     def _remember_best_ocr_crop(self, track, crop, bbox, source):
         if crop.shape[1] < self.min_ocr_width or crop.shape[0] < self.min_ocr_height:
@@ -448,57 +506,30 @@ class PlateTracker:
         if not text:
             return False
 
-        # OCR confidence
         confidence = float(hasil.get("confidence_rata2", 0.0) or 0.0)
         if confidence < self.min_final_confidence:
-            print(
-                f"[FILTER] Track #{track.id} "
-                f"OCR confidence terlalu rendah: {confidence:.1%}"
-            )
             return False
 
-        # ✅ Validasi format pakai validator baru
-        if not validasi_format_plat(text):
-            print(
-                f"[FILTER] Track #{track.id} "
-                f"format tidak valid: '{text}' "
-                f"(kode wilayah tidak dikenal)"
-            )
+        if not hasil.get("is_valid"):
             return False
 
-        # Konsistensi
         jumlah_muncul = int(hasil.get("jumlah_muncul", 0))
         total_bacaan = int(hasil.get("total_bacaan", 0))
-
-        # ✅ Mode normal: minimal N bacaan yang sama
-        if jumlah_muncul >= self.min_consistent_reads:
-            return True
-
-        # ✅ Mode single strong reading
-        if (
-            total_bacaan == 1
-            and confidence >= self.single_read_ocr_confidence
-            and track.detection_confidence >= self.single_read_detection_confidence
-        ):
-            # ✅ Single read harus valid (sudah dicek di atas, tapi double-check)
-            if hasil.get("is_valid"):
-                return True
-
-        print(
-            f"[FILTER] Track #{track.id} "
-            f"tidak konsisten: {jumlah_muncul}/{total_bacaan} bacaan "
-            f"| OCR={confidence:.1%} "
-            f"| YOLO={track.detection_confidence:.1%}"
+        return bool(
+            total_bacaan >= self.min_consistent_reads
+            and hasil.get("consensus", 0.0) >= 0.70
+            and confidence >= 0.65
+            and (jumlah_muncul >= 2 or hasil.get("consensus", 0.0) >= 0.85)
         )
-        return False
 
     # FINALIZE
 
     def _finalize_track(self, track):
         hasil = track.hasil_voting()
 
-        if not self._hasil_layak_ditampilkan(hasil, track):
+        if not hasil or not hasil.get("text"):
             return None
+        is_stable = self._hasil_layak_ditampilkan(hasil, track)
 
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -518,6 +549,8 @@ class PlateTracker:
             "total_bacaan": hasil["total_bacaan"],
             "confidence": hasil["confidence_rata2"],
             "confidence_best": hasil["confidence_best"],
+            "consensus": hasil.get("consensus", 0.0),
+            "crop_quality": hasil.get("crop_quality", 0.0),
             "detection_confidence": track.detection_confidence,
             "bbox": tuple(int(v) for v in track.best_bbox),
             "crop": (
@@ -530,7 +563,8 @@ class PlateTracker:
             "raw_texts": hasil.get("raw_texts", []),
             "corrected_texts": hasil.get("corrected_texts", []),
             "is_valid": hasil.get("is_valid", False),
-            "is_stable": hasil.get("is_stable", False),
+            "is_stable": is_stable,
+            "review_required": not is_stable,
         }
 
         self.hasil_final.append(capture.copy())
@@ -693,6 +727,7 @@ class PlateTracker:
                     continue
                 crop_bbox = track.best_frame_bbox
                 crop_source = track.best_frame_source
+                crop_quality = track.best_frame_crop_quality
                 bx1, by1, bx2, by2 = crop_bbox
                 vehicle_id = (
                     track.vehicle_track_id
@@ -711,7 +746,7 @@ class PlateTracker:
                 if hasattr(ocr_reader, "submit") and callable(ocr_reader.submit):
                     track.ocr_pending = True
 
-                    def _make_ocr_callback(tr, c_crop, c_bbox, source):
+                    def _make_ocr_callback(tr, c_crop, c_bbox, source, quality):
                         def _on_ocr_done(hasil):
                             tr.ocr_pending = False
                             if hasil is None:
@@ -750,6 +785,7 @@ class PlateTracker:
                                 formatted=hasil.get("formatted", c_text),
                                 crop=c_crop,
                                 bbox=c_bbox,
+                                crop_quality=quality,
                             )
                             print(
                                 f"[OCR VOTE] track={tr.id} reads={len(tr.ocr_readings)} "
@@ -761,7 +797,8 @@ class PlateTracker:
                         submitted = ocr_reader.submit(
                             crop,
                             _make_ocr_callback(
-                                track, crop.copy(), crop_bbox, crop_source
+                                track, crop.copy(), crop_bbox, crop_source,
+                                crop_quality,
                             ),
                             context=ocr_context,
                         )
@@ -834,6 +871,7 @@ class PlateTracker:
                     formatted=hasil_ocr.get("formatted", corrected_text),
                     crop=crop,
                     bbox=crop_bbox,
+                    crop_quality=crop_quality,
                 )
                 print(
                     f"[OCR VOTE] track={track.id} reads={len(track.ocr_readings)} "

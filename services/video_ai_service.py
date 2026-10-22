@@ -1800,10 +1800,14 @@ class VideoAIService:
         try:
             db.save_detection_event(
                 camera_id=self.camera_id,
-                plate_number=text if valid else None,
+                plate_number=text or None,
                 plate_crop=crop,
                 plate_conf=det_conf,
                 ocr_conf=ocr_conf,
+                ocr_vote_count=int(finished.get("total_bacaan", 0) or 0),
+                ocr_consensus=safe_float(finished.get("consensus", 0.0)),
+                plate_crop_quality=safe_float(finished.get("crop_quality", 0.0)),
+                ocr_stable=bool(finished.get("is_stable", False)),
                 track_id=int(vehicle_track_id) if str(vehicle_track_id).lstrip("-").isdigit() else None,
                 object_type="vehicle",
                 vehicle_type="unknown",

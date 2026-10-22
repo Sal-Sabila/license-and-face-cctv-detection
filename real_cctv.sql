@@ -90,6 +90,11 @@ CREATE TABLE `plate` (
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
   `raw_ocr_text` varchar(100) DEFAULT NULL,
   `normalized_plate_number` varchar(30) DEFAULT NULL,
+  `region_code` varchar(2) DEFAULT NULL,
+  `ocr_vote_count` smallint unsigned NOT NULL DEFAULT '0',
+  `ocr_consensus` decimal(6,5) DEFAULT NULL,
+  `plate_crop_quality` decimal(6,5) DEFAULT NULL,
+  `ocr_stable` tinyint(1) DEFAULT NULL,
   PRIMARY KEY (`plate_id`),
   KEY `plate_plate_number_index` (`plate_number`)
 ) ENGINE=InnoDB AUTO_INCREMENT=1487 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
