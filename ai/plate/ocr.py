@@ -43,54 +43,7 @@ def deskew_plate(image):
         return image
 
 
-def save_debug_crop_pair(
-    raw_crop, prep_crop, text, conf, valid, max_keep=50, context=None
-):
-    """Menyimpan perbandingan crop plat sebelum vs sesudah preprocessing untuk evaluasi."""
-    try:
-        os.makedirs(DEBUG_OCR_DIR, exist_ok=True)
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        stamp = time.time_ns()
-        clean_text = re.sub(r"[^A-Z0-9]", "", str(text or "EMPTY").upper())[:10]
-        status = "VALID" if valid else "INVALID"
-        context_label = re.sub(r"[^A-Z0-9_-]", "", str(context or "").upper())[:40]
-        context_suffix = f"_{context_label}" if context_label else ""
-        base_name = (
-            f"{ts}_{stamp % 1_000_000_000:09d}{context_suffix}_"
-            f"{status}_{clean_text}_c{int(conf * 100)}"
-        )
-
-        saved_paths = []
-        if raw_crop is not None and hasattr(raw_crop, "size") and raw_crop.size > 0:
-            raw_path = os.path.join(DEBUG_OCR_DIR, f"{base_name}_1raw.jpg")
-            if cv2.imwrite(raw_path, raw_crop):
-                saved_paths.append(raw_path)
-            else:
-                print(f"[OCR DEBUG WARNING] Gagal menulis crop mentah: {raw_path}")
-        if prep_crop is not None and hasattr(prep_crop, "size") and prep_crop.size > 0:
-            prep_path = os.path.join(DEBUG_OCR_DIR, f"{base_name}_2prep.jpg")
-            if cv2.imwrite(prep_path, prep_crop):
-                saved_paths.append(prep_path)
-            else:
-                print(f"[OCR DEBUG WARNING] Gagal menulis crop preprocessing: {prep_path}")
-
-        if saved_paths:
-            print(
-                f"[OCR DEBUG] Crop sebelum/sesudah preprocessing disimpan: "
-                f"{', '.join(saved_paths)}"
-            )
-
-        files = sorted(glob.glob(os.path.join(DEBUG_OCR_DIR, "*.jpg")))
-        if len(files) > max_keep * 2:
-            for old_f in files[:len(files) - max_keep * 2]:
-                try:
-                    os.remove(old_f)
-                except OSError as exc:
-                    print(f"[OCR DEBUG WARNING] Gagal menghapus sampel lama {old_f}: {exc}")
-    except (OSError, cv2.error) as exc:
-        print(f"[OCR DEBUG ERROR] Gagal menyimpan crop OCR: {exc}")
-
-# ✅ IMPORT VALIDATOR BARU
+# ✅ IMPORT VALIDATOR
 try:
     from ai.plate.validator import (
         correct_and_validate_plate,
@@ -104,6 +57,394 @@ except ImportError:
     HAS_PLATE_VALIDATOR = False
     VALID_REGION_CODES = set()
     print("[OCR WARNING] ai.plate.validator tidak tersedia, pakai fallback regex")
+
+
+# Cache in-memory untuk metadata debug OCR (base_name -> metadata dict)
+_DEBUG_OCR_METADATA_CACHE = {}
+
+
+def save_debug_crop_pair(
+    raw_crop, prep_crop, text, conf, valid, max_keep=50, context=None,
+    raw_text=None, candidates=None
+):
+    """
+    Menyimpan perbandingan crop plat sebelum vs sesudah preprocessing beserta metadata JSON.
+    - Menyimpan SEMUA kandidat hasil OCR dari satu capture dalam SATU JSON terstruktur.
+    - Memvalidasi setiap kandidat terhadap format plat nomor resmi Indonesia (is_valid_plate).
+    - Menulis file {base_name}_1raw.jpg, {base_name}_2prep.jpg, dan {base_name}.json.
+    - Mencegah pelabelan VALID jika hasil tidak lolos aturan validasi atau EMPTY.
+    """
+    try:
+        os.makedirs(DEBUG_OCR_DIR, exist_ok=True)
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        stamp = time.time_ns()
+        clean_text = re.sub(r"[^A-Z0-9]", "", str(text or "EMPTY").upper())[:10]
+
+        # Audit validasi: label VALID HANYA diberikan jika benar-benar lolos validasi plat Indonesia
+        is_actually_valid = False
+        if clean_text and clean_text != "EMPTY":
+            try:
+                is_actually_valid = bool(valid) and is_valid_plate(clean_text)
+            except Exception:
+                is_actually_valid = bool(valid)
+
+        status = "VALID" if is_actually_valid else "INVALID"
+        context_label = re.sub(r"[^A-Z0-9_-]", "", str(context or "").upper())[:40]
+        context_suffix = f"_{context_label}" if context_label else ""
+        base_name = (
+            f"{ts}_{stamp % 1_000_000_000:09d}{context_suffix}_"
+            f"{status}_{clean_text}_c{int(conf * 100)}"
+        )
+
+        saved_paths = []
+        raw_path = os.path.join(DEBUG_OCR_DIR, f"{base_name}_1raw.jpg")
+        prep_path = os.path.join(DEBUG_OCR_DIR, f"{base_name}_2prep.jpg")
+        json_path = os.path.join(DEBUG_OCR_DIR, f"{base_name}.json")
+
+        if raw_crop is not None and hasattr(raw_crop, "size") and raw_crop.size > 0:
+            if cv2.imwrite(raw_path, raw_crop):
+                saved_paths.append(raw_path)
+            else:
+                raw_path = None
+        else:
+            raw_path = None
+
+        if prep_crop is not None and hasattr(prep_crop, "size") and prep_crop.size > 0:
+            if cv2.imwrite(prep_path, prep_crop):
+                saved_paths.append(prep_path)
+            else:
+                prep_path = None
+        else:
+            prep_path = None
+
+        # Parse context info (misal: T36_V42)
+        track_id = None
+        vehicle_id = None
+        if context:
+            ctx_str = str(context).upper()
+            m_t = re.search(r"T(?:RACK)?_?(\d+)", ctx_str)
+            if m_t:
+                track_id = int(m_t.group(1))
+            m_v = re.search(r"V(?:EHICLE)?_?(\d+)", ctx_str)
+            if m_v:
+                vehicle_id = int(m_v.group(1))
+
+        # Kumpulkan dan validasi SEMUA kandidat dari satu capture
+        parsed_candidates = []
+        if candidates and isinstance(candidates, list):
+            for c in candidates:
+                if not isinstance(c, dict):
+                    continue
+                c_norm = re.sub(r"[^A-Z0-9]", "", str(c.get("text") or "").upper())
+                c_raw = str(c.get("raw_text") or c.get("text") or "").strip()
+                c_conf = float(c.get("confidence") or 0.0)
+                c_val = bool(c_norm and is_valid_plate(c_norm))
+                parsed_candidates.append({
+                    "text": c_norm,
+                    "raw_text": c_raw,
+                    "confidence": round(c_conf, 4),
+                    "valid": c_val,
+                    "status": "VALID" if c_val else "INVALID",
+                    "variant": str(c.get("variant") or "unknown"),
+                    "region_code": c.get("region_code"),
+                })
+        elif clean_text and clean_text != "EMPTY":
+            parsed_candidates.append({
+                "text": clean_text,
+                "raw_text": str(raw_text or text or ""),
+                "confidence": round(float(conf or 0.0), 4),
+                "valid": is_actually_valid,
+                "status": status,
+                "variant": "primary",
+                "region_code": None,
+            })
+
+        # Jika primary text belum valid, cari apakah ada kandidat lain dalam capture yang valid
+        if not is_actually_valid and parsed_candidates:
+            valid_cands = [c for c in parsed_candidates if c.get("valid")]
+            if valid_cands:
+                best_valid = max(valid_cands, key=lambda c: float(c.get("confidence", 0.0)))
+                clean_text = best_valid["text"]
+                raw_text = best_valid.get("raw_text") or clean_text
+                conf = float(best_valid["confidence"])
+                is_actually_valid = True
+                status = "VALID"
+
+        # Simpan metadata JSON terstruktur (menyimpan semua kandidat dalam satu JSON)
+        metadata = {
+            "base_name": base_name,
+            "timestamp": ts,
+            "time_epoch": time.time(),
+            "context": str(context or ""),
+            "track_id": track_id,
+            "vehicle_id": vehicle_id,
+            "plate_number": clean_text if is_actually_valid else "",
+            "raw_ocr_text": str(raw_text or text or ""),
+            "confidence": float(conf or 0.0),
+            "valid": is_actually_valid,
+            "status": status,
+            "candidates": parsed_candidates,
+            "raw_crop_path": os.path.normpath(raw_path) if raw_path else None,
+            "prep_crop_path": os.path.normpath(prep_path) if prep_path else None,
+        }
+
+        try:
+            with open(json_path, "w", encoding="utf-8") as jf:
+                json.dump(metadata, jf, indent=2)
+            saved_paths.append(json_path)
+        except Exception as exc:
+            print(f"[OCR DEBUG WARNING] Gagal menulis metadata JSON: {exc}")
+
+        # Simpan ke cache in-memory untuk akses cepat
+        _DEBUG_OCR_METADATA_CACHE[base_name] = metadata
+        if len(_DEBUG_OCR_METADATA_CACHE) > max_keep * 4:
+            old_keys = list(_DEBUG_OCR_METADATA_CACHE.keys())[:-max_keep * 2]
+            for k in old_keys:
+                _DEBUG_OCR_METADATA_CACHE.pop(k, None)
+
+        # Rotasi pembersihan file lama (gambar dan metadata JSON)
+        files = sorted(glob.glob(os.path.join(DEBUG_OCR_DIR, "*.*")))
+        limit = max_keep * 3
+        if len(files) > limit * 2:
+            for old_f in files[:len(files) - limit * 2]:
+                try:
+                    os.remove(old_f)
+                except OSError as exc:
+                    pass
+    except (OSError, cv2.error) as exc:
+        print(f"[OCR DEBUG ERROR] Gagal menyimpan crop OCR: {exc}")
+
+
+def get_valid_debug_ocr(
+    track_id=None,
+    vehicle_id=None,
+    event_key=None,
+    context=None,
+    max_age_seconds: float = 300.0,
+):
+    """
+    Mengambil hasil OCR valid dari metadata static/captures/debug_ocr.
+    - Mengambil teks plat dari metadata JSON terstruktur, BUKAN menebak dari nama file.
+    - Memeriksa aturan validasi secara ketat dengan is_valid_plate (tidak menganggap VALID pasti benar).
+    - Menolak berkas bertanda INVALID atau EMPTY.
+    - Memuat crop gambar dan confidence agar database dan Riwayat Plat tetap sinkron.
+    - Mengembalikan dict hasil OCR atau None jika tidak ditemukan / tidak valid.
+    """
+    now = time.time()
+    candidates = []
+
+    # 1. Cek dari in-memory cache
+    for bname, meta in list(_DEBUG_OCR_METADATA_CACHE.items()):
+        if not meta:
+            continue
+        has_valid = meta.get("valid") or any(c.get("valid") for c in meta.get("candidates", []))
+        if not has_valid:
+            continue
+        age = now - meta.get("time_epoch", now)
+        if age > max_age_seconds or age < -5.0:
+            continue
+        candidates.append(meta)
+
+    # 2. Cek dari disk jika di cache tidak ada atau sedikit
+    json_pattern = os.path.join(DEBUG_OCR_DIR, "*.json")
+    for jpath in glob.glob(json_pattern):
+        try:
+            mtime = os.path.getmtime(jpath)
+            if now - mtime > max_age_seconds:
+                continue
+            with open(jpath, "r", encoding="utf-8") as jf:
+                data = json.load(jf)
+            if data:
+                has_valid = data.get("valid") or any(c.get("valid") for c in data.get("candidates", []))
+                if has_valid:
+                    bname = data.get("base_name") or os.path.splitext(os.path.basename(jpath))[0]
+                    if bname not in _DEBUG_OCR_METADATA_CACHE:
+                        _DEBUG_OCR_METADATA_CACHE[bname] = data
+                        candidates.append(data)
+        except Exception:
+            continue
+
+    if not candidates:
+        return None
+
+    # Sort kandidat: dari yang paling baru
+    candidates.sort(key=lambda x: x.get("time_epoch", 0.0), reverse=True)
+
+    target_track_id = int(track_id) if track_id is not None and str(track_id).lstrip("-").isdigit() else None
+    target_vehicle_id = int(vehicle_id) if vehicle_id is not None and str(vehicle_id).lstrip("-").isdigit() else None
+    target_event_key = str(event_key or "").strip().lower()
+
+    for item in candidates:
+        # Evaluasi plat utama dan semua kandidat dari satu capture
+        plate = item.get("plate_number") or ""
+        valid_plate = plate if (plate and plate not in ("EMPTY", "-", "INVALID") and is_valid_plate(plate)) else None
+        best_conf = float(item.get("confidence", 0.0) or 0.0)
+        best_raw = item.get("raw_ocr_text") or plate
+
+        # Jika plat utama tidak valid, periksa kandidat lain yang tersimpan dalam JSON capture
+        if not valid_plate and item.get("candidates"):
+            valid_cands = [
+                c for c in item["candidates"]
+                if c.get("valid") and c.get("text") and is_valid_plate(c["text"]) and float(c.get("confidence", 0.0)) >= 0.45
+            ]
+            if valid_cands:
+                best_cand = max(valid_cands, key=lambda c: float(c.get("confidence", 0.0)))
+                valid_plate = best_cand["text"]
+                best_conf = float(best_cand["confidence"])
+                best_raw = best_cand.get("raw_text") or valid_plate
+
+        # Hanya gunakan hasil yang benar-benar valid menurut aturan plat Indonesia
+        if not valid_plate:
+            continue
+
+        item_ctx = (item.get("context") or "").lower()
+        matched = False
+
+        # Cocokkan berdasarkan track_id
+        if target_track_id is not None:
+            if item.get("track_id") == target_track_id:
+                matched = True
+            elif item_ctx and re.search(rf"(?:^|[_\-])T{target_track_id}(?:[_\-]|$)", item_ctx.upper()):
+                matched = True
+
+        # Cocokkan berdasarkan vehicle_id
+        if not matched and target_vehicle_id is not None:
+            if item.get("vehicle_id") == target_vehicle_id:
+                matched = True
+            elif item_ctx and re.search(rf"(?:^|[_\-])V{target_vehicle_id}(?:[_\-]|$)", item_ctx.upper()):
+                matched = True
+
+        # Cocokkan berdasarkan event_key
+        if not matched and target_event_key and item_ctx:
+            if target_event_key == item_ctx or (len(item_ctx) >= 5 and item_ctx in target_event_key):
+                matched = True
+
+        # Cocokkan berdasarkan context string langsung
+        if not matched and context and item_ctx and str(context).lower() == item_ctx:
+            matched = True
+
+        if not matched:
+            continue
+
+        # Muat file crop (utamakan raw_crop_path, fallback prep_crop_path)
+        crop_path = item.get("raw_crop_path") or item.get("prep_crop_path")
+        plate_crop = None
+        if crop_path and os.path.isfile(crop_path):
+            try:
+                plate_crop = cv2.imread(crop_path)
+            except Exception:
+                plate_crop = None
+
+        if plate_crop is None or plate_crop.size == 0:
+            continue
+
+        return {
+            "plate_number": valid_plate,
+            "raw_ocr_text": best_raw,
+            "confidence": best_conf,
+            "plate_crop": plate_crop,
+            "crop_path": crop_path,
+            "metadata": item,
+            "candidates": item.get("candidates") or [],
+            "is_valid": True,
+        }
+
+    return None
+
+
+def get_debug_ocr_entry(
+    track_id=None,
+    vehicle_id=None,
+    event_key=None,
+    context=None,
+    max_age_seconds: float = 300.0,
+):
+    """
+    Mengambil entri capture metadata debug OCR lengkap (termasuk status dan daftar kandidat).
+    Berguna untuk memeriksa apakah suatu capture berstatus review atau memerlukan OCR ulang.
+    """
+    now = time.time()
+    candidates = []
+
+    for bname, meta in list(_DEBUG_OCR_METADATA_CACHE.items()):
+        if not meta:
+            continue
+        age = now - meta.get("time_epoch", now)
+        if age > max_age_seconds or age < -5.0:
+            continue
+        candidates.append(meta)
+
+    json_pattern = os.path.join(DEBUG_OCR_DIR, "*.json")
+    for jpath in glob.glob(json_pattern):
+        try:
+            mtime = os.path.getmtime(jpath)
+            if now - mtime > max_age_seconds:
+                continue
+            with open(jpath, "r", encoding="utf-8") as jf:
+                data = json.load(jf)
+            if data:
+                bname = data.get("base_name") or os.path.splitext(os.path.basename(jpath))[0]
+                if bname not in _DEBUG_OCR_METADATA_CACHE:
+                    _DEBUG_OCR_METADATA_CACHE[bname] = data
+                    candidates.append(data)
+        except Exception:
+            continue
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: x.get("time_epoch", 0.0), reverse=True)
+
+    target_track_id = int(track_id) if track_id is not None and str(track_id).lstrip("-").isdigit() else None
+    target_vehicle_id = int(vehicle_id) if vehicle_id is not None and str(vehicle_id).lstrip("-").isdigit() else None
+    target_event_key = str(event_key or "").strip().lower()
+
+    for item in candidates:
+        item_ctx = (item.get("context") or "").lower()
+        matched = False
+
+        if target_track_id is not None:
+            if item.get("track_id") == target_track_id:
+                matched = True
+            elif item_ctx and re.search(rf"(?:^|[_\-])T{target_track_id}(?:[_\-]|$)", item_ctx.upper()):
+                matched = True
+
+        if not matched and target_vehicle_id is not None:
+            if item.get("vehicle_id") == target_vehicle_id:
+                matched = True
+            elif item_ctx and re.search(rf"(?:^|[_\-])V{target_vehicle_id}(?:[_\-]|$)", item_ctx.upper()):
+                matched = True
+
+        if not matched and target_event_key and item_ctx:
+            if target_event_key == item_ctx or (len(item_ctx) >= 5 and item_ctx in target_event_key):
+                matched = True
+
+        if not matched and context and item_ctx and str(context).lower() == item_ctx:
+            matched = True
+
+        if not matched:
+            continue
+
+        crop_path = item.get("raw_crop_path") or item.get("prep_crop_path")
+        plate_crop = None
+        if crop_path and os.path.isfile(crop_path):
+            try:
+                plate_crop = cv2.imread(crop_path)
+            except Exception:
+                plate_crop = None
+
+        return {
+            "metadata": item,
+            "plate_number": item.get("plate_number") or "",
+            "confidence": float(item.get("confidence", 0.0) or 0.0),
+            "valid": bool(item.get("valid")),
+            "status": item.get("status") or "INVALID",
+            "candidates": item.get("candidates") or [],
+            "plate_crop": plate_crop,
+            "crop_path": crop_path,
+        }
+
+    return None
 
 # Helper project (opsional, tidak wajib)
 try:
@@ -876,7 +1217,7 @@ class PlateOCR:
             empty["paddle_inference_elapsed"] = paddle_inference_elapsed
             empty["variants_tried"] = attempted_variants
             save_debug_crop_pair(
-                image, prepared, "", 0.0, False, context=context
+                image, prepared, "", 0.0, False, context=context, raw_text=""
             )
             return empty
 
@@ -920,6 +1261,8 @@ class PlateOCR:
             best.get("confidence", 0.0),
             best.get("is_indonesia_pattern", False),
             context=context,
+            raw_text=best.get("raw_text"),
+            candidates=candidates,
         )
 
         if self.verbose:

@@ -22,19 +22,21 @@ VALID_REGION_CODES = {
     # DKI Jakarta & sekitarnya
     "B", "D", "E", "F", "T",
     # Jawa Barat
-    "D", "E", "F", "T", "Z", "AA", "AB", "AD",
+    "D", "E", "F", "T", "Z",
     # Jawa Tengah & DIY
-    "H", "K", "R", "AA", "AB", "AD",
+    "G", "H", "K", "R", "AA", "AB", "AD",
     # Jawa Timur
     "L", "M", "N", "P", "S", "W", "AG",
     # Kalimantan
     "DA", "KB", "KH", "KT", "KU",
     # Sulawesi
-    "DD", "DN", "DP", "DT", "DW", "DM", "DL", "DB",
+    "DB", "DC", "DD", "DL", "DM", "DN", "DP", "DT", "DW",
     # Bali & Nusa Tenggara
-    "DK", "ED", "EA", "EB", "DH",
+    "DH", "DK", "DR", "EA", "EB", "ED",
     # Maluku & Papua
-    "DE", "DG", "PA", "PB", "PD",
+    "DE", "DG", "PA", "PB", "PD", "PS", "PT", "PY",
+    # Khusus / Diplomatik / Pemerintahan
+    "RI", "CD", "CC",
 }
 
 # Kode wilayah 1 huruf yang valid (subset dari VALID_REGION_CODES)
@@ -82,13 +84,18 @@ _PATTERN = re.compile(r"^([A-Z]{1,2})([0-9]{1,4})([A-Z]{0,3})$")
 def parse_plate(text: str):
     """
     Parse plat menjadi (prefix, numbers, suffix).
-    Return None kalau tidak match pola dasar.
+    Return None kalau tidak match pola dasar atau prefix bukan kode wilayah valid.
     """
     text = normalize_plate_text(text)
     m = _PATTERN.match(text)
     if not m:
         return None
-    return m.group(1), m.group(2), m.group(3)
+    prefix, numbers, suffix = m.groups()
+    if prefix not in VALID_REGION_CODES:
+        return None
+    if not numbers or not numbers.isdigit() or int(numbers) == 0:
+        return None
+    return prefix, numbers, suffix
 
 
 # KOREKSI PREFIX (KODE WILAYAH)
@@ -138,7 +145,7 @@ def _try_correct_prefix(prefix: str) -> list:
 # KOREKSI ANGKA
 def _try_correct_numbers(numbers: str) -> list:
     """
-    Coba koreksi angka. Angka tidak boleh leading zero (>1 digit).
+    Coba koreksi angka. Angka tidak boleh leading zero (>1 digit) dan tidak boleh 0.
     """
     candidates = []
     corrected = "".join(_correct_letter_to_digit(c) for c in numbers)
@@ -152,8 +159,8 @@ def _try_correct_numbers(numbers: str) -> list:
     # Hapus leading zero
     cleaned = []
     for c in candidates:
-        stripped = c.lstrip("0") or "0"
-        if 1 <= len(stripped) <= 4 and stripped not in cleaned:
+        stripped = c.lstrip("0")
+        if stripped and 1 <= len(stripped) <= 4 and stripped not in cleaned:
             cleaned.append(stripped)
     return cleaned
 
@@ -175,10 +182,10 @@ def _try_correct_suffix(suffix: str) -> list:
     seen = set()
     result = []
     for c in candidates:
-        if c not in seen and (not c or c.isalpha()):
+        if c not in seen and (not c or (c.isalpha() and len(c) <= 3)):
             seen.add(c)
             result.append(c)
-    return result or [suffix]
+    return result
 
 
 # MAIN: VALIDASI & KOREKSI
@@ -197,7 +204,8 @@ def correct_and_validate_plate(raw_text: str, ocr_confidence: float = 0.0):
     """
     original = normalize_plate_text(raw_text)
 
-    if not original or len(original) < 3:
+    # Panjang plat Indonesia: min 2 karakter (misal: "B1", "D1"), max 9 karakter ("AB1234XYZ")
+    if not original or len(original) < 2 or len(original) > 9:
         return {
             "original": original,
             "corrected": original,
@@ -206,32 +214,78 @@ def correct_and_validate_plate(raw_text: str, ocr_confidence: float = 0.0):
             "candidates": [],
         }
 
-    # Coba parse as-is
-    parsed = parse_plate(original)
+    # Tolak hasil yang hanya angka (misal: "1531", "18102513", "8888")
+    if original.isdigit() or not any(c.isalpha() for c in original):
+        return {
+            "original": original,
+            "corrected": original,
+            "valid": False,
+            "confidence_penalty": 0.0,
+            "candidates": [],
+        }
 
-    # Kalau tidak match pola, coba koreksi total
-    if parsed is None:
-        # Coba koreksi: huruf di awal, angka di tengah, huruf di akhir
-        m = re.match(r"^([A-Z0-9]{1,2})([A-Z0-9]{1,4})([A-Z0-9]{0,3})$", original)
-        if not m:
+    # Tolak hasil yang hanya huruf tanpa angka (misal: "MERE", "URA", "POLISI")
+    if original.isalpha() or not any(c.isdigit() for c in original):
+        return {
+            "original": original,
+            "corrected": original,
+            "valid": False,
+            "confidence_penalty": 0.0,
+            "candidates": [],
+        }
+
+    # Tolak teks yang diawali 3 digit atau lebih (bukan kode wilayah Indonesia)
+    if re.match(r"^[0-9]{3,}", original):
+        return {
+            "original": original,
+            "corrected": original,
+            "valid": False,
+            "confidence_penalty": 0.0,
+            "candidates": [],
+        }
+
+    # Cek apakah sudah valid as-is
+    parsed = parse_plate(original)
+    if parsed is not None:
+        prefix, numbers, suffix = parsed
+        # Hapus leading zero pada angka jika ada (misal: "B0123CD" -> "B123CD")
+        if numbers.startswith("0") and len(numbers) > 1:
+            clean_num = numbers.lstrip("0")
+            corrected = f"{prefix}{clean_num}{suffix}"
             return {
                 "original": original,
-                "corrected": original,
-                "valid": False,
-                "confidence_penalty": 0.0,
-                "candidates": [],
+                "corrected": corrected,
+                "valid": True,
+                "confidence_penalty": 0.1,
+                "candidates": [corrected],
             }
-        raw_prefix, raw_numbers, raw_suffix = m.groups()
-    else:
-        raw_prefix, raw_numbers, raw_suffix = parsed
+        return {
+            "original": original,
+            "corrected": original,
+            "valid": True,
+            "confidence_penalty": 0.0,
+            "candidates": [original],
+        }
+
+    # Coba koreksi OCR character confusion
+    m = re.match(r"^([A-Z0-9]{1,2})([A-Z0-9]{1,4})([A-Z0-9]{0,3})$", original)
+    if not m:
+        return {
+            "original": original,
+            "corrected": original,
+            "valid": False,
+            "confidence_penalty": 0.0,
+            "candidates": [],
+        }
+
+    raw_prefix, raw_numbers, raw_suffix = m.groups()
 
     # Buat semua kombinasi kandidat
     prefix_candidates = _try_correct_prefix(raw_prefix)
     number_candidates = _try_correct_numbers(raw_numbers)
     suffix_candidates = _try_correct_suffix(raw_suffix)
 
-    # Kalau tidak ada prefix valid, berarti tidak bisa dikoreksi
-    if not prefix_candidates:
+    if not prefix_candidates or not number_candidates:
         return {
             "original": original,
             "corrected": original,
@@ -243,12 +297,14 @@ def correct_and_validate_plate(raw_text: str, ocr_confidence: float = 0.0):
     # Bangun kandidat final
     all_candidates = []
     for p in prefix_candidates:
+        if p not in VALID_REGION_CODES:
+            continue
         for n in number_candidates:
+            if not n or not n.isdigit() or int(n) == 0:
+                continue
             for s in suffix_candidates:
                 candidate = f"{p}{n}{s}"
-                # Validasi format
                 if _PATTERN.match(candidate):
-                    # Hitung penalty (jumlah karakter yang dikoreksi)
                     penalty = _compute_penalty(original, candidate)
                     all_candidates.append((candidate, penalty))
 
@@ -265,10 +321,13 @@ def correct_and_validate_plate(raw_text: str, ocr_confidence: float = 0.0):
     all_candidates.sort(key=lambda x: (x[1], -len(x[0])))
     best, best_penalty = all_candidates[0]
 
+    # Hasil koreksi hanya valid jika perubahannya wajar (maks 2 karakter dan ratio <= 0.40)
+    is_valid = best_penalty <= 2 and (best_penalty / max(len(original), 1)) <= 0.40
+
     return {
         "original": original,
         "corrected": best,
-        "valid": True,
+        "valid": is_valid,
         "confidence_penalty": best_penalty / max(len(original), 1),
         "candidates": [c for c, _ in all_candidates[:5]],
     }
@@ -290,7 +349,7 @@ def is_valid_plate(text: str) -> bool:
 # FORMAT UNTUK DISPLAY
 def format_plate_for_display(text: str) -> str:
     """
-    Format plat untuk display: "AB1234CD" -> "AB 1234 CD"
+    Format plat untuk display: "AB1234CD" -> "AB 1234 CD", "B1" -> "B 1"
     """
     text = normalize_plate_text(text)
     m = _PATTERN.match(text)

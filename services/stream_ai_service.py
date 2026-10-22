@@ -14,8 +14,8 @@ import supervision as sv
 import uuid
 
 from ai.plate.detector import PlateDetector
-from ai.plate.ocr import PlateOCR
-from tracker import PlateTracker
+from ai.plate.ocr import PlateOCR, get_valid_debug_ocr
+from tracker import PlateTracker, Track
 import db
 
 # ✅ IMPORT VALIDATOR PLAT INDONESIA
@@ -223,7 +223,6 @@ PLATE_PADDING = 0.08
 
 # ANTI-DUPLIKAT
 PLATE_REVIEW_CONFIDENCE = 0.50
-PLATE_COOLDOWN = 45.0
 PERSON_COOLDOWN = 45.0
 
 TRACK_REUSE_GAP = 8.0
@@ -349,7 +348,7 @@ def _valid_indonesian_plate(text):
 
     # Fallback regex
     text = _normalize_text(text)
-    if not text or not (3 <= len(text) <= 9):
+    if not text or not (2 <= len(text) <= 9):
         return False
     return bool(re.match(r"^[A-Z]{1,2}[0-9]{1,4}[A-Z]{0,3}$", text))
 
@@ -600,6 +599,8 @@ def _track_to_result(track):
         "valid": _valid_indonesian_plate(text),
         "votes": votes,
         "total_reads": total_reads,
+        "consensus": _safe_float((vote or {}).get("consensus", 0.0)),
+        "crop_quality": _safe_float((vote or {}).get("crop_quality", getattr(track, "best_crop_quality", 0.0))),
         "crop": getattr(track, "best_crop", None),
         "vehicle_track_id": (
             int(getattr(track, "vehicle_track_id"))
@@ -1004,7 +1005,6 @@ class StreamAIService:
             print(f"[AI STREAM WARNING] OCR tidak tersedia: {exc}")
 
         self.captured_tracks = {}
-        self.saved_plate_events = {}
         self._vehicle_plate_cache = {}
         self.last_ai_time = 0.0
         self.track_lifecycle = {}
@@ -1611,7 +1611,7 @@ class StreamAIService:
                 final.append(candidate)
         return final
 
-    def _consume_finished_plate(self, frame, vehicle_dets, camera_id):
+    def _consume_finished_plate(self, vehicle_dets, camera_id):
         """✅ Ambil plate yang sudah finalized, koreksi, simpan raw_text."""
         camera_id = _normalize_camera_id(camera_id)
         plate_tracker = self._camera_state(camera_id)["plate_tracker"]
@@ -1620,7 +1620,6 @@ class StreamAIService:
             return []
 
         processed = []
-        now = time.time()
         for finished in finished_list:
             # ✅ Ambil raw_text dari tracker
             raw_text_from_ocr = finished.get("raw_text") or finished.get("text", "")
@@ -1638,23 +1637,9 @@ class StreamAIService:
             crop = finished.get("crop")
             bbox = finished.get("bbox")
 
-            if frame is not None and bbox and len(bbox) == 4:
-                original_plate_crop = _prepare_high_quality_capture(
-                    frame, bbox, padding=0.20, target_short_side=400,
-                    max_scale=3.0, max_long_side=1000, sharpen=True
-                )
-                if original_plate_crop is not None:
-                    crop = original_plate_crop
-
             valid = _valid_indonesian_plate(text)
             if not valid and det_conf < PLATE_REVIEW_CONFIDENCE:
                 continue
-
-            plate_key = f"plate:{camera_id}:{text}" if valid and text else f"plate-track:{camera_id}:{track_id}"
-            last_saved = self.saved_plate_events.get(plate_key)
-            if last_saved is not None and now - last_saved < PLATE_COOLDOWN:
-                continue
-            self.saved_plate_events[plate_key] = now
 
             prefix = "plate" if valid else "plate_review"
             plate_path = save_plate_capture(
@@ -1712,6 +1697,11 @@ class StreamAIService:
                 "vehicle_generation": finished.get("vehicle_generation", 1),
                 "vehicle_crop": vehicle_crop,
                 "stable": bool(finished.get("is_stable", False)),
+                "review_required": bool(finished.get("review_required", False)),
+                "votes": int(finished.get("jumlah_muncul", 0) or 0),
+                "total_reads": int(finished.get("total_bacaan", 0) or 0),
+                "consensus": _safe_float(finished.get("consensus", 0.0)),
+                "crop_quality": _safe_float(finished.get("crop_quality", 0.0)),
                 "region_code": _extract_region_code(text),
                 "correction_penalty": penalty,
             })
@@ -1741,34 +1731,160 @@ class StreamAIService:
 
     @staticmethod
     def _plate_ready_for_vehicle_event(plate):
-        if not plate or not plate.get("valid"):
+        if (
+            not plate
+            or not plate.get("valid")
+            or not plate.get("stable")
+            or int(plate.get("total_reads", 0) or 0) < 2
+        ):
             return False
         return _safe_float(plate.get("ocr_conf", 0.0)) >= 0.45
+
+    @staticmethod
+    def _plate_event_score(plate):
+        return (
+            0.45 * _safe_float(plate.get("ocr_conf", 0.0))
+            + 0.30 * _safe_float(plate.get("consensus", 0.0))
+            + 0.25 * _safe_float(plate.get("crop_quality", 0.0))
+        )
+
+    @classmethod
+    def _prefer_plate_event_result(cls, current, candidate):
+        current_text = _normalize_text(current.get("text", current.get("plate_text", "")))
+        candidate_text = _normalize_text(candidate.get("text", ""))
+        if current_text and current.get("stable") and not candidate.get("stable"):
+            return False
+        if current_text and candidate_text != current_text and not candidate.get("stable"):
+            return False
+        margin = 0.02 if current_text == candidate_text else 0.08
+        return cls._plate_event_score(candidate) > cls._plate_event_score(current) + margin
+
+    @classmethod
+    def _aggregate_vehicle_candidates(cls, candidates, fallback=None):
+        """Gabungkan kandidat pembacaan plat dari kendaraan yang sama menggunakan voting multi-frame."""
+        if not candidates:
+            return fallback
+
+        if len(candidates) == 1:
+            c = candidates[0]
+            text = c["text"]
+            valid = _valid_indonesian_plate(text)
+            conf = _safe_float(c.get("confidence", 0.0))
+            return {
+                "text": text,
+                "raw_text": c.get("raw_text", text),
+                "formatted": _format_plate_display(text) if valid else text,
+                "ocr_conf": conf,
+                "confidence": conf,
+                "conf": conf,
+                "crop": c.get("crop"),
+                "bbox": c.get("bbox"),
+                "crop_quality": _safe_float(c.get("crop_quality", 0.5)),
+                "valid": valid,
+                "stable": False,
+                "review_required": True,
+                "total_reads": 1,
+                "votes": 1,
+                "consensus": 1.0,
+            }
+
+        readings = []
+        for c in candidates:
+            readings.append({
+                "text": c["text"],
+                "raw_text": c.get("raw_text", c["text"]),
+                "confidence": _safe_float(c.get("confidence", 0.0)),
+                "crop_quality": _safe_float(c.get("crop_quality", 0.5)),
+                "crop": c.get("crop"),
+                "bbox": c.get("bbox"),
+                "is_valid": c.get("is_valid", _valid_indonesian_plate(c["text"])),
+                "penalty": _safe_float(c.get("penalty", 0.0)),
+            })
+
+        vote = Track._weighted_vote(readings)
+        if not vote:
+            return fallback
+
+        best_reading = vote.get("best_reading") or {}
+        best_crop = best_reading.get("crop")
+        if best_crop is None:
+            crop_cand = max(candidates, key=lambda x: _safe_float(x.get("crop_quality", 0.0)), default=None)
+            if crop_cand:
+                best_crop = crop_cand.get("crop")
+
+        is_valid = bool(vote.get("is_valid"))
+        consensus = _safe_float(vote.get("consensus", 0.0))
+        total_bacaan = int(vote.get("total_bacaan", len(candidates)))
+        conf_rata2 = _safe_float(vote.get("confidence_rata2", 0.0))
+        exact_count = int(vote.get("jumlah_muncul", 0))
+
+        # Bukti kuat: format valid Indonesia, minimal 2 bacaan konsisten, consensus >= 70%, conf >= 65%
+        is_strong_evidence = (
+            is_valid
+            and total_bacaan >= 2
+            and consensus >= 0.70
+            and conf_rata2 >= 0.65
+            and (exact_count >= 2 or consensus >= 0.85)
+        )
+
+        return {
+            "text": vote["text"],
+            "formatted": vote.get("formatted", vote["text"]),
+            "raw_text": best_reading.get("raw_text") or vote["text"],
+            "ocr_conf": conf_rata2,
+            "confidence": conf_rata2,
+            "conf": conf_rata2,
+            "crop": best_crop,
+            "bbox": best_reading.get("bbox"),
+            "crop_quality": _safe_float(best_reading.get("crop_quality", 0.5)),
+            "valid": is_valid,
+            "stable": is_strong_evidence,
+            "review_required": not is_strong_evidence,
+            "total_reads": total_bacaan,
+            "votes": exact_count,
+            "consensus": consensus,
+        }
 
     def _cache_vehicle_plate_results(self, camera_id, plate_dets, current_time):
         for plate in plate_dets:
             identity = self._plate_event_identity(camera_id, plate)
-            if identity is None or not self._plate_ready_for_vehicle_event(plate):
+            if identity is None:
                 continue
-            old = self._vehicle_plate_cache.get(identity)
-            old_plate = old.get("plate", {}) if old else {}
-            old_conf = _safe_float(old_plate.get("ocr_conf", 0.0))
-            new_conf = _safe_float(plate.get("ocr_conf", 0.0))
-            if (
-                old_plate.get("text")
-                and old_plate.get("text") != plate.get("text")
-                and new_conf <= old_conf
-            ):
+            text = _normalize_text(plate.get("text", ""))
+            if not text:
                 continue
-            if (
-                old_plate.get("text") == plate.get("text")
-                and new_conf < old_conf
-            ):
-                continue
-            self._vehicle_plate_cache[identity] = {
+
+            entry = self._vehicle_plate_cache.setdefault(identity, {
+                "candidates": [],
                 "plate": dict(plate),
                 "updated_at": current_time,
+            })
+            entry["updated_at"] = current_time
+
+            # Simpan bacaan sebagai kandidat sementara untuk identitas kendaraan ini
+            candidates = entry.setdefault("candidates", [])
+            cand_item = {
+                "text": text,
+                "raw_text": plate.get("raw_text") or text,
+                "confidence": _safe_float(plate.get("ocr_conf", plate.get("confidence", 0.0))),
+                "crop_quality": _safe_float(plate.get("crop_quality", 0.5)),
+                "crop": plate.get("crop"),
+                "bbox": plate.get("bbox") or plate.get("box"),
+                "is_valid": bool(plate.get("valid")),
+                "penalty": _safe_float(plate.get("correction_penalty", 0.0)),
             }
+            if not any(c.get("text") == text and abs(_safe_float(c.get("confidence", 0.0)) - cand_item["confidence"]) < 0.01 for c in candidates):
+                candidates.append(cand_item)
+                if len(candidates) > 10:
+                    candidates.pop(0)
+
+            # Gabungkan kandidat sementara & pilih hasil final berdasarkan voting, kualitas crop, dan confidence
+            agg = self._aggregate_vehicle_candidates(candidates, fallback=plate)
+            if agg is not None:
+                agg["vehicle_object_group_id"] = plate.get("vehicle_object_group_id")
+                agg["vehicle_track_id"] = plate.get("vehicle_track_id")
+                agg["vehicle_generation"] = plate.get("vehicle_generation", 1)
+                entry["plate"] = agg
 
         expired = [
             identity
@@ -1798,16 +1914,16 @@ class StreamAIService:
                 if not text or not _valid_indonesian_plate(text):
                     continue
                 previous_text = _normalize_text(meta.get("plate_text", ""))
-                previous_conf = _safe_float(meta.get("ocr_conf", 0.0))
+                new_score = self._plate_event_score(plate)
                 new_conf = _safe_float(plate.get("ocr_conf", 0.0))
-                if previous_text == text and new_conf <= previous_conf + CONFIDENCE_IMPROVEMENT_THRESHOLD:
-                    continue
-                if (
-                    previous_text
-                    and previous_text != text
-                    and new_conf <= previous_conf + CONFIDENCE_IMPROVEMENT_THRESHOLD
-                    and meta.get("plate_valid")
-                ):
+                previous_result = {
+                    "plate_text": previous_text,
+                    "stable": meta.get("plate_stable", False),
+                    "ocr_conf": meta.get("ocr_conf", 0.0),
+                    "consensus": meta.get("plate_consensus", 0.0),
+                    "crop_quality": meta.get("plate_crop_quality", 0.0),
+                }
+                if previous_text and not self._prefer_plate_event_result(previous_result, plate):
                     continue
                 try:
                     db.save_detection_event(
@@ -1825,10 +1941,17 @@ class StreamAIService:
                         event_key=event_key,
                         source_type="stream",
                         source_name=None,
+                        ocr_vote_count=int(plate.get("total_reads", 0) or 0),
+                        ocr_consensus=_safe_float(plate.get("consensus", 0.0)),
+                        plate_crop_quality=_safe_float(plate.get("crop_quality", 0.0)),
+                        ocr_stable=bool(plate.get("stable")),
                     )
                     meta["plate_text"] = text
                     meta["plate_valid"] = True
-                    meta["ocr_conf"] = max(previous_conf, new_conf)
+                    meta["ocr_conf"] = new_conf
+                    meta["plate_score"] = new_score
+                    meta["plate_consensus"] = _safe_float(plate.get("consensus", 0.0))
+                    meta["plate_crop_quality"] = _safe_float(plate.get("crop_quality", 0.0))
                     meta["updated_at"] = current_time
                     print(
                         f"[OCR EVENT ENRICH] camera={camera_id} group={group_id} "
@@ -1884,6 +2007,25 @@ class StreamAIService:
                     and current_time - cached["updated_at"] <= PLATE_EVENT_CACHE_TTL
                 ):
                     candidates_for_vehicle.append(cached["plate"])
+
+            # Re-use hasil debug OCR valid dari metadata jika belum ada kandidat plat untuk kendaraan ini
+            if not candidates_for_vehicle and vehicle_id >= 0:
+                cached_debug = get_valid_debug_ocr(track_id=vehicle_id, vehicle_id=vehicle_id, max_age_seconds=60.0)
+                if cached_debug and cached_debug.get("is_valid") and cached_debug.get("plate_crop") is not None:
+                    candidates_for_vehicle.append({
+                        "text": cached_debug["plate_number"],
+                        "raw_text": cached_debug.get("raw_ocr_text") or cached_debug["plate_number"],
+                        "conf": cached_debug["confidence"],
+                        "confidence": cached_debug["confidence"],
+                        "ocr_conf": cached_debug["confidence"],
+                        "crop": cached_debug["plate_crop"],
+                        "valid": True,
+                        "stable": True,
+                        "total_reads": 1,
+                        "consensus": 1.0,
+                        "crop_quality": 0.85,
+                        "vehicle_track_id": vehicle_id,
+                    })
 
             matching_plates = []
             geometric_plates = []
@@ -1941,13 +2083,17 @@ class StreamAIService:
             if not matching_plates:
                 matching_plates = geometric_plates
 
+            final_plate_candidates = [
+                item for item in matching_plates
+                if self._plate_ready_for_vehicle_event(item)
+                or item.get("review_required")
+            ]
             plate = max(
-                matching_plates,
+                final_plate_candidates,
                 key=lambda item: (
+                    bool(item.get("stable")),
                     bool(item.get("valid")),
-                    bool(item.get("text")),
-                    _safe_float(item.get("ocr_conf", 0.0)),
-                    int(item.get("votes", 0) or 0),
+                    self._plate_event_score(item),
                     _safe_float(item.get("conf", item.get("confidence", 0.0))),
                 ),
                 default=None,
@@ -2018,10 +2164,21 @@ class StreamAIService:
             prev_vehicle_conf = float((previous_meta or {}).get("vehicle_confidence", 0.0) or 0.0)
 
             if not is_new_event and previous_meta is not None:
-                better_ocr = plate_text_corrected and (
+                current_plate_result = {
+                    "plate_text": previous_meta.get("plate_text", ""),
+                    "stable": previous_meta.get("plate_stable", False),
+                    "ocr_conf": previous_meta.get("ocr_conf", 0.0),
+                    "consensus": previous_meta.get("plate_consensus", 0.0),
+                    "crop_quality": previous_meta.get("plate_crop_quality", 0.0),
+                }
+                better_ocr = bool(plate_text_corrected) and (
                     not previous_meta.get("plate_text")
-                    or ocr_conf_now > prev_ocr_conf + CONFIDENCE_IMPROVEMENT_THRESHOLD
-                    or (not previous_meta.get("plate_valid") and (plate or {}).get("valid"))
+                    or self._prefer_plate_event_result(current_plate_result, plate or {})
+                    or (
+                        not previous_meta.get("plate_valid")
+                        and (plate or {}).get("valid")
+                        and (plate or {}).get("stable")
+                    )
                 )
                 better_vehicle = vehicle_conf_now > prev_vehicle_conf + CONFIDENCE_IMPROVEMENT_THRESHOLD
                 needs_driver = driver is not None and not previous_meta.get("has_driver")
@@ -2076,6 +2233,10 @@ class StreamAIService:
                     event_key=event_key,
                     source_type="stream",
                     source_name=None,
+                    ocr_vote_count=int((plate or {}).get("total_reads", 0) or 0),
+                    ocr_consensus=_safe_float((plate or {}).get("consensus", 0.0)),
+                    plate_crop_quality=_safe_float((plate or {}).get("crop_quality", 0.0)),
+                    ocr_stable=bool(plate.get("stable")) if plate else None,
                 )
 
                 self.captured_tracks[event_key] = current_time
@@ -2089,7 +2250,11 @@ class StreamAIService:
                     "event_key": event_key,
                     "plate_text": (plate_text_corrected or previous_plate),
                     "plate_valid": bool((plate or {}).get("valid")) or (previous_meta or {}).get("plate_valid", False),
-                    "ocr_conf": max(ocr_conf_now, prev_ocr_conf),
+                    "plate_stable": bool((plate or {}).get("stable")) or (previous_meta or {}).get("plate_stable", False),
+                    "ocr_conf": ocr_conf_now if plate_text_corrected else prev_ocr_conf,
+                    "plate_score": self._plate_event_score(plate) if plate else 0.0,
+                    "plate_consensus": _safe_float((plate or {}).get("consensus", 0.0)),
+                    "plate_crop_quality": _safe_float((plate or {}).get("crop_quality", 0.0)),
                     "has_driver": (driver is not None or previous_driver),
                     "direction": final_direction,
                     "generation": generation,
@@ -2621,7 +2786,7 @@ class StreamAIService:
             if now - last_seen > lifecycle_ttl:
                 self.track_lifecycle.pop(key, None)
 
-        for cache_name in ("captured_tracks", "saved_plate_events", "saved_event_meta"):
+        for cache_name in ("captured_tracks", "saved_event_meta"):
             cache = getattr(self, cache_name, None)
             if not isinstance(cache, dict):
                 continue
@@ -2999,7 +3164,7 @@ class StreamAIService:
                                         f"Stable: {getattr(track, 'is_stable', False)} (Attempts: {getattr(track, 'ocr_attempts', 0)}/{getattr(track, 'max_ocr_attempts', 5)})"
                                     )
                         finished_items = self._consume_finished_plate(
-                            frame, person_dets, camera_id
+                            person_dets, camera_id
                         )
                         if finished_items:
                             plate_dets.extend(finished_items)
@@ -3027,7 +3192,7 @@ class StreamAIService:
                     plate_dets = list(camera_state.get("last_plate_results", []))
                     if self.plate_ocr is not None:
                         finished_items = self._consume_finished_plate(
-                            frame, person_dets, camera_id
+                            person_dets, camera_id
                         )
                         if finished_items:
                             plate_dets.extend(finished_items)

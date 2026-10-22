@@ -1669,13 +1669,17 @@ async function loadPlateHistory() {
             const detectionId = item.detection_id || '';
             const eventKey = item.event_key || '';
 
+            const statusCode = Number(item.status_code);
+            const voteTitle = item.vote_count
+                ? `OCR dari ${item.vote_count} frame · kesepakatan karakter ${Math.round((item.ocr_consensus || 0) * 100)}%`
+                : 'Hasil OCR belum memiliki data voting frame';
             let statusBadge = '';
-            if (item.status_code === 1) {
+            if (statusCode === 1) {
                 statusBadge = `<span class="det-status-pill status-terbaca">Terbaca</span>`;
-            } else if (item.status_code === 2) {
-                statusBadge = `<span class="det-status-pill status-perlu-cek">Perlu Cek</span>`;
+            } else if (statusCode === 2) {
+                statusBadge = `<span class="det-status-pill status-perlu-cek" title="${esc(voteTitle)}">Perlu Cek</span>`;
             } else {
-                statusBadge = `<span class="det-status-pill status-gagal">Gagal</span>`;
+                statusBadge = `<span class="det-status-pill status-gagal" title="${esc(voteTitle)}">Gagal</span>`;
             }
 
             const photo = item.image_path || '';
@@ -1693,12 +1697,13 @@ async function loadPlateHistory() {
             return `
                 <tr data-plate-id="${plateId}" data-detection-id="${detectionId}" data-event-key="${esc(eventKey)}">
                     <td>${thumbHtml}</td>
-                    <td><span class="target-val-plate">${esc(item.plate)}</span></td>
+                    <td><span class="target-val-plate">${esc(item.plate || '-')}</span></td>
                     <td><div class="det-cctv-name" title="${esc(item.camera)}">${esc(item.camera)}</div></td>
                     <td>
                         <div class="det-conf-container">
                             <div class="det-conf-track">
-                                <div class="det-conf-fill ${confClass}" style="width: ${item.confidence_percent}%;"></div>
+                                <div class="det-conf-fill ${confClass}" style="width: ${item.confidence_percent}%;"
+                                    title="${esc(voteTitle)}"></div>
                             </div>
                             <span class="det-conf-num">${item.confidence_percent}%</span>
                         </div>

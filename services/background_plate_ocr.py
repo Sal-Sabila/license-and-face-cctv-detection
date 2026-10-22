@@ -6,7 +6,7 @@ import cv2
 
 import db
 from ai.plate.detector import PlateDetector
-from ai.plate.ocr import PlateOCR
+from ai.plate.ocr import PlateOCR, get_valid_debug_ocr
 from ai.plate.validator import correct_and_validate_plate, is_valid_plate
 
 
@@ -162,92 +162,118 @@ class BackgroundPlateOCR:
 
         self.total_processed += 1
 
-        # 1. Validasi keberadaan file gambar lokal
-        if not vehicle_image_rel:
-            print(f"[BACKGROUND OCR] Kendaraan ID {detection_id}: vehicle_image_path kosong")
-            db.increment_plate_retry(detection_id)
-            self.total_failed += 1
-            return
+        # 1. Cek apakah sudah ada hasil OCR valid di metadata debug_ocr
+        # untuk kendaraan / track / event yang sama agar tidak OCR ulang dan tidak membuat duplikat
+        cached_valid_ocr = get_valid_debug_ocr(
+            track_id=track_id,
+            vehicle_id=candidate.get("vehicle_id"),
+            event_key=event_key,
+            max_age_seconds=600.0,
+        )
 
-        abs_path = os.path.join(db.BASE_DIR, vehicle_image_rel.replace("/", os.sep))
-        if not os.path.isfile(abs_path):
-            print(f"[BACKGROUND OCR] Kendaraan ID {detection_id}: File gambar tidak ditemukan di disk ({abs_path})")
-            db.increment_plate_retry(detection_id)
-            self.total_failed += 1
-            return
-
-        # 2. Buka gambar kendaraan
-        try:
-            vehicle_img = cv2.imread(abs_path)
-        except Exception as exc:
-            print(f"[BACKGROUND OCR ERROR] Gagal membuka gambar {abs_path}: {exc}")
-            vehicle_img = None
-
-        if vehicle_img is None or vehicle_img.size == 0:
-            print(f"[BACKGROUND OCR] Kendaraan ID {detection_id}: Gagal mendecode gambar ({abs_path})")
-            db.increment_plate_retry(detection_id)
-            self.total_failed += 1
-            return
-
-        # 3. Deteksi plat dari gambar kendaraan
-        try:
-            plates = self.detector.detect(vehicle_img)
-        except Exception as exc:
-            print(f"[BACKGROUND OCR ERROR] Kendaraan ID {detection_id}: Deteksi plat gagal: {exc}")
-            plates = []
-
-        if not plates:
-            # Tidak ada plat terdeteksi pada capture ini
-            db.increment_plate_retry(detection_id)
-            self.total_failed += 1
-            return
-
-        # 4. Coba OCR pada setiap plat yang terdeteksi (diurutkan berdasarkan confidence deteksi)
         best_ocr_candidate = None
+        if cached_valid_ocr is not None and cached_valid_ocr.get("is_valid"):
+            c_plate = cached_valid_ocr["plate_number"]
+            # Validasi ketat aturan plat nomor Indonesia (menolak INVALID / EMPTY)
+            if is_valid_plate(c_plate) and c_plate not in ("EMPTY", "-", "INVALID"):
+                print(
+                    f"[BACKGROUND OCR] ✅ Menggunakan hasil OCR tervalidasi dari metadata debug_ocr: "
+                    f"'{c_plate}' (conf={cached_valid_ocr['confidence']:.2f}) "
+                    f"untuk kendaraan ID {detection_id} tanpa OCR ulang."
+                )
+                best_ocr_candidate = {
+                    "plate_crop": cached_valid_ocr["plate_crop"],
+                    "plate_conf": float(candidate.get("plate_detection_confidence") or 0.85),
+                    "ocr_conf": float(cached_valid_ocr["confidence"]),
+                    "raw_text": cached_valid_ocr.get("raw_ocr_text") or c_plate,
+                    "corrected_text": c_plate,
+                    "is_valid": True,
+                }
 
-        for plate in plates:
-            plate_crop = plate.get("crop")
-            plate_conf = float(plate.get("confidence") or 0.0)
+        # 2. Fallback ke deteksi plat dan OCR normal jika metadata valid tidak tersedia
+        if best_ocr_candidate is None:
+            # Validasi keberadaan file gambar lokal
+            if not vehicle_image_rel:
+                print(f"[BACKGROUND OCR] Kendaraan ID {detection_id}: vehicle_image_path kosong")
+                db.increment_plate_retry(detection_id)
+                self.total_failed += 1
+                return
 
-            if plate_crop is None or plate_crop.size == 0:
-                continue
+            abs_path = os.path.join(db.BASE_DIR, vehicle_image_rel.replace("/", os.sep))
+            if not os.path.isfile(abs_path):
+                print(f"[BACKGROUND OCR] Kendaraan ID {detection_id}: File gambar tidak ditemukan di disk ({abs_path})")
+                db.increment_plate_retry(detection_id)
+                self.total_failed += 1
+                return
 
             try:
-                ocr_result = self.ocr.read(plate_crop)
+                vehicle_img = cv2.imread(abs_path)
             except Exception as exc:
-                print(f"[BACKGROUND OCR ERROR] Kendaraan ID {detection_id}: OCR read error: {exc}")
-                continue
+                print(f"[BACKGROUND OCR ERROR] Gagal membuka gambar {abs_path}: {exc}")
+                vehicle_img = None
 
-            if not ocr_result:
-                continue
+            if vehicle_img is None or vehicle_img.size == 0:
+                print(f"[BACKGROUND OCR] Kendaraan ID {detection_id}: Gagal mendecode gambar ({abs_path})")
+                db.increment_plate_retry(detection_id)
+                self.total_failed += 1
+                return
+            try:
+                plates = self.detector.detect(vehicle_img)
+            except Exception as exc:
+                print(f"[BACKGROUND OCR ERROR] Kendaraan ID {detection_id}: Deteksi plat gagal: {exc}")
+                plates = []
 
-            raw_text = str(ocr_result.get("raw_text") or "").strip()
-            corrected_text = str(ocr_result.get("text") or "").strip()
-            ocr_conf = float(ocr_result.get("confidence") or 0.0)
-            is_valid = bool(ocr_result.get("is_indonesia_pattern"))
+            if not plates:
+                # Tidak ada plat terdeteksi pada capture ini
+                db.increment_plate_retry(detection_id)
+                self.total_failed += 1
+                return
 
-            # Verifikasi tambahan dengan validator plat Indonesia
-            if not is_valid and raw_text:
-                val_res = correct_and_validate_plate(raw_text, ocr_conf)
-                if val_res.get("valid"):
-                    corrected_text = val_res.get("corrected") or corrected_text
-                    is_valid = True
+            ocr_context = f"t{track_id or 'none'}_det{detection_id}"
 
-            # Kondisi diterima:
-            # - Plat valid menurut pola Indonesia, ATAU
-            # - Confidence OCR cukup tinggi (>= 0.45) dan memiliki teks
-            if is_valid or (ocr_conf >= 0.45 and len(corrected_text) >= 3):
-                best_ocr_candidate = {
-                    "plate_crop": plate_crop,
-                    "plate_conf": plate_conf,
-                    "ocr_conf": ocr_conf,
-                    "raw_text": raw_text or corrected_text,
-                    "corrected_text": corrected_text,
-                    "is_valid": is_valid,
-                }
-                # Jika valid dan confidence tinggi, cukup ambil yang terbaik ini
-                if is_valid and ocr_conf >= 0.70:
-                    break
+            for plate in plates:
+                plate_crop = plate.get("crop")
+                plate_conf = float(plate.get("confidence") or 0.0)
+
+                if plate_crop is None or plate_crop.size == 0:
+                    continue
+
+                try:
+                    ocr_result = self.ocr.read(plate_crop, context=ocr_context)
+                except Exception as exc:
+                    print(f"[BACKGROUND OCR ERROR] Kendaraan ID {detection_id}: OCR read error: {exc}")
+                    continue
+
+                if not ocr_result:
+                    continue
+
+                raw_text = str(ocr_result.get("raw_text") or "").strip()
+                corrected_text = str(ocr_result.get("text") or "").strip()
+                ocr_conf = float(ocr_result.get("confidence") or 0.0)
+                is_valid = bool(ocr_result.get("is_indonesia_pattern"))
+
+                # Verifikasi tambahan dengan validator plat Indonesia
+                if not is_valid and raw_text:
+                    val_res = correct_and_validate_plate(raw_text, ocr_conf)
+                    if val_res.get("valid"):
+                        corrected_text = val_res.get("corrected") or corrected_text
+                        is_valid = True
+
+                # Kondisi diterima:
+                # - Plat valid menurut pola Indonesia, ATAU
+                # - Confidence OCR cukup tinggi (>= 0.45) dan memiliki teks
+                if is_valid or (ocr_conf >= 0.45 and len(corrected_text) >= 2):
+                    best_ocr_candidate = {
+                        "plate_crop": plate_crop,
+                        "plate_conf": plate_conf,
+                        "ocr_conf": ocr_conf,
+                        "raw_text": raw_text or corrected_text,
+                        "corrected_text": corrected_text,
+                        "is_valid": is_valid,
+                    }
+                    # Jika valid dan confidence tinggi, cukup ambil yang terbaik ini
+                    if is_valid and ocr_conf >= 0.70:
+                        break
 
         # 5. Simpan hasil ke database jika ditemukan plat yang terbaca
         if best_ocr_candidate is not None:
@@ -257,6 +283,19 @@ class BackgroundPlateOCR:
                 valid_event_key = db.ensure_vehicle_event_key(detection_id, camera_id)
 
             try:
+                crop_quality = 0.5
+                if best_ocr_candidate.get("plate_crop") is not None:
+                    try:
+                        pc = best_ocr_candidate["plate_crop"]
+                        ch, cw = pc.shape[:2]
+                        cgray = cv2.cvtColor(pc, cv2.COLOR_BGR2GRAY) if len(pc.shape) == 3 else pc
+                        csharp = float(cv2.Laplacian(cgray, cv2.CV_64F).var())
+                        cres = min(1.0, (cw * ch) / float(192 * 64))
+                        cfocus = min(1.0, csharp / 150.0)
+                        crop_quality = max(0.0, min(1.0, 0.55 * cres + 0.45 * cfocus))
+                    except Exception:
+                        crop_quality = 0.5
+
                 save_res = db.save_detection_event(
                     camera_id=camera_id,
                     plate_number=best_ocr_candidate["corrected_text"],
@@ -269,6 +308,10 @@ class BackgroundPlateOCR:
                     vehicle_type=vehicle_type,
                     event_key=valid_event_key,
                     source_type="stream",
+                    ocr_vote_count=1,
+                    ocr_consensus=0.0,
+                    plate_crop_quality=crop_quality,
+                    ocr_stable=False,
                 )
 
                 print(
