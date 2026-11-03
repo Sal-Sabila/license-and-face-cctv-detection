@@ -377,13 +377,17 @@ def _get_terbaca_detections_paginated(
 
     with db.get_db() as conn:
         with conn.cursor() as cur:
-            all_ids = db._dedup_event_ids(cur, where_sql, params)
-            total = len(all_ids)
+            count_sql = f"""
+                SELECT COUNT(*) AS total
+                FROM full_detection fd
+                LEFT JOIN plate p ON fd.plate_id = p.plate_id
+                LEFT JOIN cameras c ON fd.camera_id = c.camera_id
+                WHERE {where_sql}
+            """
+            cur.execute(count_sql, params)
+            total = cur.fetchone()["total"]
             if total == 0:
                 return {"items": [], "total": 0, "page": page, "limit": limit, "total_pages": 1}
-
-            page_ids = all_ids[offset: offset + limit]
-            placeholders = ",".join(["%s"] * len(page_ids))
 
             data_sql = f"""
                 SELECT fd.detection_id, fd.plate_id, fd.camera_id, fd.track_id,
@@ -403,10 +407,11 @@ def _get_terbaca_detections_paginated(
                 FROM full_detection fd
                 LEFT JOIN plate p ON fd.plate_id = p.plate_id
                 LEFT JOIN cameras c ON fd.camera_id = c.camera_id
-                WHERE fd.detection_id IN ({placeholders})
-                ORDER BY fd.created_at DESC
+                WHERE {where_sql}
+                ORDER BY fd.created_at DESC, fd.detection_id DESC
+                LIMIT %s OFFSET %s
             """
-            cur.execute(data_sql, page_ids)
+            cur.execute(data_sql, list(params) + [limit, offset])
             rows = cur.fetchall()
 
             items = []
@@ -794,7 +799,8 @@ def get_settings():
     """Mengambil konfigurasi sistem & status diagnostik dari MySQL."""
     try:
         settings = db.get_system_settings()
-        diagnostics = db.get_system_diagnostics()
+        include_storage = request.args.get("storage", "0").lower() in ("1", "true", "yes")
+        diagnostics = db.get_system_diagnostics(include_storage=include_storage)
         return jsonify({
             "success": True,
             "settings": settings,
@@ -802,7 +808,6 @@ def get_settings():
         })
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
-
 
 @plate_bp.route("/settings", methods=["POST"])
 def save_settings():

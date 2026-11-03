@@ -94,3 +94,5 @@ pymysql
 supervision
 imageio-ffmpeg
 onnxruntime
+gunicorn
+waitress

@@ -1288,9 +1288,10 @@ async function initDashboard() {
     await updateDashboardMetrics();
     await refreshRecentList();
 
-    // Auto polling setiap 3.5 detik untuk dashboard realtime
+    // Auto polling setiap 5 detik untuk dashboard realtime (adaptif jika tab tidak aktif)
     if (!window._dashboardInterval) {
         window._dashboardInterval = setInterval(async () => {
+            if (document.hidden) return;
             if (window.location.pathname === '/' || window.location.pathname === '/dashboard') {
                 await updateDashboardMetrics();
                 await refreshRecentList();
@@ -1299,7 +1300,14 @@ async function initDashboard() {
                     lastOccurrenceRefresh = Date.now();
                 }
             }
-        }, 3500);
+        }, 5000);
+
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden && (window.location.pathname === '/' || window.location.pathname === '/dashboard')) {
+                updateDashboardMetrics();
+                refreshRecentList();
+            }
+        });
     }
 }
 
@@ -2772,7 +2780,9 @@ async function initStatistics() {
 
 async function loadSettingsFromDb() {
     try {
-        const res = await json('/api/settings');
+        const needsStorage = Boolean(document.getElementById('diagStorage'));
+        const url = needsStorage ? '/api/settings?storage=1' : '/api/settings';
+        const res = await json(url);
         const settings = res.settings || {};
         const diag = res.diagnostics || {};
 
